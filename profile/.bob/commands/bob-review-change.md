@@ -1,4 +1,25 @@
-<!-- bob-contract: {"argument":"$1","validatesWorkPacket":true,"targetedContext":true,"stopOnMissingEvidence":true,"output":"team-bob-work/<Task>/drafts/code-review.md"} -->
-# /bob-review-change $1
+---
+description: Produce an evidence-backed change review.
+argument-hint: <work-packet-path>
+---
+# /bob-review-change
 
-Accept `$1` as the work-packet path. Validate it, inspect only the packet's Allowed Files and linked requirements, and write only `team-bob-work/<Task>/drafts/code-review.md` using the template and review rubric. Require evidence for every finding. Stop without output when the work packet, diff evidence, or traceability evidence is missing.
+## Input
+
+- Work-packet path: `$1`.
+
+## Preconditions
+
+- Parse the canonical JSON object in `$1` and validate it with `team-bob/config/work-packet.schema.json`.
+
+## Context
+
+- Inspect only targeted Allowed Files and linked requirement evidence.
+
+## Output
+
+- Write only `team-bob-work/<Task>/drafts/code-review.md` from the template and review rubric.
+
+## Stop Conditions
+
+- Stop without output on missing evidence, diff evidence, or traceability evidence.

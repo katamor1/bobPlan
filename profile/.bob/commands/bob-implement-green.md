@@ -1,8 +1,36 @@
-<!-- bob-contract: {"argument":"$1","validatesWorkPacket":true,"targetedContext":true,"stopOnMissingEvidence":true,"output":"team-bob-work/<Task>/results/build-result.md","workflow":["edit","Make","repair","final-Rebuild"],"maxRepairCycles":2,"readyAfter":"final-rebuild-success-and-integrity"} -->
-# /bob-implement-green $1
+---
+description: Run the constrained Green legacy C/C++ edit and local build loop.
+argument-hint: <work-packet-path>
+---
+# /bob-implement-green
 
-Accept `$1` as the work-packet path. Validate it and proceed only when the packet is Green, Open QA is empty, all impacts are permitted, the working copy is clean, and both `Autonomous-Edit-Build-Approved: YES` and `Soft-Execute-Risk-Accepted: YES` are present. Read only targeted context.
+## Input
 
-Edit only C/C++ source or header files in Work Packet Allowed Files with extensions `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`, or `.inl`; never edit `.rc`, `.dsp`, `.dsw`, `.def`, `.idl`, `.mak`, or any other file. Preserve CP932, no BOM, and CRLF. Do not attach a debugger or execute breakpoints or steps.
+- Work-packet path: `$1`.
 
-Own exactly this loop: edit, Make, at most two evidence-based repairs, then final Rebuild. Write only allowed source/header edits and `team-bob-work/<Task>/results/build-result.md`. Never run Bazaar mutation commands, never commit/merge/tag, and never access actual machines, control networks, mainline, or secrets. Emit `READY_FOR_HUMAN_REVIEW` only after final Rebuild succeeds and integrity passes. Stop on missing evidence, an environment failure, a timeout, a forbidden impact, or an integrity failure.
+## Preconditions
+
+- Parse the canonical JSON object in `$1` and validate it with `team-bob/config/work-packet.schema.json`.
+- Require Green risk, empty Open QA, YES impact-clear fields, YES Clean Working Copy, both approvers, and both explicit YES approvals.
+
+## Context
+
+- Read only targeted source and build-profile context named by the packet.
+- Work Packet Allowed Files is mandatory. Edit only allowed `.c`, `.cc`, `.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, `.hxx`, or `.inl` files; never edit `.rc`, `.dsp`, `.dsw`, `.def`, `.idl`, `.mak`, or any file outside Allowed Files.
+
+## Output
+
+- Write only allowed legacy source/header edits and `team-bob-work/<Task>/results/build-result.md`.
+
+## Green Workflow
+
+1. Edit only the approved legacy source/header files and preserve CP932, no BOM, and CRLF.
+2. Make with the approved local build profile.
+3. At most two evidence-based repairs may follow a retryable code failure.
+4. Final Rebuild and integrity verification are required.
+
+Emit `READY_FOR_HUMAN_REVIEW` only after success and integrity verification. Never run Bazaar mutation commands, commit, merge, tag, attach a debugger, or access actual machines, control networks, mainline, or secrets.
+
+## Stop Conditions
+
+- Stop on missing evidence, forbidden impact, environment failure, timeout, integrity failure, or non-retryable code failure.

@@ -1,4 +1,25 @@
-<!-- bob-contract: {"argument":"$1","validatesWorkPacket":true,"targetedContext":true,"stopOnMissingEvidence":true,"output":"team-bob-work/<Task>/drafts/impact-analysis.md"} -->
-# /bob-analyze-impact $1
+---
+description: Analyze targeted engineering and delivery impacts.
+argument-hint: <work-packet-path>
+---
+# /bob-analyze-impact
 
-Accept `$1` as the work-packet path. Validate it before work and inspect only the targeted files, branch metadata, and requirement evidence named there. Write only `team-bob-work/<Task>/drafts/impact-analysis.md` using the template. Assess RT, safety, board, driver, ABI, build, and customer-branch impact. Stop without output when evidence is missing or an impact cannot be classified.
+## Input
+
+- Work-packet path: `$1`.
+
+## Preconditions
+
+- Parse the canonical JSON object in `$1` and validate it with `team-bob/config/work-packet.schema.json`.
+
+## Context
+
+- Inspect only targeted files, branch metadata, and requirement evidence named by the packet.
+
+## Output
+
+- Write only `team-bob-work/<Task>/drafts/impact-analysis.md` from the template.
+
+## Stop Conditions
+
+- Stop without output on missing evidence or an impact that cannot be classified.

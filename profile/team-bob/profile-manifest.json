@@ -14,7 +14,7 @@
     "workPacketSchema": "config/work-packet.schema.json",
     "buildTargetSchema": "config/vc6-build-targets.schema.json",
     "buildTargets": "config/vc6-build-targets.json",
-    "modes": ".bob/custom_modes.yaml",
-    "rules": "rules/"
+    "modes": "../.bob/custom_modes.yaml",
+    "rules": "../.bob/rules/"
   }
 }

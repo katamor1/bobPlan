@@ -1,4 +1,3 @@
-<!-- bob-contract: {"requiredFields":["Task ID","Exception","Evidence","Human Approver","Soft-Execute-Risk-Accepted","Expiry","Disposition"]} -->
 # Exception Record
 
 | Field | Value |

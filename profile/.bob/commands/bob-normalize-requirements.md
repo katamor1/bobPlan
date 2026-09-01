@@ -1,4 +1,25 @@
-<!-- bob-contract: {"argument":"$1","validatesWorkPacket":true,"targetedContext":true,"stopOnMissingEvidence":true,"output":"team-bob-work/<Task>/drafts/requirement-ledger.csv"} -->
-# /bob-normalize-requirements $1
+---
+description: Normalize immutable requirement evidence into a ledger.
+argument-hint: <work-packet-path>
+---
+# /bob-normalize-requirements
 
-Accept `$1` as the work-packet path. Validate it against the installed work-packet schema, including immutable Word, QA, and specification baselines. Read only targeted source evidence identified by the packet. Write only `team-bob-work/<Task>/drafts/requirement-ledger.csv` using the template. Preserve stable ReqIDs and immutable source anchors. Stop without output when evidence, a baseline, or a required human approval is missing.
+## Input
+
+- Work-packet path: `$1`.
+
+## Preconditions
+
+- Parse the canonical JSON object in `$1` and validate it with `team-bob/config/work-packet.schema.json`.
+
+## Context
+
+- Read only targeted baseline and source evidence named by the packet.
+
+## Output
+
+- Write only `team-bob-work/<Task>/drafts/requirement-ledger.csv` from the template.
+
+## Stop Conditions
+
+- Stop without output on missing evidence, baseline, or required human approval.

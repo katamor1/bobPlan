@@ -1,4 +1,3 @@
-<!-- bob-contract: {"criteria":["traceability","realtime-safety","allowed-files","integrity","build-evidence"]} -->
 # Review Rubric
 
 | Criterion | Pass Evidence |

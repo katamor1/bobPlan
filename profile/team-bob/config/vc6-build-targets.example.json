@@ -3,10 +3,26 @@
     {
       "id": "example-local-vc6",
       "enabled": false,
-      "workspace": "C:\\approved-local-workspace\\project.dsw",
-      "makeCommand": "msdev project.dsw /make \"Project - Win32 Release\"",
-      "rebuildCommand": "msdev project.dsw /rebuild \"Project - Win32 Release\"",
-      "timeoutSeconds": 900
+      "projectFile": "project/project.dsw",
+      "target": "Project - Win32 Release",
+      "timeoutSeconds": 900,
+      "expectedArtifacts": ["bin/project.exe"],
+      "excludePatterns": ["**/*.pdb"],
+      "outputLogPattern": "^.*$",
+      "successPattern": "0 error\\(s\\)",
+      "compilerErrorPattern": "error C[0-9]+",
+      "linkerErrorPattern": "LNK[0-9]+",
+      "environmentErrorPattern": "not recognized as an internal or external command",
+      "qualification": {
+        "msdevHelp": true,
+        "makeSucceeded": true,
+        "rebuildSucceeded": true,
+        "compileFailureObserved": true,
+        "linkFailureObserved": true,
+        "pcId": "qualified-lab-pc-01",
+        "recordId": "qualification-record-001",
+        "recordedAt": "2026-09-02T00:00:00Z"
+      }
     }
   ]
 }

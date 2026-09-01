@@ -6,21 +6,20 @@
   "additionalProperties": false,
   "required": ["profiles"],
   "properties": {
-    "profiles": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["id", "enabled", "workspace", "makeCommand", "rebuildCommand", "timeoutSeconds"],
-        "properties": {
-          "id": {"type": "string", "minLength": 1},
-          "enabled": {"type": "boolean"},
-          "workspace": {"type": "string", "minLength": 1},
-          "makeCommand": {"type": "string", "minLength": 1},
-          "rebuildCommand": {"type": "string", "minLength": 1},
-          "timeoutSeconds": {"type": "integer", "minimum": 1}
-        }
+    "profiles": {"type": "array", "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "enabled", "projectFile", "target", "timeoutSeconds", "expectedArtifacts", "excludePatterns", "outputLogPattern", "successPattern", "compilerErrorPattern", "linkerErrorPattern", "environmentErrorPattern", "qualification"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "enabled": {"type": "boolean"},
+        "projectFile": {"type": "string", "pattern": "^(?![A-Za-z]:|/|\\\\)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+\\.(?:dsw|dsp)$"},
+        "target": {"type": "string", "minLength": 1}, "timeoutSeconds": {"type": "integer", "minimum": 1},
+        "expectedArtifacts": {"type": "array", "items": {"type": "string", "minLength": 1}}, "excludePatterns": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "outputLogPattern": {"type": "string", "minLength": 1}, "successPattern": {"type": "string", "minLength": 1}, "compilerErrorPattern": {"type": "string", "minLength": 1}, "linkerErrorPattern": {"type": "string", "minLength": 1}, "environmentErrorPattern": {"type": "string", "minLength": 1},
+        "qualification": {"type": "object", "additionalProperties": false, "required": ["msdevHelp", "makeSucceeded", "rebuildSucceeded", "compileFailureObserved", "linkFailureObserved", "pcId", "recordId", "recordedAt"], "properties": {
+          "msdevHelp": {"type": "boolean"}, "makeSucceeded": {"type": "boolean"}, "rebuildSucceeded": {"type": "boolean"}, "compileFailureObserved": {"type": "boolean"}, "linkFailureObserved": {"type": "boolean"},
+          "pcId": {"type": "string", "minLength": 1}, "recordId": {"type": "string", "minLength": 1}, "recordedAt": {"type": "string", "minLength": 1}
+        }}
       }
-    }
+    }}
   }
 }
