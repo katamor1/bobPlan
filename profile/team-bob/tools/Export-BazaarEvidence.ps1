@@ -13,30 +13,44 @@ try {
     $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
     $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
     $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
-    $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath
+    $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath -BazaarOnly
 
-    $preSource = @(Get-TeamBobInventory $context.BazaarRoot @('.bzr', 'team-bob-work'))
-    $preBzr = @(Get-TeamBobInventory (Join-Path $context.BazaarRoot '.bzr'))
+    $baseline = Get-TeamBobProtectedSnapshot $context
     $queries = @(
-        [pscustomobject]@{ Name = 'status'; Arguments = @('status', '--short'); File = 'bazaar-status.txt' },
-        [pscustomobject]@{ Name = 'diff'; Arguments = @('diff'); File = 'bazaar-diff.patch' },
-        [pscustomobject]@{ Name = 'nick'; Arguments = @('nick'); File = 'bazaar-nick.txt' },
-        [pscustomobject]@{ Name = 'revision'; Arguments = @('version-info', '--custom', '--template={revision_id}'); File = 'bazaar-revision-id.txt' }
+        [pscustomobject]@{ Name = 'status'; Arguments = @('status', '--short'); AllowedExitCodes = @(0); File = 'bazaar-status.txt' },
+        [pscustomobject]@{ Name = 'diff'; Arguments = @('diff'); AllowedExitCodes = @(0, 1); File = 'bazaar-diff.patch' },
+        [pscustomobject]@{ Name = 'nick'; Arguments = @('nick'); AllowedExitCodes = @(0); File = 'bazaar-nick.txt' },
+        [pscustomobject]@{ Name = 'revision'; Arguments = @('version-info', '--custom', '--template={revision_id}'); AllowedExitCodes = @(0); File = 'bazaar-revision-id.txt' }
     )
     $outputs = @{}
     $commandRecords = @()
-    foreach ($query in $queries) {
-        try { $queryResult = Invoke-TeamBobBazaarQuery $environment.bazaarPath $context.BazaarRoot $query.Arguments } catch {
-            if ($null -ne $_.Exception.Data['NativeExitCode'] -and [int]$_.Exception.Data['NativeExitCode'] -gt 0) { $nativeExitCode = [int]$_.Exception.Data['NativeExitCode'] }
-            throw
+    $operationFailure = $null
+    $integrityFailure = $null
+    try {
+        foreach ($query in $queries) {
+            try { $queryResult = Invoke-TeamBobBazaarQuery $environment.bazaarPath $context.BazaarRoot $query.Arguments $query.AllowedExitCodes } catch {
+                if ($null -ne $_.Exception.Data['NativeExitCode'] -and [int]$_.Exception.Data['NativeExitCode'] -gt 0) { $nativeExitCode = [int]$_.Exception.Data['NativeExitCode'] }
+                $operationFailure = $_.Exception
+                break
+            }
+            $outputs[$query.Name] = $queryResult.Output
+            $commandRecords += [pscustomobject]@{ command = ($query.Arguments -join ' '); exitCode = $queryResult.ExitCode }
         }
-        $outputs[$query.Name] = $queryResult.Output
-        $commandRecords += [pscustomobject]@{ command = ($query.Arguments -join ' '); exitCode = $queryResult.ExitCode }
+        if ($null -eq $operationFailure) {
+            $nick = Get-TeamBobNormalizedProcessText ([string]$outputs['nick'])
+            $revision = Get-TeamBobNormalizedProcessText ([string]$outputs['revision'])
+            if ([string]::IsNullOrWhiteSpace($nick) -or [string]::IsNullOrWhiteSpace($revision)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar nick or full revision id evidence is empty.') }
+            if (-not $nick.Equals($context.BazaarBranch, [System.StringComparison]::Ordinal) -or -not $revision.Equals($context.BazaarRevision, [System.StringComparison]::Ordinal)) {
+                throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Current Bazaar branch nick or full revision id does not match the Work Packet baseline.')
+            }
+        }
+    } catch {
+        $operationFailure = $_.Exception
+    } finally {
+        try { Assert-TeamBobProtectedSnapshot $baseline (Get-TeamBobProtectedSnapshot $context) 'Bazaar evidence queries' } catch { $integrityFailure = $_.Exception }
     }
-    if ([string]::IsNullOrWhiteSpace([string]$outputs['nick']) -or [string]::IsNullOrWhiteSpace([string]$outputs['revision'])) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Bazaar nick or full revision id evidence is empty.') }
-    $postSource = @(Get-TeamBobInventory $context.BazaarRoot @('.bzr', 'team-bob-work'))
-    $postBzr = @(Get-TeamBobInventory (Join-Path $context.BazaarRoot '.bzr'))
-    if (($preSource -join "`n") -cne ($postSource -join "`n") -or ($preBzr -join "`n") -cne ($postBzr -join "`n")) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar evidence queries changed source or .bzr state.') }
+    if ($null -ne $integrityFailure) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("Evidence postflight integrity proof failed: " + $integrityFailure.Message) 30) }
+    if ($null -ne $operationFailure) { throw $operationFailure }
 
     $resultDirectory = Join-Path (Split-Path -Parent $workPacketFull) 'results'
     if (Test-Path -LiteralPath $resultDirectory -PathType Leaf) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Task results path is an existing file.') }
@@ -54,6 +68,8 @@ try {
     exit 0
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
+    if ($null -ne $_.Exception.Data['TeamBobStatus'] -and [string]$_.Exception.Data['TeamBobStatus'] -eq 'INTEGRITY_FAILED') { $nativeExitCode = 30 }
+    if ($null -ne $_.Exception.Data['NativeExitCode'] -and [int]$_.Exception.Data['NativeExitCode'] -gt 0) { $nativeExitCode = [int]$_.Exception.Data['NativeExitCode'] }
     if ($nativeExitCode -lt 1 -or $nativeExitCode -gt 255) { $nativeExitCode = 1 }
     exit $nativeExitCode
 }

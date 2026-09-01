@@ -37,12 +37,15 @@ function Write-Cp932Fixture {
 }
 
 function Write-Task3PacketFixture {
-    param([string]$Path, [string]$BazaarRoot, [string]$TaskId, [string[]]$AllowedFiles, [string]$BuildProfileId)
+    param(
+        [string]$Path, [string]$BazaarRoot, [string]$TaskId, [string[]]$AllowedFiles, [string]$BuildProfileId,
+        [string[]]$ForbiddenAreas = @('actual-machine', 'control-network', 'mainline', 'secrets')
+    )
     $packet = [ordered]@{
         'Profile Version' = '0.1.0-poc'; 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Fixture Customer'
         'ReqIDs' = @('REQ-TASK3-001'); 'Word Baseline' = 'WORD-1'; 'QA Baseline' = 'QA-1'; 'Spec Baseline' = 'SPEC-1'
-        'Bazaar Root' = [System.IO.Path]::GetFullPath($BazaarRoot); 'Bazaar Branch' = 'fixture-branch'; 'Bazaar Full Revision ID' = 'fixture-revision-id'
-        'Allowed Files' = @($AllowedFiles); 'Forbidden Areas' = @('actual-machine', 'control-network', 'mainline', 'secrets')
+        'Bazaar Root' = [System.IO.Path]::GetFullPath($BazaarRoot); 'Bazaar Branch' = 'fixture-branch'; 'Bazaar Full Revision ID' = 'fixture-revision-id-full-123'
+        'Allowed Files' = @($AllowedFiles); 'Forbidden Areas' = @($ForbiddenAreas)
         'RT Impact' = 'None'; 'Safety Impact' = 'None'; 'Board Impact' = 'None'; 'Driver Impact' = 'None'; 'ABI Impact' = 'None'; 'Build Impact' = 'Fixture'; 'Customer Branch Impact' = 'None'
         'RT Impact Clear' = 'YES'; 'Safety Impact Clear' = 'YES'; 'Board Impact Clear' = 'YES'; 'Driver Impact Clear' = 'YES'; 'ABI Impact Clear' = 'YES'; 'Build Impact Clear' = 'YES'; 'Customer Branch Impact Clear' = 'YES'
         'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $BuildProfileId
@@ -63,28 +66,43 @@ using System;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Diagnostics;
+using System.Reflection;
 public static class FakeMsdev {
     public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "--child") { Thread.Sleep(12000); return 0; }
         string commandLog = Environment.GetEnvironmentVariable("BOB3_MSDEV_COMMAND_LOG");
         if (!String.IsNullOrEmpty(commandLog)) File.AppendAllText(commandLog, String.Join("\t", args) + Environment.NewLine, new UTF8Encoding(false));
         string mode = Environment.GetEnvironmentVariable("BOB3_MSDEV_MODE") ?? "success";
+        if (mode == "timeout-child") {
+            ProcessStartInfo child = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--child");
+            child.UseShellExecute = false;
+            Process.Start(child);
+            Thread.Sleep(12000);
+        }
         int sleep;
         if (Int32.TryParse(Environment.GetEnvironmentVariable("BOB3_MSDEV_SLEEP_MS"), out sleep) && sleep > 0) Thread.Sleep(sleep);
         string mutation = Environment.GetEnvironmentVariable("BOB3_MSDEV_MUTATE_PATH");
         if (!String.IsNullOrEmpty(mutation)) File.WriteAllText(mutation, "mutated\r\n", Encoding.GetEncoding(932));
+        string deletePath = Environment.GetEnvironmentVariable("BOB3_MSDEV_DELETE_PATH");
+        if (!String.IsNullOrEmpty(deletePath) && File.Exists(deletePath)) File.Delete(deletePath);
         string outputLog = null;
         for (int index = 0; index + 1 < args.Length; index++) if (String.Equals(args[index], "/OUT", StringComparison.OrdinalIgnoreCase)) outputLog = args[index + 1];
         string message;
         int exitCode;
         if (mode == "compile") { message = "src\\example.cpp(3) : error C2143: fixture compile failure"; exitCode = 1; }
+        else if (mode == "compile-bare") { message = "example.cpp(3) : error C2143: ambiguous compile failure"; exitCode = 1; }
         else if (mode == "compile-other") { message = "src\\other.cpp(3) : error C2143: unrelated compile failure"; exitCode = 1; }
-        else if (mode == "link") { message = "example.obj : error LNK2001: fixture unresolved external"; exitCode = 1; }
+        else if (mode == "link") { message = "src\\example.obj : error LNK2001: fixture unresolved external"; exitCode = 1; }
+        else if (mode == "cp932-log") { message = "src\\日本.cpp(3) : error C2143: fixture compile failure"; exitCode = 1; }
+        else if (mode == "invalid-log") { message = "invalid log"; exitCode = 1; }
         else if (mode == "environment") { message = "MSDEV fatal environment failure"; exitCode = 2; }
         else if (mode == "no-success") { message = "build ended without a success marker"; exitCode = 0; }
         else { message = "0 error(s), 0 warning(s)"; exitCode = 0; }
         if (!String.IsNullOrEmpty(outputLog)) {
             Directory.CreateDirectory(Path.GetDirectoryName(outputLog));
-            File.WriteAllText(outputLog, message + Environment.NewLine, new UTF8Encoding(false));
+            if (mode == "invalid-log") File.WriteAllBytes(outputLog, new byte[] { 0x81 });
+            else File.WriteAllText(outputLog, message + Environment.NewLine, Encoding.GetEncoding(932));
         }
         if ((mode == "success" || mode == "no-success") && mode != "artifact-missing") {
             string artifact = Path.Combine(Environment.CurrentDirectory, "bin", "fixture.exe");
@@ -92,8 +110,13 @@ public static class FakeMsdev {
             File.WriteAllText(artifact, "fixture artifact", new UTF8Encoding(false));
         }
         if (mode == "artifact-missing") { message = "0 error(s), 0 warning(s)"; exitCode = 0; }
-        Console.Out.WriteLine(message);
+        Console.Out.WriteLine(mode == "cp932-log" || mode == "invalid-log" ? "build failed; inspect /OUT" : message);
         Console.Error.WriteLine("fixture stderr");
+        string blockResultDirectory = Environment.GetEnvironmentVariable("BOB3_MSDEV_BLOCK_RESULT_DIRECTORY");
+        if (!String.IsNullOrEmpty(blockResultDirectory)) {
+            if (Directory.Exists(blockResultDirectory)) Directory.Delete(blockResultDirectory, true);
+            File.WriteAllText(blockResultDirectory, "blocked", new UTF8Encoding(false));
+        }
         return exitCode;
     }
 }
@@ -105,10 +128,23 @@ using System.Text;
 public static class FakeBazaar {
     public static int Main(string[] args) {
         string commandLog = Environment.GetEnvironmentVariable("BOB3_BZR_COMMAND_LOG");
-        if (!String.IsNullOrEmpty(commandLog)) File.AppendAllText(commandLog, String.Join(" ", args) + Environment.NewLine, new UTF8Encoding(false));
         string command = args.Length == 0 ? "" : args[0];
+        int occurrence = 1;
+        if (!String.IsNullOrEmpty(commandLog) && File.Exists(commandLog)) {
+            foreach (string prior in File.ReadAllLines(commandLog)) if (prior == command || prior.StartsWith(command + " ", StringComparison.Ordinal)) occurrence++;
+        }
+        if (!String.IsNullOrEmpty(commandLog)) File.AppendAllText(commandLog, String.Join(" ", args) + Environment.NewLine, new UTF8Encoding(false));
+        string mutateCommand = Environment.GetEnvironmentVariable("BOB3_BZR_MUTATE_COMMAND");
+        int mutateOccurrence;
+        if (!Int32.TryParse(Environment.GetEnvironmentVariable("BOB3_BZR_MUTATE_OCCURRENCE"), out mutateOccurrence)) mutateOccurrence = 1;
+        if (String.Equals(command, mutateCommand, StringComparison.OrdinalIgnoreCase) && occurrence == mutateOccurrence) {
+            string mutatePath = Environment.GetEnvironmentVariable("BOB3_BZR_MUTATE_PATH");
+            if (!String.IsNullOrEmpty(mutatePath)) File.WriteAllText(mutatePath, "bazaar mutated", new UTF8Encoding(false));
+        }
         string failCommand = Environment.GetEnvironmentVariable("BOB3_BZR_FAIL_COMMAND");
-        if (String.Equals(command, failCommand, StringComparison.OrdinalIgnoreCase)) {
+        int failOccurrence;
+        if (!Int32.TryParse(Environment.GetEnvironmentVariable("BOB3_BZR_FAIL_OCCURRENCE"), out failOccurrence)) failOccurrence = 1;
+        if (String.Equals(command, failCommand, StringComparison.OrdinalIgnoreCase) && occurrence == failOccurrence) {
             int failCode;
             if (!Int32.TryParse(Environment.GetEnvironmentVariable("BOB3_BZR_FAIL_CODE"), out failCode)) failCode = 41;
             Console.Error.WriteLine("fixture Bazaar failure " + failCode);
@@ -117,10 +153,12 @@ public static class FakeBazaar {
         string value;
         if (command == "status") value = Environment.GetEnvironmentVariable("BOB3_BZR_STATUS") ?? "";
         else if (command == "diff") value = Environment.GetEnvironmentVariable("BOB3_BZR_DIFF") ?? "";
-        else if (command == "nick") value = Environment.GetEnvironmentVariable("BOB3_BZR_NICK") ?? "fixture-branch";
-        else if (command == "version-info") value = Environment.GetEnvironmentVariable("BOB3_BZR_REVISION") ?? "fixture-revision-id";
+        else if (command == "nick") value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_NICK") ?? "fixture-branch";
+        else if (command == "version-info") value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_REVISION") ?? "fixture-revision-id-full-123";
         else { Console.Error.WriteLine("forbidden fixture command: " + command); return 42; }
         if (!String.IsNullOrEmpty(value)) Console.Out.Write(value.EndsWith("\n") ? value : value + Environment.NewLine);
+        int diffExit;
+        if (command == "diff" && Int32.TryParse(Environment.GetEnvironmentVariable("BOB3_BZR_DIFF_EXIT"), out diffExit)) return diffExit;
         return 0;
     }
 }
@@ -170,8 +208,10 @@ $task3Installer = Join-Path $task3RepoRoot 'scripts/Install-TeamBobProfile.ps1'
 $task3FixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('team-bob-task3-' + [guid]::NewGuid().ToString('N'))
 $task3SavedEnvironment = @{}
 $task3EnvironmentNames = @(
-    'LOCALAPPDATA', 'BOB3_MSDEV_COMMAND_LOG', 'BOB3_MSDEV_MODE', 'BOB3_MSDEV_SLEEP_MS', 'BOB3_MSDEV_MUTATE_PATH',
-    'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_NICK', 'BOB3_BZR_REVISION', 'BOB3_BZR_FAIL_COMMAND', 'BOB3_BZR_FAIL_CODE'
+    'LOCALAPPDATA', 'BOB3_MSDEV_COMMAND_LOG', 'BOB3_MSDEV_MODE', 'BOB3_MSDEV_SLEEP_MS', 'BOB3_MSDEV_MUTATE_PATH', 'BOB3_MSDEV_DELETE_PATH',
+    'BOB3_MSDEV_BLOCK_RESULT_DIRECTORY', 'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_DIFF_EXIT',
+    'BOB3_BZR_NICK', 'BOB3_BZR_NICK_SECOND', 'BOB3_BZR_REVISION', 'BOB3_BZR_REVISION_SECOND', 'BOB3_BZR_FAIL_COMMAND',
+    'BOB3_BZR_FAIL_CODE', 'BOB3_BZR_FAIL_OCCURRENCE', 'BOB3_BZR_MUTATE_COMMAND', 'BOB3_BZR_MUTATE_OCCURRENCE', 'BOB3_BZR_MUTATE_PATH'
 )
 foreach ($name in $task3EnvironmentNames) { $task3SavedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 
@@ -182,6 +222,8 @@ try {
     Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
     Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
     Write-Cp932Fixture (Join-Path $workingTree 'src/other.cpp') "int other() { return 0; }`r`n"
+    Write-Cp932Fixture (Join-Path $workingTree 'alternate/example.cpp') "int duplicate_name() { return 0; }`r`n"
+    Write-Cp932Fixture (Join-Path $workingTree 'src/日本.cpp') "int japanese() { return 0; }`r`n"
     Write-Cp932Fixture (Join-Path $workingTree 'project/fixture.dsp') "# Microsoft Developer Studio Project File`r`n"
     Write-Utf8NoBomFixture (Join-Path $workingTree 'generated.pdb') 'excluded pdb'
     Write-Utf8NoBomFixture (Join-Path $workingTree 'obj/old.obj') 'excluded obj'
@@ -211,7 +253,7 @@ try {
     $taskDirectory = Join-Path $workingTree ('team-bob-work/' + $taskId)
     New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') -Force | Out-Null
     $workPacketPath = Join-Path $taskDirectory 'work-packet.md'
-    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp') $profile.id
+    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
     $buildPath = Join-Path $workingTree 'team-bob/tools/Invoke-Vc6Build.ps1'
     $evidencePath = Join-Path $workingTree 'team-bob/tools/Export-BazaarEvidence.ps1'
     $env:BOB3_MSDEV_COMMAND_LOG = Join-Path $task3FixtureRoot 'msdev-commands.log'
@@ -223,6 +265,30 @@ try {
     $env:BOB3_MSDEV_MODE = 'success'
     $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash
     $bzrFingerprint = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $registeredEnvironment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $junctionAlias = Join-Path $task3FixtureRoot 'sandbox-junction-alias'
+    $junctionCreated = $false
+    try {
+        New-Item -ItemType Junction -Path $junctionAlias -Target $logRoot -ErrorAction Stop | Out-Null
+        $junctionCreated = $true
+    } catch {
+        Write-Host "SKIP: Junction alias creation is unavailable: $($_.Exception.Message)"
+    }
+    if ($junctionCreated) {
+        $registeredEnvironment.sandboxRoot = $junctionAlias
+        Write-JsonFixture $environmentPath $registeredEnvironment
+        [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+        $junctionResult = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+        Assert-Task3BuildOutcome $junctionResult 'INTEGRITY_FAILED' 30 'Physical sandbox/log alias overlap'
+        Assert-True ($junctionResult.Json.message -match 'physical|reparse|alias') 'Physical alias rejection identifies the physical/reparse boundary'
+        Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Physical alias rejection occurs before MSDEV launch'
+        $registeredEnvironment.sandboxRoot = $sandboxRoot
+        Write-JsonFixture $environmentPath $registeredEnvironment
+        [System.IO.Directory]::Delete($junctionAlias)
+    }
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
 
     $make = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $make 'SUCCEEDED' 0 'Successful Make'
@@ -248,7 +314,7 @@ try {
     Assert-Equal $makeArguments[2] $profile.target 'Make passes the configuration-only target as one argument'
     Assert-Equal $makeArguments[3] '/OUT' 'Make passes the fixed output-log switch directly'
     $makeBazaarCommands = @(Get-Content -LiteralPath $env:BOB3_BZR_COMMAND_LOG)
-    Assert-SetEqual $makeBazaarCommands @('status --short', 'status --short') 'Build uses only pre/post read-only Bazaar status queries'
+    Assert-Equal ($makeBazaarCommands -join '|') 'status --short|nick|version-info --custom --template={revision_id}|status --short|nick|version-info --custom --template={revision_id}' 'Build proves pre/post status, branch, and full revision using read-only queries'
 
     [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
@@ -262,6 +328,9 @@ try {
     Assert-Task3BuildOutcome $compileRetry 'CODE_FAILED_RETRYABLE' 10 'Allowed-file compile failure before the final attempt'
     $compileStop = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 2
     Assert-Task3BuildOutcome $compileStop 'CODE_FAILED_STOP' 11 'Allowed-file compile failure on attempt two'
+    $env:BOB3_MSDEV_MODE = 'compile-bare'
+    $ambiguousCompile = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $ambiguousCompile 'CODE_FAILED_STOP' 11 'Duplicate bare source basename is not attributable'
 
     $env:BOB3_MSDEV_MODE = 'link'
     $linkRetry = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Rebuild' 1
@@ -269,6 +338,13 @@ try {
     $env:BOB3_MSDEV_MODE = 'compile-other'
     $unrelated = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $unrelated 'CODE_FAILED_STOP' 11 'Unrelated compile failure'
+    $env:BOB3_MSDEV_MODE = 'cp932-log'
+    $cp932LogFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $cp932LogFailure 'CODE_FAILED_RETRYABLE' 10 'CP932 /OUT log attributes Japanese Allowed File compile error'
+    $env:BOB3_MSDEV_MODE = 'invalid-log'
+    $invalidLogFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $invalidLogFailure 'ENVIRONMENT_FAILED' 20 'Undecodable CP932 /OUT log fails safely'
+    Assert-Equal ([System.IO.File]::ReadAllBytes($invalidLogFailure.Json.outputLogPath)).Length 1 'Undecodable /OUT log remains raw evidence'
 
     $env:BOB3_MSDEV_MODE = 'environment'
     $environmentFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
@@ -300,8 +376,6 @@ try {
     Assert-Task3BuildOutcome $qualificationFailure 'ENVIRONMENT_FAILED' 20 'Qualification recorded for another PC'
     $profile.qualification.pcId = [Environment]::MachineName
 
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
-    $registeredEnvironment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
     $registeredEnvironment.sandboxRoot = $workingTree
     Write-JsonFixture $environmentPath $registeredEnvironment
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
@@ -310,14 +384,25 @@ try {
     $registeredEnvironment.sandboxRoot = $sandboxRoot
     Write-JsonFixture $environmentPath $registeredEnvironment
 
+    $profile.excludePatterns = @('*.pdb', '**/*.obj', 'src/example.cpp')
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    $allowedExcluded = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $allowedExcluded 'INTEGRITY_FAILED' 30 'Profile exclusion removes an Allowed File from sandbox'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Sandbox copy verification fails before MSDEV launch'
+    $profile.excludePatterns = @('*.pdb', '**/*.obj')
+
     $profile.timeoutSeconds = 1
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
-    $env:BOB3_MSDEV_MODE = 'success'
-    $env:BOB3_MSDEV_SLEEP_MS = '2500'
+    $env:BOB3_MSDEV_MODE = 'timeout-child'
+    $timeoutStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     $timeout = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    $timeoutStopwatch.Stop()
     Assert-Task3BuildOutcome $timeout 'TIMED_OUT' 21 'Bounded MSDEV timeout'
     Assert-True ($timeout.Json.processId -gt 0) 'Timeout result identifies only the spawned process'
-    $env:BOB3_MSDEV_SLEEP_MS = $null
+    Assert-Equal $timeout.Json.terminationComplete $true 'Timeout records completed owned process-tree termination'
+    Assert-True ($timeoutStopwatch.Elapsed.TotalSeconds -lt 8) 'Timeout and output capture remain bounded when a descendant holds redirected handles'
+    $env:BOB3_MSDEV_MODE = 'success'
     $profile.timeoutSeconds = 2
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
 
@@ -340,12 +425,67 @@ try {
     }
     $env:BOB3_BZR_STATUS = ' M  src/example.cpp'
 
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_MUTATE_COMMAND = 'status'
+    $env:BOB3_BZR_MUTATE_OCCURRENCE = '1'
+    $env:BOB3_BZR_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
+    $firstQueryMutation = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $firstQueryMutation 'INTEGRITY_FAILED' 30 'First Bazaar preflight query mutation'
+    $env:BOB3_BZR_MUTATE_COMMAND = $null
+    $env:BOB3_BZR_MUTATE_OCCURRENCE = $null
+    $env:BOB3_BZR_MUTATE_PATH = $null
+    Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
+
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_NICK = 'wrong-branch'
+    $branchMismatch = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $branchMismatch 'INTEGRITY_FAILED' 30 'Pre-build Bazaar branch mismatch'
+    $env:BOB3_BZR_NICK = 'fixture-branch'
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_NICK_SECOND = 'changed-after-build'
+    $postBranchMismatch = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $postBranchMismatch 'INTEGRITY_FAILED' 30 'Post-build Bazaar branch mismatch'
+    $env:BOB3_BZR_NICK_SECOND = $null
+
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_FAIL_COMMAND = 'status'
+    $env:BOB3_BZR_FAIL_OCCURRENCE = '2'
+    $env:BOB3_BZR_FAIL_CODE = '48'
+    $postQueryFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $postQueryFailure 'INTEGRITY_FAILED' 30 'Post-build Bazaar query failure prevents integrity proof'
+    $env:BOB3_BZR_FAIL_COMMAND = $null
+    $env:BOB3_BZR_FAIL_OCCURRENCE = $null
+    $env:BOB3_BZR_FAIL_CODE = $null
+
     $env:BOB3_MSDEV_MODE = 'success'
     $env:BOB3_MSDEV_MUTATE_PATH = Join-Path $workingTree 'src/example.cpp'
     $mutationFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $mutationFailure 'INTEGRITY_FAILED' 30 'Original-tree mutation during sandbox build'
     $env:BOB3_MSDEV_MUTATE_PATH = $null
     Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
+
+    $env:BOB3_MSDEV_DELETE_PATH = Join-Path $workingTree 'src/example.cpp'
+    $deletionFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $deletionFailure 'INTEGRITY_FAILED' 30 'Allowed File deletion during build postflight'
+    $env:BOB3_MSDEV_DELETE_PATH = $null
+    Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
+
+    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id @('../unsafe')
+    $unsafeForbidden = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $unsafeForbidden 'INTEGRITY_FAILED' 30 'Unsafe Forbidden Areas entry'
+    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id @("unsafe`tpath")
+    $controlForbidden = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $controlForbidden 'INTEGRITY_FAILED' 30 'Forbidden Areas control-character entry'
+    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+
+    $env:BOB3_MSDEV_MODE = 'success'
+    $env:BOB3_MSDEV_BLOCK_RESULT_DIRECTORY = Join-Path $taskDirectory 'results'
+    $resultPersistenceFailure = Invoke-TestScript $buildPath @('-WorkPacket', $workPacketPath, '-Action', 'Make', '-Attempt', '0')
+    Assert-Equal $resultPersistenceFailure.ExitCode 30 'Result persistence failure cannot return successful exit code'
+    Assert-True ($resultPersistenceFailure.Output -match '(?m)^INTEGRITY_FAILED\s*$') 'Result persistence failure emits only INTEGRITY_FAILED status'
+    $env:BOB3_MSDEV_BLOCK_RESULT_DIRECTORY = $null
+    Remove-Item -LiteralPath (Join-Path $taskDirectory 'results') -Force
+    New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') | Out-Null
 
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
     $evidenceSourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash
@@ -368,6 +508,26 @@ try {
     Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash $evidenceSourceHash 'Evidence export preserves source bytes'
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $evidenceBzrFingerprint 'Evidence export preserves .bzr bytes'
 
+    [System.IO.File]::Move($fakeTools.MsdevPath, ($fakeTools.MsdevPath + '.missing'))
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $bazaarOnlyEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    Assert-Equal $bazaarOnlyEvidence.ExitCode 0 'Bazaar evidence does not depend on MSDEV existence or hash'
+    [System.IO.File]::Move(($fakeTools.MsdevPath + '.missing'), $fakeTools.MsdevPath)
+
+    $env:BOB3_BZR_DIFF_EXIT = '1'
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $diffOneEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    Assert-Equal $diffOneEvidence.ExitCode 0 'Bazaar evidence accepts diff exit code one when differences exist'
+    $diffOneManifest = Get-Content -Raw -LiteralPath (Join-Path $evidenceResults 'bazaar-evidence-manifest.json') | ConvertFrom-Json
+    Assert-Equal (@($diffOneManifest.commandResults | Where-Object { $_.command -eq 'diff' })[0].exitCode) 1 'Evidence manifest preserves accepted diff exit code one'
+    $env:BOB3_BZR_DIFF_EXIT = $null
+
+    $env:BOB3_BZR_NICK = 'wrong-evidence-branch'
+    $identityEvidenceFailure = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    Assert-Equal $identityEvidenceFailure.ExitCode 30 'Evidence rejects Bazaar branch identity mismatching the Work Packet'
+    $env:BOB3_BZR_NICK = 'fixture-branch'
+
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
     $env:BOB3_BZR_FAIL_COMMAND = 'diff'
     $env:BOB3_BZR_FAIL_CODE = '47'
     $evidenceFailure = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
@@ -375,6 +535,19 @@ try {
     Assert-True ($evidenceFailure.Output -match 'diff.*47') 'Evidence reports the failed read-only command and exact exit code'
     $env:BOB3_BZR_FAIL_COMMAND = $null
     $env:BOB3_BZR_FAIL_CODE = $null
+
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_FAIL_COMMAND = 'diff'
+    $env:BOB3_BZR_FAIL_CODE = '47'
+    $env:BOB3_BZR_MUTATE_COMMAND = 'diff'
+    $env:BOB3_BZR_MUTATE_PATH = Join-Path $workingTree 'src/example.cpp'
+    $evidenceMutationFailure = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    Assert-Equal $evidenceMutationFailure.ExitCode 30 'Evidence command failure still detects source mutation in postflight'
+    $env:BOB3_BZR_FAIL_COMMAND = $null
+    $env:BOB3_BZR_FAIL_CODE = $null
+    $env:BOB3_BZR_MUTATE_COMMAND = $null
+    $env:BOB3_BZR_MUTATE_PATH = $null
+    Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
 
     $bazaarBytes = [System.IO.File]::ReadAllBytes($fakeTools.BazaarPath)
     $tamperedBytes = New-Object byte[] ($bazaarBytes.Length + 1)

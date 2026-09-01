@@ -1,5 +1,41 @@
 $ErrorActionPreference = 'Stop'
 
+if ($null -eq ('TeamBobNativePath' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+public static class TeamBobNativePath {
+    private const uint FILE_SHARE_READ = 0x00000001;
+    private const uint FILE_SHARE_WRITE = 0x00000002;
+    private const uint FILE_SHARE_DELETE = 0x00000004;
+    private const uint OPEN_EXISTING = 3;
+    private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint VOLUME_NAME_NT = 0x2;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
+    public static string GetFinalDirectoryPath(string path) {
+        using (SafeFileHandle handle = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open path for physical resolution: " + path);
+            StringBuilder buffer = new StringBuilder(1024);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, VOLUME_NAME_NT);
+            if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot resolve physical path: " + path);
+            if (length >= buffer.Capacity) {
+                buffer = new StringBuilder((int)length + 1);
+                length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, VOLUME_NAME_NT);
+                if (length == 0 || length >= buffer.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot resolve physical path: " + path);
+            }
+            return buffer.ToString();
+        }
+    }
+}
+'@
+}
+
 function New-TeamBobFailure {
     param([string]$Status, [string]$Message, [int]$NativeExitCode = 0)
     $exception = New-Object System.InvalidOperationException($Message)
@@ -19,6 +55,34 @@ function Get-TeamBobCanonicalPath {
     $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
     if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
     return $fullPath.TrimEnd('\', '/')
+}
+
+function Get-TeamBobPhysicalPath {
+    param([string]$Path, [string]$Label)
+    $fullPath = Get-TeamBobCanonicalPath $Path
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must be an existing directory for physical path validation.") }
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    $current = $root
+    $remainder = $fullPath.Substring($root.Length)
+    foreach ($component in @($remainder -split '[\\/]' | Where-Object { $_.Length -gt 0 })) {
+        $current = Join-Path $current $component
+        $attributes = [System.IO.File]::GetAttributes($current)
+        if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label contains a forbidden reparse/alias component: $current") }
+    }
+    try { $physical = [TeamBobNativePath]::GetFinalDirectoryPath($fullPath) } catch { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("$Label physical path resolution failed: " + $_.Exception.Message)) }
+    if ($physical.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) { $physical = '\\' + $physical.Substring(8) }
+    elseif ($physical.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) { $physical = $physical.Substring(4) }
+    $physical = $physical.Replace('/', '\')
+    if ($physical.Length -gt 1) { $physical = $physical.TrimEnd('\') }
+    return $physical
+}
+
+function Test-TeamBobResolvedPathAtOrBelow {
+    param([string]$Candidate, [string]$Root)
+    $candidateValue = $Candidate.Replace('/', '\').TrimEnd('\')
+    $rootValue = $Root.Replace('/', '\').TrimEnd('\')
+    if ($candidateValue.Equals($rootValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $candidateValue.StartsWith($rootValue + '\', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-TeamBobPathAtOrBelow {
@@ -45,7 +109,7 @@ function Get-TeamBobRelativePath {
 
 function ConvertTo-TeamBobRelativePath {
     param([string]$Root, [string]$RelativePath, [string]$Label, [string]$FailureStatus = 'INTEGRITY_FAILED')
-    if ([string]::IsNullOrWhiteSpace($RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|[\\/])\.\.?([\\/]|$)' -or $RelativePath.IndexOfAny([char[]]@([char]0, [char]13, [char]10)) -ge 0) {
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '[\x00-\x1F\x7F]' -or [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|[\\/])\.\.?([\\/]|$)') {
         throw (New-TeamBobFailure $FailureStatus "$Label must be a safe relative path: $RelativePath")
     }
     $candidate = Get-TeamBobCanonicalPath (Join-Path $Root $RelativePath)
@@ -111,6 +175,17 @@ function Get-TeamBobPacketContext {
     if (-not $expectedPacket.Equals((Get-TeamBobCanonicalPath $WorkPacketPath), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet path does not match its Bazaar Root and Task ID.')
     }
+    $forbiddenAreas = @()
+    foreach ($forbidden in @($Packet.'Forbidden Areas')) {
+        if (-not ($forbidden -is [string]) -or [string]::IsNullOrWhiteSpace($forbidden) -or $forbidden -match '[\x00-\x1F\x7F]' -or
+            [System.IO.Path]::IsPathRooted($forbidden) -or $forbidden -match '(^|[\\/])\.\.?([\\/]|$)') {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Forbidden Areas contains an unsafe entry: $forbidden")
+        }
+        $normalizedForbidden = $forbidden.Replace('\', '/').Trim('/')
+        if ([string]::IsNullOrWhiteSpace($normalizedForbidden)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Forbidden Areas contains an empty normalized path.') }
+        $forbiddenAreas += $normalizedForbidden
+    }
+    if ($forbiddenAreas.Count -eq 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Forbidden Areas must contain at least one safe entry.') }
     $supported = @('.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl')
     $allowed = @()
     $seen = @{}
@@ -122,18 +197,18 @@ function Get-TeamBobPacketContext {
         $key = $resolved.RelativePath.ToLowerInvariant()
         if ($seen.ContainsKey($key)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is duplicated: $entry") }
         $seen[$key] = $true
-        foreach ($forbidden in @($Packet.'Forbidden Areas')) {
-            if ($forbidden -is [string] -and -not [string]::IsNullOrWhiteSpace($forbidden) -and -not [System.IO.Path]::IsPathRooted($forbidden) -and $forbidden -notmatch '(^|[\\/])\.\.?([\\/]|$)') {
-                $forbiddenNormalized = $forbidden.Replace('\', '/').Trim('/')
-                if ($resolved.RelativePath.Equals($forbiddenNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or $resolved.RelativePath.StartsWith($forbiddenNormalized + '/', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is inside a forbidden area: $entry")
-                }
+        foreach ($forbiddenNormalized in $forbiddenAreas) {
+            if ($resolved.RelativePath.Equals($forbiddenNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or $resolved.RelativePath.StartsWith($forbiddenNormalized + '/', [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is inside a forbidden area: $entry")
             }
         }
         $allowed += $resolved
     }
     if ($allowed.Count -eq 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'At least one Allowed File is required.') }
-    return [pscustomobject]@{ TaskId = [string]$Packet.'Task ID'; BazaarRoot = $bazaarRoot; AllowedFiles = @($allowed); BuildProfileId = [string]$Packet.'Build Profile ID' }
+    return [pscustomobject]@{
+        TaskId = [string]$Packet.'Task ID'; BazaarRoot = $bazaarRoot; AllowedFiles = @($allowed); ForbiddenAreas = @($forbiddenAreas)
+        BuildProfileId = [string]$Packet.'Build Profile ID'; BazaarBranch = [string]$Packet.'Bazaar Branch'; BazaarRevision = [string]$Packet.'Bazaar Full Revision ID'
+    }
 }
 
 function Get-TeamBobFileHash {
@@ -179,6 +254,42 @@ function ConvertTo-TeamBobCommandArgument {
     return $builder.ToString()
 }
 
+function Invoke-TeamBobTreeTermination {
+    param([int]$ProcessId)
+    $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $taskKillPath = Join-Path $systemDirectory 'taskkill.exe'
+    if (-not (Test-Path -LiteralPath $taskKillPath -PathType Leaf)) { return $false }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $taskKillPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.Arguments = (@('/PID', [string]$ProcessId, '/T', '/F') | ForEach-Object { ConvertTo-TeamBobCommandArgument $_ }) -join ' '
+    $taskKill = New-Object System.Diagnostics.Process
+    $taskKill.StartInfo = $startInfo
+    try {
+        if (-not $taskKill.Start()) { return $false }
+        if (-not $taskKill.WaitForExit(5000)) {
+            try { if (-not $taskKill.HasExited) { $taskKill.Kill() } } catch { }
+            [void]$taskKill.WaitForExit(1000)
+            return $false
+        }
+        return $taskKill.ExitCode -eq 0
+    } catch {
+        return $false
+    } finally {
+        $taskKill.Dispose()
+    }
+}
+
+function Get-TeamBobCompletedTaskText {
+    param([System.Threading.Tasks.Task[string]]$Task)
+    try {
+        if (-not $Task.IsCompleted) { [void]$Task.Wait(2000) }
+    } catch { }
+    if ($Task.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { return $Task.Result }
+    return ''
+}
+
 function Invoke-TeamBobProcess {
     param([string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory, [int]$TimeoutSeconds)
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -188,6 +299,11 @@ function Invoke-TeamBobProcess {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
+    $cp932 = [System.Text.Encoding]::GetEncoding(932)
+    try {
+        $startInfo.StandardOutputEncoding = $cp932
+        $startInfo.StandardErrorEncoding = $cp932
+    } catch { }
     $encodedArguments = @($Arguments | ForEach-Object { ConvertTo-TeamBobCommandArgument ([string]$_) })
     $startInfo.Arguments = $encodedArguments -join ' '
     $process = New-Object System.Diagnostics.Process
@@ -201,18 +317,24 @@ function Invoke-TeamBobProcess {
         $milliseconds = [long]$TimeoutSeconds * 1000
         if ($milliseconds -gt [int]::MaxValue) { $milliseconds = [int]::MaxValue }
         $completed = $process.WaitForExit([int]$milliseconds)
+        $terminationComplete = $null
         if (-not $completed) {
-            try { if (-not $process.HasExited) { $process.Kill() } } catch { }
-            try { $process.WaitForExit() } catch { }
-        } else {
-            $process.WaitForExit()
+            $treeTerminationSucceeded = Invoke-TeamBobTreeTermination $processId
+            $parentExited = $process.WaitForExit(5000)
+            $terminationComplete = $treeTerminationSucceeded -and $parentExited
+            if (-not $parentExited) {
+                try { if (-not $process.HasExited) { $process.Kill() } } catch { }
+                [void]$process.WaitForExit(1000)
+            }
         }
-        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
-        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        $standardOutput = Get-TeamBobCompletedTaskText $standardOutputTask
+        $standardError = Get-TeamBobCompletedTaskText $standardErrorTask
+        $captureComplete = $standardOutputTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion -and $standardErrorTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion
         $exitCode = $null
-        try { $exitCode = $process.ExitCode } catch { }
+        try { if ($process.HasExited) { $exitCode = $process.ExitCode } } catch { }
         return [pscustomobject]@{
             ProcessId = $processId; TimedOut = (-not $completed); ExitCode = $exitCode; StandardOutput = $standardOutput; StandardError = $standardError
+            TerminationComplete = $terminationComplete; CaptureComplete = $captureComplete
             StartedAt = $startedAt.ToString('o'); FinishedAt = [DateTimeOffset]::UtcNow.ToString('o')
         }
     } finally {
@@ -221,7 +343,7 @@ function Invoke-TeamBobProcess {
 }
 
 function Get-TeamBobLocalEnvironment {
-    param([string]$ManifestPath, [string]$WorkSchemaPath, [string]$BuildSchemaPath)
+    param([string]$ManifestPath, [string]$WorkSchemaPath, [string]$BuildSchemaPath, [switch]$BazaarOnly)
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'LOCALAPPDATA must be an absolute path.') }
     $path = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment registration is missing: $path") }
@@ -242,10 +364,13 @@ function Get-TeamBobLocalEnvironment {
         if (-not (Test-TeamBobAbsolutePath ([string]$environment.$field))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment field '$field' must be absolute.") }
         $environment.PSObject.Properties[$field].Value = Get-TeamBobCanonicalPath ([string]$environment.$field)
     }
-    foreach ($field in @('msdevPath', 'bazaarPath')) { if (-not (Test-Path -LiteralPath $environment.$field -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered tool is missing: $($environment.$field)") } }
-    foreach ($field in @('sandboxRoot', 'logRoot')) { if (-not (Test-Path -LiteralPath $environment.$field -PathType Container)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered root is missing or not a directory: $($environment.$field)") } }
-    if ((Get-TeamBobFileHash $environment.msdevPath) -ne ([string]$environment.msdevSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered MSDEV hash does not match.') }
+    if (-not (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered Bazaar tool is missing: $($environment.bazaarPath)") }
     if ((Get-TeamBobFileHash $environment.bazaarPath) -ne ([string]$environment.bazaarSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered Bazaar hash does not match.') }
+    if (-not $BazaarOnly) {
+        if (-not (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered MSDEV tool is missing: $($environment.msdevPath)") }
+        foreach ($field in @('sandboxRoot', 'logRoot')) { if (-not (Test-Path -LiteralPath $environment.$field -PathType Container)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered root is missing or not a directory: $($environment.$field)") } }
+        if ((Get-TeamBobFileHash $environment.msdevPath) -ne ([string]$environment.msdevSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered MSDEV hash does not match.') }
+    }
     return $environment
 }
 
@@ -315,6 +440,24 @@ function Get-TeamBobAllowedHashes {
     return @($records | Sort-Object)
 }
 
+function Get-TeamBobProtectedSnapshot {
+    param([object]$Context)
+    return [pscustomobject]@{
+        SourceInventory = @(Get-TeamBobInventory $Context.BazaarRoot @('.bzr', 'team-bob-work'))
+        BzrInventory = @(Get-TeamBobInventory (Join-Path $Context.BazaarRoot '.bzr'))
+        AllowedHashes = @(Get-TeamBobAllowedHashes $Context.AllowedFiles)
+    }
+}
+
+function Assert-TeamBobProtectedSnapshot {
+    param([object]$Baseline, [object]$Current, [string]$Stage)
+    if ((($Baseline.SourceInventory -join "`n") -cne ($Current.SourceInventory -join "`n")) -or
+        (($Baseline.BzrInventory -join "`n") -cne ($Current.BzrInventory -join "`n")) -or
+        (($Baseline.AllowedHashes -join "`n") -cne ($Current.AllowedHashes -join "`n"))) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Protected source, Allowed File, or .bzr state changed during $Stage.")
+    }
+}
+
 function Assert-TeamBobAllowedEncoding {
     param([object[]]$AllowedFiles)
     $encoding = [System.Text.Encoding]::GetEncoding(932, (New-Object System.Text.EncoderExceptionFallback), (New-Object System.Text.DecoderExceptionFallback))
@@ -336,11 +479,21 @@ function Get-TeamBobNormalizedProcessText {
     return $Text.TrimEnd([char[]]@([char]13, [char]10))
 }
 
+function Read-TeamBobStrictCp932File {
+    param([string]$Path)
+    $encoding = [System.Text.Encoding]::GetEncoding(932, (New-Object System.Text.EncoderExceptionFallback), (New-Object System.Text.DecoderExceptionFallback))
+    try { return $encoding.GetString([System.IO.File]::ReadAllBytes($Path)) } catch { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ("VC6 /OUT log is not strict CP932: " + $_.Exception.Message)) }
+}
+
 function Invoke-TeamBobBazaarQuery {
-    param([string]$BazaarPath, [string]$BazaarRoot, [string[]]$Arguments)
+    param(
+        [string]$BazaarPath, [string]$BazaarRoot, [string[]]$Arguments,
+        [int[]]$AllowedExitCodes = @(0), [string]$TimeoutStatus = 'ENVIRONMENT_FAILED'
+    )
     $result = Invoke-TeamBobProcess $BazaarPath $Arguments $BazaarRoot 30
-    if ($result.TimedOut) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ("Bazaar query timed out: " + ($Arguments -join ' ')) 21) }
-    if ($result.ExitCode -ne 0) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ("Bazaar query failed: " + ($Arguments -join ' ') + " (exit $($result.ExitCode))") ([int]$result.ExitCode)) }
+    if ($result.TimedOut) { throw (New-TeamBobFailure $TimeoutStatus ("Bazaar query timed out: " + ($Arguments -join ' ')) 21) }
+    if (-not $result.CaptureComplete) { throw (New-TeamBobFailure $TimeoutStatus ("Bazaar query output capture did not complete: " + ($Arguments -join ' ')) 21) }
+    if ($AllowedExitCodes -notcontains [int]$result.ExitCode) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ("Bazaar query failed: " + ($Arguments -join ' ') + " (exit $($result.ExitCode))") ([int]$result.ExitCode)) }
     return [pscustomobject]@{ Output = $result.StandardOutput; Error = $result.StandardError; ExitCode = [int]$result.ExitCode }
 }
 
@@ -357,6 +510,21 @@ function Assert-TeamBobBazaarStatus {
             throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Bazaar status contains a path outside Allowed Files: $path")
         }
     }
+}
+
+function Get-TeamBobBuildBazaarState {
+    param([object]$Environment, [object]$Context)
+    $statusResult = Invoke-TeamBobBazaarQuery $Environment.bazaarPath $Context.BazaarRoot @('status', '--short') @(0) 'TIMED_OUT'
+    $nickResult = Invoke-TeamBobBazaarQuery $Environment.bazaarPath $Context.BazaarRoot @('nick') @(0) 'TIMED_OUT'
+    $revisionResult = Invoke-TeamBobBazaarQuery $Environment.bazaarPath $Context.BazaarRoot @('version-info', '--custom', '--template={revision_id}') @(0) 'TIMED_OUT'
+    $status = Get-TeamBobNormalizedProcessText $statusResult.Output
+    $nick = Get-TeamBobNormalizedProcessText $nickResult.Output
+    $revision = Get-TeamBobNormalizedProcessText $revisionResult.Output
+    Assert-TeamBobBazaarStatus $status $Context.AllowedFiles
+    if (-not $nick.Equals($Context.BazaarBranch, [System.StringComparison]::Ordinal) -or -not $revision.Equals($Context.BazaarRevision, [System.StringComparison]::Ordinal)) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Current Bazaar branch nick or full revision id does not match the Work Packet baseline.')
+    }
+    return [pscustomobject]@{ Status = $status; Branch = $nick; Revision = $revision }
 }
 
 function Test-TeamBobCopyExclusion {
@@ -403,18 +571,38 @@ function Copy-TeamBobSandboxTree {
     }
 }
 
+function Test-TeamBobOutputPathToken {
+    param([string]$Line, [string]$Path)
+    $normalizedLine = $Line.Replace('\', '/')
+    $escaped = [regex]::Escape($Path.Replace('\', '/'))
+    return [regex]::IsMatch($normalizedLine, '(?i)(?:^|[^A-Za-z0-9_./-])' + $escaped + '(?=$|[:(\s"''])')
+}
+
 function Test-TeamBobFailureAttribution {
-    param([string]$Output, [string]$Pattern, [object[]]$AllowedFiles)
+    param([string]$Output, [string]$Pattern, [object[]]$AllowedFiles, [string[]]$SourceInventory)
+    $baseNameCounts = @{}
+    $objectNameCounts = @{}
+    foreach ($record in $SourceInventory) {
+        if ($record -notmatch '^F\|(?<path>[^|]+)\|') { continue }
+        $relative = $Matches['path']
+        $baseName = [System.IO.Path]::GetFileName($relative).ToLowerInvariant()
+        if (-not $baseNameCounts.ContainsKey($baseName)) { $baseNameCounts[$baseName] = 0 }
+        $baseNameCounts[$baseName]++
+        if ([System.IO.Path]::GetExtension($relative).ToLowerInvariant() -in @('.c', '.cc', '.cpp', '.cxx')) {
+            $objectName = ([System.IO.Path]::GetFileNameWithoutExtension($relative) + '.obj').ToLowerInvariant()
+            if (-not $objectNameCounts.ContainsKey($objectName)) { $objectNameCounts[$objectName] = 0 }
+            $objectNameCounts[$objectName]++
+        }
+    }
     foreach ($line in @($Output -split "`r?`n")) {
         if (-not [regex]::IsMatch($line, $Pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) { continue }
         foreach ($file in $AllowedFiles) {
-            $relativeBackslash = $file.RelativePath.Replace('/', '\')
             $name = [System.IO.Path]::GetFileName($file.RelativePath)
-            $stemObject = [System.IO.Path]::GetFileNameWithoutExtension($file.RelativePath) + '.obj'
-            if ($line.IndexOf($file.RelativePath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $line.IndexOf($relativeBackslash, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $line.IndexOf($name, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-                $line.IndexOf($stemObject, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+            $objectName = [System.IO.Path]::GetFileNameWithoutExtension($file.RelativePath) + '.obj'
+            $objectRelative = ([System.IO.Path]::ChangeExtension($file.RelativePath, '.obj')).Replace('\', '/')
+            if ((Test-TeamBobOutputPathToken $line $file.RelativePath) -or (Test-TeamBobOutputPathToken $line $objectRelative)) { return $true }
+            if ($baseNameCounts[$name.ToLowerInvariant()] -eq 1 -and (Test-TeamBobOutputPathToken $line $name)) { return $true }
+            if ($objectNameCounts[$objectName.ToLowerInvariant()] -eq 1 -and (Test-TeamBobOutputPathToken $line $objectName)) { return $true }
         }
     }
     return $false
