@@ -127,3 +127,60 @@ Reviewed the committed diff with `git show --check --stat --oneline HEAD`. No wh
 ### Concerns
 
 None. The runtime’s custom-mode file regex cannot express a dynamic Work Packet Allowed Files array, so that boundary is explicitly enforced again by the Green rule and command, as required.
+
+---
+
+## Fix Round 2
+
+### Changed Files
+
+- `profile/.bob/custom_modes.yaml` is now JSON syntax, which is a strict YAML 1.2 subset. It is parsed by the real Windows PowerShell `ConvertFrom-Json` parser without an external dependency. Every constrained edit permission is an actual two-element group tuple: `["edit", {"fileRegex": "...", "description": "..."}]`.
+- `tests/Test-Package.ps1` now consumes the parsed JSON mode arrays, checks the exact group shapes and absence of extra groups, and executes each edit regex against allowed C/C++, drafts, results, and all forbidden `.rc`, `.dsp`, `.dsw`, `.def`, `.idl`, and `.mak` examples.
+- `tests/Test-Package.ps1` replaces the partial packet interpreter with a recursive validator covering every keyword used by the work-packet schema: object/array/string/integer types, required fields, additional-properties rejection, properties, const, enum, minLength, minItems, maxItems, items, pattern, allOf, if, and then. A recursive keyword guard fails if an unsupported schema keyword is introduced.
+- `profile/team-bob/config/work-packet.schema.json` now declares `Max-Repair-Cycles` as an integer in addition to its fixed value, preventing decimal and string coercion.
+
+### TDD RED
+
+Command:
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\tests\Test-Package.ps1'
+```
+
+Output:
+
+```text
+ConvertFrom-Json : Invalid JSON primitive: customModes.
+```
+
+Expected reason: the test was changed first to parse the mode file with the real JSON parser, while the file was still YAML-only syntax. This proved the former handwritten parser had concealed the consumer incompatibility.
+
+The subsequent integer behavior case also initially failed for the expected reason: the string value `"2"` was coercible against a const-only schema. Adding `"type": "integer"` made decimal and string values reject explicitly.
+
+### Covering Test
+
+Commands:
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\tests\Test-Package.ps1'
+& pwsh -NoProfile -File '.\tests\Test-Package.ps1'
+```
+
+Output:
+
+```text
+PASS: 298 package contract assertions succeeded.
+PASS: 298 package contract assertions succeeded.
+```
+
+The behavior cases cover the canonical Amber packet, a fully converted Green packet, extra properties, empty minLength strings, invalid array items, decimal/string repair-cycle values, pattern rejection, Open QA, and each of the eight Green YES gates.
+
+### Commit and Self-Review
+
+Commit: `382b2e1 fix: parse modes and validate work packets`
+
+Reviewed with `git show --check --stat --oneline HEAD`; no whitespace errors were reported. Self-review confirmed that the JSON mode document keeps exactly five required slugs, every edit group is a documented two-element tuple, normal modes have only read/edit, Green has only read/edit/execute, and no excluded group can appear. The schema validator remains dependency-free and runs under Windows PowerShell 5.1 as well as pwsh.
+
+### Concerns
+
+None.
