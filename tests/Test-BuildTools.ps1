@@ -270,7 +270,44 @@ try {
     $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     $registeredEnvironment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
 
+    $toolJunctionAlias = Join-Path $task3FixtureRoot 'registered-tool-junction-alias'
+    New-Item -ItemType Junction -Path $toolJunctionAlias -Target (Split-Path -Parent $fakeTools.MsdevPath) -ErrorAction Stop | Out-Null
+    $registeredEnvironment.msdevPath = Join-Path $toolJunctionAlias 'MSDEV.EXE'
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    $reparseMsdev = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $reparseMsdev 'ENVIRONMENT_FAILED' 20 'Registered MSDEV path through a reparse component'
+    Assert-True ($reparseMsdev.Json.message -match 'reparse|physical') 'Registered MSDEV reparse rejection reaches the physical-leaf boundary'
+    $registeredEnvironment.msdevPath = $fakeTools.MsdevPath
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    [System.IO.Directory]::Delete($toolJunctionAlias)
+
     . $buildCommonPath
+    $unlistedDeviceRejected = $false
+    $unlistedDeviceMessage = ''
+    try { Assert-TeamBobLocalPathForm '\Device\ThirdPartyRedirector\fixture-server.invalid\fixture-share\root' 'Unlisted redirector fixture' 'INTEGRITY_FAILED' } catch { $unlistedDeviceRejected = $true; $unlistedDeviceMessage = $_.Exception.Message }
+    Assert-True $unlistedDeviceRejected 'Common path boundary rejects an unlisted device-namespace redirector'
+    Assert-True ($unlistedDeviceMessage -match 'local|device|network') 'Unlisted redirector rejection identifies the local-volume boundary'
+
+    foreach ($unsupportedDriveType in @(0, 1, 2, 4, 5, 6)) {
+        $unsupportedDriveRejected = $false
+        $unsupportedDriveMessage = ''
+        try { Assert-TeamBobSupportedLocalDriveType $unsupportedDriveType 'Unsupported drive fixture' 'INTEGRITY_FAILED' } catch { $unsupportedDriveRejected = $true; $unsupportedDriveMessage = $_.Exception.Message }
+        Assert-True $unsupportedDriveRejected ("Common path boundary rejects drive type " + $unsupportedDriveType)
+        Assert-True ($unsupportedDriveMessage -match 'fixed local drive') ("Drive type " + $unsupportedDriveType + ' rejection identifies the fixed-local requirement')
+    }
+    $fixedDriveAccepted = $true
+    try { Assert-TeamBobSupportedLocalDriveType 3 'Fixed-drive fixture' 'INTEGRITY_FAILED' } catch { $fixedDriveAccepted = $false }
+    Assert-True $fixedDriveAccepted 'Common path boundary accepts only the DRIVE_FIXED local drive type'
+
+    $localVolumeAccepted = $true
+    try { Assert-TeamBobLocalPhysicalPath '\Device\HarddiskVolume42\fixture-root' 'Local-volume fixture' 'INTEGRITY_FAILED' } catch { $localVolumeAccepted = $false }
+    Assert-True $localVolumeAccepted 'Physical path boundary accepts the supported local hard-disk volume form'
+    $unlistedPhysicalRejected = $false
+    $unlistedPhysicalMessage = ''
+    try { Assert-TeamBobLocalPhysicalPath '\Device\ThirdPartyRedirector\fixture-root' 'Unlisted physical redirector fixture' 'INTEGRITY_FAILED' } catch { $unlistedPhysicalRejected = $true; $unlistedPhysicalMessage = $_.Exception.Message }
+    Assert-True $unlistedPhysicalRejected 'Physical path boundary rejects an unlisted redirector device form'
+    Assert-True ($unlistedPhysicalMessage -match 'local hard-disk volume') 'Physical redirector rejection identifies the positive local-volume requirement'
+
     $networkPathCases = @(
         [pscustomobject]@{ Name = 'lexical UNC'; Path = '\\fixture-server.invalid\fixture-share\root' },
         [pscustomobject]@{ Name = 'extended UNC'; Path = '\\?\UNC\fixture-server.invalid\fixture-share\root' },

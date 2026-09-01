@@ -402,3 +402,135 @@ The mapping and empty temporary directory were removed in `finally`.
 
 - Actual VC6/Bazaar behavior remains qualification-gated; no real profile is enabled.
 - Network paths are intentionally unsupported for this dedicated-PC PoC, including legitimate UNC shares and mapped remote drives.
+
+## Fix round 3: positive local-volume proof and tool status mapping
+
+### Files
+
+- `profile/team-bob/tools/TeamBob-BuildCommon.ps1`
+- `tests/Test-BuildTools.ps1`
+- This report
+
+No Task 4 file was changed.
+
+### Implementation
+
+- Replaced the fail-open “not `DRIVE_REMOTE`” check with a positive `DRIVE_FIXED` requirement. Drive types `DRIVE_UNKNOWN`, `DRIVE_NO_ROOT_DIR`, removable, remote, optical, and RAM disk are refused; only numeric drive type `3` is accepted for this dedicated-PC PoC.
+- Replaced the finite redirector blacklist with namespace-wide lexical rejection for UNC/extended paths and all `\??`, `\GLOBAL??`, and `\Device` input forms.
+- Added a separate positive check for handle-resolved paths. `GetFinalPathNameByHandle(VOLUME_NAME_NT)` output is accepted only when it matches `\Device\HarddiskVolume<number>` with a path boundary; arbitrary or third-party `\Device\...` results fail closed.
+- Preserved normal fixed local paths, per-component reparse refusal, physical overlap comparison, and local SUBST behavior. A fresh temporary SUBST check reported drive type `3` and the same allowed `HarddiskVolume` path as its direct local target.
+- Added a failure-status parameter to `Get-TeamBobPhysicalPath` and applied it consistently to canonicalization, path-type checks, component inspection, reparse refusal, handle resolution, and local-volume proof.
+- Registered Bazaar/MSDEV physical-leaf validation now passes `ENVIRONMENT_FAILED`, while build-time source/sandbox/log callers retain the default `INTEGRITY_FAILED`. Existing sandbox-junction coverage continued to assert `INTEGRITY_FAILED / 30`.
+
+### TDD RED 1: unlisted redirector
+
+The positive-proof helper tests were added first.
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+Exit code: `1`.
+
+```text
+ASSERTION FAILED: Common path boundary rejects an unlisted device-namespace redirector
+At C:\Users\stell\source\repos\bobPlan\tests\Test-BuildTools.ps1:5 char:116
+```
+
+This proved the prior finite blacklist accepted `\Device\ThirdPartyRedirector\...`.
+
+### TDD RED 2: registered tool classification
+
+A runtime directory junction was then placed in the registered MSDEV path so the input passed lexical/existence checks and failed specifically during physical-leaf component inspection.
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+Exit code: `1`.
+
+```text
+ASSERTION FAILED: Registered MSDEV path through a reparse component uses the fixed process exit code; result message: Registered MSDEV tool contains a forbidden reparse/alias component: <temporary-root>\registered-tool-junction-alias (expected '20', got '30')
+```
+
+The final regression asserts `ENVIRONMENT_FAILED / 20` and confirms the message came from the physical/reparse boundary.
+
+### Focused GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 301 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 301 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### Full-suite GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 695 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 695 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### Local-volume and status coverage
+
+- Reject: drive types `0`, `1`, `2`, `4`, `5`, and `6`.
+- Accept: `DRIVE_FIXED / 3`.
+- Accept resolved local form: `\Device\HarddiskVolume42\fixture-root`.
+- Reject resolved unlisted form: `\Device\ThirdPartyRedirector\fixture-root`.
+- Reject lexical unlisted form before canonicalization: `\Device\ThirdPartyRedirector\...`.
+- Integration: registered MSDEV path through an existing local junction returns `ENVIRONMENT_FAILED / 20`.
+- Compatibility: temporary local SUBST is `DRIVE_FIXED (3)` and resolves identically to its direct allowed `HarddiskVolume` target.
+
+### Self-review
+
+- Re-read the Task 3 brief and both round-3 findings against the final call sites.
+- Confirmed canonical inputs require a fixed drive, physical outputs require an explicitly supported local hard-disk volume, and there is no negative remote-device blacklist at the physical trust boundary.
+- Confirmed all registered tool physical failures carry `ENVIRONMENT_FAILED`, while source/sandbox/log physical checks retain default `INTEGRITY_FAILED` and their existing behavior tests pass.
+- Confirmed lexical/extended UNC, mapped remote, unknown/no-root, unlisted redirector, junction, and SUBST cases are covered without accessing a network share.
+- Confirmed no real VC6/Bazaar tool, enabled tracked profile, shell/expression execution, Task 4 file, or recursive production deletion was introduced.
+- Confirmed PowerShell 5.1/7 parsing, `git diff --check`, focused suites, and full suites after the last production change.
+
+### Concerns
+
+- Real VC6/Bazaar semantics remain qualification-gated and no real profile is enabled.
+- The fixed-drive/hard-disk-volume allowlist intentionally excludes otherwise local removable, optical, and RAM-backed paths for the dedicated-PC PoC.
