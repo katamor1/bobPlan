@@ -139,7 +139,8 @@ $requiredFiles = @(
     'team-bob/config/vc6-build-targets.json', 'team-bob/config/vc6-build-targets.example.json',
     'team-bob/templates/work-packet.md', 'team-bob/templates/requirement-ledger.csv', 'team-bob/templates/external-spec.md',
     'team-bob/templates/impact-analysis.md', 'team-bob/templates/code-review.md', 'team-bob/templates/test-spec.md',
-    'team-bob/templates/review-rubric.md', 'team-bob/templates/usage-log.csv', 'team-bob/templates/exception-record.md'
+    'team-bob/templates/review-rubric.md', 'team-bob/templates/usage-log.csv', 'team-bob/templates/exception-record.md',
+    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
 )
 foreach ($relativePath in $requiredFiles) { Assert-True (Test-Path -LiteralPath (Join-Path $profileRoot $relativePath) -PathType Leaf) "Required profile file exists: $relativePath" }
 
@@ -280,3 +281,4 @@ foreach ($status in @('SUCCEEDED', 'CODE_FAILED_RETRYABLE', 'CODE_FAILED_STOP', 
 Write-Host "PASS: $script:Assertions package contract assertions succeeded."
 
 . (Join-Path $PSScriptRoot 'Test-Tools.ps1')
+. (Join-Path $PSScriptRoot 'Test-BuildTools.ps1')

@@ -148,7 +148,8 @@ $requiredRelativePaths = @(
     'team-bob/templates/test-spec.md', 'team-bob/templates/review-rubric.md', 'team-bob/templates/usage-log.csv',
     'team-bob/templates/exception-record.md', 'team-bob/config/work-packet.schema.json',
     'team-bob/config/vc6-build-targets.schema.json', 'team-bob/config/vc6-build-targets.json',
-    'team-bob/tools/Initialize-LocalEnvironment.ps1', 'team-bob/tools/Start-TeamBobTask.ps1', 'team-bob/tools/Test-TeamBobProfile.ps1'
+    'team-bob/tools/Initialize-LocalEnvironment.ps1', 'team-bob/tools/Start-TeamBobTask.ps1', 'team-bob/tools/Test-TeamBobProfile.ps1',
+    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
 )
 $missingRequired = @($requiredRelativePaths | Where-Object { -not (Test-Path -LiteralPath (Join-Path $RepositoryRoot $_) -PathType Leaf) })
 Add-TeamBobCheck 'Required modes commands rules templates and tools' ($missingRequired.Count -eq 0) (($missingRequired -join ', '))
