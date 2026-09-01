@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
 
 function Get-TeamBobSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -28,27 +29,6 @@ function Add-TeamBobCheck {
         $script:failed++
         Write-Output "FAIL $Name - $Detail"
     }
-}
-
-function Test-TeamBobAbsolutePath {
-    param([string]$Path)
-    return -not [string]::IsNullOrWhiteSpace($Path) -and $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
-}
-
-function Get-TeamBobCanonicalDirectory {
-    param([string]$Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
-    if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
-    return $fullPath.TrimEnd('\', '/')
-}
-
-function Test-TeamBobPathOutside {
-    param([string]$Candidate, [string]$Root)
-    $candidateFull = Get-TeamBobCanonicalDirectory $Candidate
-    $rootFull = Get-TeamBobCanonicalDirectory $Root
-    if ($candidateFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    return -not $candidateFull.StartsWith($rootFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
 function Test-TeamBobRelativePath {
@@ -119,25 +99,36 @@ function Test-TeamBobBuildProfileContract {
 }
 
 if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) { $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
-$rootValid = $RepositoryRoot -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -and (Test-Path -LiteralPath $RepositoryRoot -PathType Container)
-Add-TeamBobCheck 'Repository root' $rootValid $RepositoryRoot
+$repositoryPhysical = $null
+try {
+    $RepositoryRoot = Get-TeamBobCanonicalPath $RepositoryRoot 'Repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobNotVolumeRoot $RepositoryRoot 'Repository root' 'ENVIRONMENT_FAILED'
+    $repositoryPhysical = Get-TeamBobPhysicalPath $RepositoryRoot 'Repository root' 'Container' 'ENVIRONMENT_FAILED'
+    $rootValid = $true
+} catch {
+    $rootValid = $false
+    $rootFailure = $_.Exception.Message
+}
+Add-TeamBobCheck 'Repository root' $rootValid $(if ($rootValid) { $RepositoryRoot } else { $rootFailure })
 if (-not $rootValid) {
     Write-Output "SUMMARY Passed=$script:passed Failed=$script:failed Skipped=$script:skipped"
     exit 1
 }
-$RepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $teamBobRoot = Join-Path $RepositoryRoot 'team-bob'
-$environmentBoundaryRoot = $RepositoryRoot
+$environmentBoundaryPhysical = $repositoryPhysical
 $sourceRepositoryCandidate = Split-Path -Parent $RepositoryRoot
 if ((Split-Path -Leaf $RepositoryRoot) -eq 'profile' -and
     (Test-Path -LiteralPath (Join-Path $sourceRepositoryCandidate 'scripts/Install-TeamBobProfile.ps1') -PathType Leaf)) {
-    $environmentBoundaryRoot = $sourceRepositoryCandidate
+    try { $environmentBoundaryPhysical = Get-TeamBobPhysicalPath $sourceRepositoryCandidate 'Distribution repository root' 'Container' 'ENVIRONMENT_FAILED' } catch {
+        Add-TeamBobCheck 'Distribution repository root' $false $_.Exception.Message
+        $environmentBoundaryPhysical = $null
+    }
 }
 
 $manifest = $null
 $manifestPath = Join-Path $teamBobRoot 'profile-manifest.json'
 try {
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $manifest = Read-TeamBobJsonFile $manifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
     $manifestValid = $manifest.version -eq '0.1.0-poc' -and $manifest.profile.id -eq 'team-bob-vc6-bazaar'
     Add-TeamBobCheck 'Manifest identity' $manifestValid 'Expected team-bob-vc6-bazaar version 0.1.0-poc'
 } catch {
@@ -161,7 +152,7 @@ $missingRequired = @($requiredRelativePaths | Where-Object { -not (Test-Path -Li
 Add-TeamBobCheck 'Required modes commands rules templates and tools' ($missingRequired.Count -eq 0) (($missingRequired -join ', '))
 
 try {
-    $modes = Get-Content -Raw -LiteralPath (Join-Path $RepositoryRoot '.bob/custom_modes.yaml') | ConvertFrom-Json
+    $modes = Read-TeamBobJsonFile (Join-Path $RepositoryRoot '.bob/custom_modes.yaml') 'Custom modes document' 'ENVIRONMENT_FAILED'
     $slugs = @($modes.customModes.slug)
     $requiredSlugs = @('req-spec-draft', 'impact-review', 'green-implement', 'change-review', 'test-draft')
     $modesValid = $slugs.Count -eq 5 -and @($requiredSlugs | Where-Object { $slugs -notcontains $_ }).Count -eq 0
@@ -170,14 +161,14 @@ try {
 
 $workSchema = $null
 try {
-    $workSchema = Get-Content -Raw -LiteralPath (Join-Path $teamBobRoot 'config/work-packet.schema.json') | ConvertFrom-Json
+    $workSchema = Read-TeamBobJsonFile (Join-Path $teamBobRoot 'config/work-packet.schema.json') 'Work-packet schema' 'ENVIRONMENT_FAILED'
     $workShape = $workSchema.type -eq 'object' -and $workSchema.additionalProperties -eq $false -and @($workSchema.required).Count -eq 36 -and $workSchema.properties.'Max-Repair-Cycles'.const -eq 2
     Add-TeamBobCheck 'Work-packet JSON schema shape' $workShape 'Closed object with required packet fields and fixed repair budget'
 } catch { Add-TeamBobCheck 'Work-packet JSON schema shape' $false $_.Exception.Message }
 
 $buildSchema = $null
 try {
-    $buildSchema = Get-Content -Raw -LiteralPath (Join-Path $teamBobRoot 'config/vc6-build-targets.schema.json') | ConvertFrom-Json
+    $buildSchema = Read-TeamBobJsonFile (Join-Path $teamBobRoot 'config/vc6-build-targets.schema.json') 'Build-target schema' 'ENVIRONMENT_FAILED'
     $buildShape = $buildSchema.type -eq 'object' -and $buildSchema.properties.profiles.type -eq 'array' -and
         @($buildSchema.properties.profiles.items.required).Count -eq 13 -and $buildSchema.properties.profiles.items.properties.expectedArtifacts.minItems -eq 1
     Add-TeamBobCheck 'Build-target JSON schema shape' $buildShape 'Profiles array has the fixed qualified target interface'
@@ -186,7 +177,7 @@ try {
 $targets = $null
 $catalogProfilesValid = $false
 try {
-    $targets = Get-Content -Raw -LiteralPath (Join-Path $teamBobRoot 'config/vc6-build-targets.json') | ConvertFrom-Json
+    $targets = Read-TeamBobJsonFile (Join-Path $teamBobRoot 'config/vc6-build-targets.json') 'Build-target catalog' 'ENVIRONMENT_FAILED'
     $catalogShape = $targets -is [System.Management.Automation.PSCustomObject] -and
         (@($targets.PSObject.Properties.Name) -join ',') -eq 'profiles' -and $targets.profiles -is [System.Array]
     Add-TeamBobCheck 'Build-target catalog JSON shape' $catalogShape 'Catalog is a closed object exposing a profiles array'
@@ -199,39 +190,71 @@ try {
 } catch { Add-TeamBobCheck 'Build-target catalog JSON shape' $false $_.Exception.Message }
 
 $environment = $null
-$environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+$environmentPath = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json' }
 if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
     if ($Strict) { Add-TeamBobCheck 'Local environment registration' $false "Missing fixed registration: $environmentPath" }
     else { Add-TeamBobCheck 'Local environment registration' $false 'Not registered; optional outside Strict mode' -Skip }
 } else {
     try {
-        $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+        [void](Get-TeamBobPhysicalPath $environmentPath 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
+        $environment = Read-TeamBobJsonFile $environmentPath 'Local environment registration' 'ENVIRONMENT_FAILED'
+        Assert-TeamBobExactProperties $environment @(
+            'schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId',
+            'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot'
+        ) 'Local environment registration' 'ENVIRONMENT_FAILED'
         $identityValid = $null -ne $manifest -and $null -ne $workSchema -and $null -ne $buildSchema -and
             $environment.schemaVersion -eq '1.0' -and $environment.profileId -eq $manifest.profile.id -and
             $environment.profileVersion -eq $manifest.version -and $environment.workPacketSchemaId -eq $workSchema.'$id' -and
             $environment.buildTargetSchemaId -eq $buildSchema.'$id' -and $environment.pcId -eq [Environment]::MachineName
         Add-TeamBobCheck 'Local environment identity' $identityValid 'Registration matches manifest and schema identities'
 
-        $msdevAbsolute = Test-TeamBobAbsolutePath $environment.msdevPath
-        $msdevExists = $msdevAbsolute -and (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)
-        Add-TeamBobCheck 'MSDEV file' $msdevExists 'Absolute existing registered tool path'
-        $msdevHashValid = $msdevExists -and (Get-TeamBobSha256 $environment.msdevPath) -eq $environment.msdevSha256
+        $msdevPhysical = $null
+        try {
+            if (-not (Test-TeamBobAbsolutePath ([string]$environment.msdevPath))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered MSDEV tool path must be absolute.') }
+            $msdevPhysical = Get-TeamBobPhysicalPath ([string]$environment.msdevPath) 'Registered MSDEV tool' 'Leaf' 'ENVIRONMENT_FAILED'
+        } catch { $msdevFailure = $_.Exception.Message }
+        $msdevExists = $null -ne $msdevPhysical
+        Add-TeamBobCheck 'MSDEV file' $msdevExists $(if ($msdevExists) { 'Existing fixed-local physical tool path with no reparse components' } else { $msdevFailure })
+        $msdevHashValid = $msdevExists -and (Get-TeamBobSha256 $environment.msdevPath) -eq ([string]$environment.msdevSha256).ToLowerInvariant()
         Add-TeamBobCheck 'MSDEV hash' $msdevHashValid 'Registered SHA-256 matches tool bytes'
 
-        $bazaarAbsolute = Test-TeamBobAbsolutePath $environment.bazaarPath
-        $bazaarExists = $bazaarAbsolute -and (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)
-        Add-TeamBobCheck 'Bazaar file' $bazaarExists 'Absolute existing registered tool path'
-        $bazaarHashValid = $bazaarExists -and (Get-TeamBobSha256 $environment.bazaarPath) -eq $environment.bazaarSha256
+        $bazaarPhysical = $null
+        try {
+            if (-not (Test-TeamBobAbsolutePath ([string]$environment.bazaarPath))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered Bazaar tool path must be absolute.') }
+            $bazaarPhysical = Get-TeamBobPhysicalPath ([string]$environment.bazaarPath) 'Registered Bazaar tool' 'Leaf' 'ENVIRONMENT_FAILED'
+        } catch { $bazaarFailure = $_.Exception.Message }
+        $bazaarExists = $null -ne $bazaarPhysical
+        Add-TeamBobCheck 'Bazaar file' $bazaarExists $(if ($bazaarExists) { 'Existing fixed-local physical tool path with no reparse components' } else { $bazaarFailure })
+        $bazaarHashValid = $bazaarExists -and (Get-TeamBobSha256 $environment.bazaarPath) -eq ([string]$environment.bazaarSha256).ToLowerInvariant()
         Add-TeamBobCheck 'Bazaar hash' $bazaarHashValid 'Registered SHA-256 matches tool bytes'
 
-        $sandboxAbsolute = Test-TeamBobAbsolutePath $environment.sandboxRoot
-        $logAbsolute = Test-TeamBobAbsolutePath $environment.logRoot
-        $sandboxExists = $sandboxAbsolute -and (Test-Path -LiteralPath $environment.sandboxRoot -PathType Container)
-        $logExists = $logAbsolute -and (Test-Path -LiteralPath $environment.logRoot -PathType Container)
-        Add-TeamBobCheck 'Sandbox root' ($sandboxExists -and (Test-TeamBobPathOutside $environment.sandboxRoot $environmentBoundaryRoot)) 'Absolute, existing, and outside the repository'
-        Add-TeamBobCheck 'Log root' ($logExists -and (Test-TeamBobPathOutside $environment.logRoot $environmentBoundaryRoot)) 'Absolute, existing, and outside the repository'
-        $rootsSeparate = $sandboxExists -and $logExists -and (Test-TeamBobPathOutside $environment.sandboxRoot $environment.logRoot) -and (Test-TeamBobPathOutside $environment.logRoot $environment.sandboxRoot)
-        Add-TeamBobCheck 'Sandbox and log root separation' $rootsSeparate 'Neither root equals or contains the other'
+        $sandboxPhysical = $null
+        try {
+            if (-not (Test-TeamBobAbsolutePath ([string]$environment.sandboxRoot))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered sandbox root must be absolute.') }
+            $sandboxCanonical = Get-TeamBobCanonicalPath ([string]$environment.sandboxRoot) 'Registered sandbox root' 'ENVIRONMENT_FAILED'
+            if ($sandboxCanonical.Equals([System.IO.Path]::GetPathRoot($sandboxCanonical), [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered sandbox root must not be a drive-volume root.') }
+            $sandboxPhysical = Get-TeamBobPhysicalPath $sandboxCanonical 'Registered sandbox root' 'Container' 'ENVIRONMENT_FAILED'
+            if ($null -eq $environmentBoundaryPhysical) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Distribution repository physical boundary is unavailable.') }
+            Assert-TeamBobPhysicalSeparation $sandboxPhysical $environmentBoundaryPhysical 'Sandbox and repository roots' 'ENVIRONMENT_FAILED'
+        } catch { $sandboxFailure = $_.Exception.Message }
+        Add-TeamBobCheck 'Sandbox root' ($null -ne $sandboxPhysical -and [string]::IsNullOrWhiteSpace($sandboxFailure)) $(if ([string]::IsNullOrWhiteSpace($sandboxFailure)) { 'Fixed-local, non-volume, non-reparse, and physically separate from the repository' } else { $sandboxFailure })
+
+        $logPhysical = $null
+        try {
+            if (-not (Test-TeamBobAbsolutePath ([string]$environment.logRoot))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered log root must be absolute.') }
+            $logCanonical = Get-TeamBobCanonicalPath ([string]$environment.logRoot) 'Registered log root' 'ENVIRONMENT_FAILED'
+            if ($logCanonical.Equals([System.IO.Path]::GetPathRoot($logCanonical), [System.StringComparison]::OrdinalIgnoreCase)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered log root must not be a drive-volume root.') }
+            $logPhysical = Get-TeamBobPhysicalPath $logCanonical 'Registered log root' 'Container' 'ENVIRONMENT_FAILED'
+            if ($null -eq $environmentBoundaryPhysical) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Distribution repository physical boundary is unavailable.') }
+            Assert-TeamBobPhysicalSeparation $logPhysical $environmentBoundaryPhysical 'Log and repository roots' 'ENVIRONMENT_FAILED'
+        } catch { $logFailure = $_.Exception.Message }
+        Add-TeamBobCheck 'Log root' ($null -ne $logPhysical -and [string]::IsNullOrWhiteSpace($logFailure)) $(if ([string]::IsNullOrWhiteSpace($logFailure)) { 'Fixed-local, non-volume, non-reparse, and physically separate from the repository' } else { $logFailure })
+
+        $rootsSeparate = $false
+        if ($null -ne $sandboxPhysical -and $null -ne $logPhysical) {
+            try { Assert-TeamBobPhysicalSeparation $sandboxPhysical $logPhysical 'Sandbox and log roots' 'ENVIRONMENT_FAILED'; $rootsSeparate = $true } catch { $rootsFailure = $_.Exception.Message }
+        }
+        Add-TeamBobCheck 'Sandbox and log root separation' $rootsSeparate $(if ($rootsSeparate) { 'Neither root equals, contains, aliases, or is an ancestor of the other' } else { $rootsFailure })
     } catch { Add-TeamBobCheck 'Local environment JSON' $false $_.Exception.Message }
 }
 

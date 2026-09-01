@@ -239,6 +239,12 @@ Assert-Equal (($workPacketSchema.properties.Risk.enum) -join ',') 'Green,Amber,R
 Assert-Equal $workPacketSchema.properties.'Autonomous-Edit-Build-Approved'.const 'YES' 'Autonomous edit/build requires explicit approval'
 Assert-Equal $workPacketSchema.properties.'Soft-Execute-Risk-Accepted'.const 'YES' 'Soft execute risk requires explicit acceptance'
 Assert-Equal $workPacketSchema.properties.'Max-Repair-Cycles'.const 2 'Repair cycles are capped at two'
+foreach ($arrayField in @('ReqIDs', 'Allowed Files', 'Forbidden Areas', 'Open QA')) {
+    Assert-Equal $workPacketSchema.properties.$arrayField.items.minLength 1 "Work-packet schema rejects empty '$arrayField' items"
+}
+foreach ($impactField in @('RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact', 'Customer Branch Impact')) {
+    Assert-Equal $workPacketSchema.properties.$impactField.minLength 1 "Work-packet schema requires non-empty '$impactField' evidence"
+}
 
 $packet = Get-CanonicalWorkPacket (Join-Path $profileRoot 'team-bob/templates/work-packet.md')
 Assert-Equal $packet.Risk 'Amber' 'Representative packet is Amber so open QA can be recorded'

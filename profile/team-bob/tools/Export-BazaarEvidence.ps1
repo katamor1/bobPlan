@@ -6,13 +6,17 @@ $ErrorActionPreference = 'Stop'
 
 $nativeExitCode = 1
 try {
-    $workPacketFull = Get-TeamBobCanonicalPath $WorkPacket
+    $workPacketFull = Get-TeamBobCanonicalPath $WorkPacket 'Work packet' 'INTEGRITY_FAILED'
+    if (-not (Test-Path -LiteralPath $workPacketFull -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $workPacketFull") }
+    [void](Get-TeamBobPhysicalPath $workPacketFull 'Work packet' 'Leaf' 'INTEGRITY_FAILED')
     $packet = Read-TeamBobCanonicalPacket $workPacketFull
     $context = Get-TeamBobPacketContext $packet $workPacketFull
+    $resultsInfo = Get-TeamBobTaskResultsContext $context -Create
     $profileRoot = Split-Path -Parent $PSScriptRoot
     $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
     $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
     $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
+    foreach ($path in @($manifestPath, $workSchemaPath, $buildSchemaPath)) { [void](Get-TeamBobPhysicalPath $path 'Installed profile contract' 'Leaf' 'ENVIRONMENT_FAILED') }
     $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath -BazaarOnly
 
     $baseline = Get-TeamBobProtectedSnapshot $context
@@ -35,6 +39,9 @@ try {
             }
             $outputs[$query.Name] = $queryResult.Output
             $commandRecords += [pscustomobject]@{ command = ($query.Arguments -join ' '); exitCode = $queryResult.ExitCode }
+            if ($query.Name -eq 'status') {
+                Assert-TeamBobBazaarStatus (Get-TeamBobNormalizedProcessText ([string]$queryResult.Output)) $context.AllowedFiles
+            }
         }
         if ($null -eq $operationFailure) {
             $nick = Get-TeamBobNormalizedProcessText ([string]$outputs['nick'])
@@ -52,10 +59,8 @@ try {
     if ($null -ne $integrityFailure) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("Evidence postflight integrity proof failed: " + $integrityFailure.Message) 30) }
     if ($null -ne $operationFailure) { throw $operationFailure }
 
-    $resultDirectory = Join-Path (Split-Path -Parent $workPacketFull) 'results'
-    if (Test-Path -LiteralPath $resultDirectory -PathType Leaf) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Task results path is an existing file.') }
-    if (-not (Test-Path -LiteralPath $resultDirectory -PathType Container)) { [System.IO.Directory]::CreateDirectory($resultDirectory) | Out-Null }
-    foreach ($query in $queries) { Write-TeamBobUtf8File (Join-Path $resultDirectory $query.File) ([string]$outputs[$query.Name]) }
+    $resultDirectory = $resultsInfo.FullPath
+    foreach ($query in $queries) { Write-TeamBobUtf8File (Join-Path $resultDirectory $query.File) ([string]$outputs[$query.Name]) $context.TaskPhysical }
     $manifest = [ordered]@{
         schemaVersion = '1.0'; taskId = $context.TaskId; bazaarRoot = $context.BazaarRoot; bazaarPath = $environment.bazaarPath
         bazaarSha256 = Get-TeamBobFileHash $environment.bazaarPath; branchNick = (Get-TeamBobNormalizedProcessText ([string]$outputs['nick']))
@@ -63,7 +68,8 @@ try {
         commandResults = @($commandRecords); files = @($queries.File); exportedAt = [DateTimeOffset]::UtcNow.ToString('o')
     }
     $manifestPath = Join-Path $resultDirectory 'bazaar-evidence-manifest.json'
-    Write-TeamBobUtf8File $manifestPath (($manifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine)
+    Write-TeamBobUtf8File $manifestPath (($manifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine) $context.TaskPhysical
+    Assert-TeamBobProtectedSnapshot $baseline (Get-TeamBobProtectedSnapshot $context) 'Bazaar evidence publication'
     Write-Output "EXPORTED $manifestPath"
     exit 0
 } catch {

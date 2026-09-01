@@ -8,42 +8,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
-function Get-TeamBobSha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try { $stream = [System.IO.File]::OpenRead($Path); try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()) } finally { $stream.Dispose() } } finally { $sha256.Dispose() }
-}
-
-function Test-TeamBobAbsolutePath {
-    param([string]$Path)
-    return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
-}
-
-function Get-TeamBobCanonicalPath {
-    param([string]$Path)
-    return [System.IO.Path]::GetFullPath($Path)
-}
-
-function Test-TeamBobPathAtOrBelow {
-    param([string]$Candidate, [string]$Root)
-    $candidateFull = Get-TeamBobCanonicalPath $Candidate
-    $rootFull = Get-TeamBobCanonicalPath $Root
-    if ($candidateFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
-    $rootPrefix = $rootFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-    return $candidateFull.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)
-}
+. (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
 
 try {
     foreach ($entry in @(
         @{ Name = 'MsdevPath'; Value = $MsdevPath }, @{ Name = 'BazaarPath'; Value = $BazaarPath },
         @{ Name = 'SandboxRoot'; Value = $SandboxRoot }, @{ Name = 'LogRoot'; Value = $LogRoot }
-    )) {
-        if (-not (Test-TeamBobAbsolutePath $entry.Value)) { throw "$($entry.Name) must be an absolute path." }
-    }
-    if (-not (Test-Path -LiteralPath $MsdevPath -PathType Leaf)) { throw "MsdevPath must name an existing file: $MsdevPath" }
-    if (-not (Test-Path -LiteralPath $BazaarPath -PathType Leaf)) { throw "BazaarPath must name an existing file: $BazaarPath" }
+    )) { if (-not (Test-TeamBobAbsolutePath $entry.Value)) { throw "$($entry.Name) must be an absolute local drive path." } }
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw 'LOCALAPPDATA must be an absolute path.' }
+
+    $msdevFull = Get-TeamBobCanonicalPath $MsdevPath 'MsdevPath' 'ENVIRONMENT_FAILED'
+    $bazaarFull = Get-TeamBobCanonicalPath $BazaarPath 'BazaarPath' 'ENVIRONMENT_FAILED'
+    [void](Get-TeamBobPhysicalPath $msdevFull 'MsdevPath' 'Leaf' 'ENVIRONMENT_FAILED')
+    [void](Get-TeamBobPhysicalPath $bazaarFull 'BazaarPath' 'Leaf' 'ENVIRONMENT_FAILED')
 
     $profileRoot = Split-Path -Parent $PSScriptRoot
     $installationRoot = Split-Path -Parent $profileRoot
@@ -61,10 +38,11 @@ try {
     $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
     foreach ($required in @($manifestPath, $workSchemaPath, $buildSchemaPath)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required profile identity file is missing: $required" }
+        [void](Get-TeamBobPhysicalPath $required 'Required profile identity file' 'Leaf' 'ENVIRONMENT_FAILED')
     }
-    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    $workSchema = Get-Content -Raw -LiteralPath $workSchemaPath | ConvertFrom-Json
-    $buildSchema = Get-Content -Raw -LiteralPath $buildSchemaPath | ConvertFrom-Json
+    $manifest = Read-TeamBobJsonFile $manifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
+    $workSchema = Read-TeamBobJsonFile $workSchemaPath 'Work-packet schema' 'ENVIRONMENT_FAILED'
+    $buildSchema = Read-TeamBobJsonFile $buildSchemaPath 'Build-target schema' 'ENVIRONMENT_FAILED'
     if ([string]::IsNullOrWhiteSpace($manifest.profile.id) -or [string]::IsNullOrWhiteSpace($manifest.version)) { throw 'Profile manifest identity is incomplete.' }
     if ([string]::IsNullOrWhiteSpace($workSchema.'$id') -or [string]::IsNullOrWhiteSpace($buildSchema.'$id')) { throw 'Profile schema identity is incomplete.' }
 
@@ -75,53 +53,47 @@ try {
         pcId = [Environment]::MachineName
         workPacketSchemaId = [string]$workSchema.'$id'
         buildTargetSchemaId = [string]$buildSchema.'$id'
-        msdevPath = Get-TeamBobCanonicalPath $MsdevPath
-        msdevSha256 = Get-TeamBobSha256 $MsdevPath
-        bazaarPath = Get-TeamBobCanonicalPath $BazaarPath
-        bazaarSha256 = Get-TeamBobSha256 $BazaarPath
-        sandboxRoot = Get-TeamBobCanonicalPath $SandboxRoot
-        logRoot = Get-TeamBobCanonicalPath $LogRoot
+        msdevPath = $msdevFull
+        msdevSha256 = Get-TeamBobFileHash $msdevFull
+        bazaarPath = $bazaarFull
+        bazaarSha256 = Get-TeamBobFileHash $bazaarFull
+        sandboxRoot = Get-TeamBobCanonicalPath $SandboxRoot 'SandboxRoot' 'ENVIRONMENT_FAILED'
+        logRoot = Get-TeamBobCanonicalPath $LogRoot 'LogRoot' 'ENVIRONMENT_FAILED'
     }
-    if (Test-TeamBobPathAtOrBelow $registration.sandboxRoot $repositoryRoot) { throw 'SandboxRoot must be outside the repository root.' }
-    if (Test-TeamBobPathAtOrBelow $registration.logRoot $repositoryRoot) { throw 'LogRoot must be outside the repository root.' }
-    if ((Test-TeamBobPathAtOrBelow $registration.sandboxRoot $registration.logRoot) -or
-        (Test-TeamBobPathAtOrBelow $registration.logRoot $registration.sandboxRoot)) {
-        throw 'SandboxRoot and LogRoot must be separate and must not contain each other.'
-    }
+    $repositoryFull = Get-TeamBobCanonicalPath $repositoryRoot 'Repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobNotVolumeRoot $repositoryFull 'Repository root' 'ENVIRONMENT_FAILED'
+    $repositoryPhysical = Get-TeamBobPhysicalPath $repositoryFull 'Repository root' 'Container' 'ENVIRONMENT_FAILED'
+    $sandboxInfo = Get-TeamBobProspectiveDirectory $registration.sandboxRoot 'SandboxRoot' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
+    $logInfo = Get-TeamBobProspectiveDirectory $registration.logRoot 'LogRoot' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
+    Assert-TeamBobPhysicalSeparation $sandboxInfo.PhysicalPath $repositoryPhysical 'SandboxRoot and repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobPhysicalSeparation $logInfo.PhysicalPath $repositoryPhysical 'LogRoot and repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobPhysicalSeparation $sandboxInfo.PhysicalPath $logInfo.PhysicalPath 'SandboxRoot and LogRoot' 'ENVIRONMENT_FAILED'
     $json = ($registration | ConvertTo-Json -Depth 5) + [Environment]::NewLine
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $environmentParent = Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED') 'IBM/BobTeamProfile/vc6-machine-control-poc'
+    $environmentParentInfo = Get-TeamBobProspectiveDirectory $environmentParent 'Environment registration parent' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
+    $environmentPath = Join-Path $environmentParentInfo.FullPath 'environment.json'
 
     if (Test-Path -LiteralPath $environmentPath -PathType Container) { throw "Environment registration path is an existing directory: $environmentPath" }
     $identicalRegistration = $false
     if (Test-Path -LiteralPath $environmentPath -PathType Leaf) {
-        $existing = [System.IO.File]::ReadAllText($environmentPath)
+        [void](Get-TeamBobPhysicalPath $environmentPath 'Environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
+        $existing = Read-TeamBobUtf8File $environmentPath 'Environment registration' 'ENVIRONMENT_FAILED'
         if ($existing -eq $json) {
             $identicalRegistration = $true
         } elseif (-not $Force) { throw 'A different local environment registration already exists; use -Force to replace it.' }
     }
 
-    foreach ($directory in @($registration.sandboxRoot, $registration.logRoot, (Split-Path -Parent $environmentPath))) {
-        if (Test-Path -LiteralPath $directory -PathType Leaf) { throw "Required directory path is an existing file: $directory" }
-        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-    }
+    $sandboxCreated = Get-TeamBobProspectiveDirectory $registration.sandboxRoot 'SandboxRoot' 'ENVIRONMENT_FAILED' -RejectVolumeRoot -Create
+    $logCreated = Get-TeamBobProspectiveDirectory $registration.logRoot 'LogRoot' 'ENVIRONMENT_FAILED' -RejectVolumeRoot -Create
+    $environmentParentCreated = Get-TeamBobProspectiveDirectory $environmentParentInfo.FullPath 'Environment registration parent' 'ENVIRONMENT_FAILED' -RejectVolumeRoot -Create
+    Assert-TeamBobPhysicalSeparation $sandboxCreated.PhysicalPath $repositoryPhysical 'SandboxRoot and repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobPhysicalSeparation $logCreated.PhysicalPath $repositoryPhysical 'LogRoot and repository root' 'ENVIRONMENT_FAILED'
+    Assert-TeamBobPhysicalSeparation $sandboxCreated.PhysicalPath $logCreated.PhysicalPath 'SandboxRoot and LogRoot' 'ENVIRONMENT_FAILED'
     if ($identicalRegistration) {
         Write-Output "IDENTICAL $environmentPath"
         exit 0
     }
-
-    $temporaryPath = Join-Path (Split-Path -Parent $environmentPath) ('.environment.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    $backupPath = Join-Path (Split-Path -Parent $environmentPath) ('.environment.' + [guid]::NewGuid().ToString('N') + '.bak')
-    try {
-        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-        if (Test-Path -LiteralPath $environmentPath -PathType Leaf) {
-            [System.IO.File]::Replace($temporaryPath, $environmentPath, $backupPath)
-        } else {
-            [System.IO.File]::Move($temporaryPath, $environmentPath)
-        }
-    } finally {
-        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
-        if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Remove-Item -LiteralPath $backupPath -Force }
-    }
+    Write-TeamBobUtf8File $environmentPath $json
     Write-Output "WROTE $environmentPath"
     exit 0
 } catch {

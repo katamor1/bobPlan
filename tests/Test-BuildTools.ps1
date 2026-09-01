@@ -36,6 +36,12 @@ function Write-Cp932Fixture {
     [System.IO.File]::WriteAllBytes($Path, [System.Text.Encoding]::GetEncoding(932).GetBytes($Text))
 }
 
+function Read-Utf8LinesFixture {
+    param([string]$Path)
+    $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+    return @([System.IO.File]::ReadAllLines($Path, $encoding))
+}
+
 function Write-Task3PacketFixture {
     param(
         [string]$Path, [string]$BazaarRoot, [string]$TaskId, [string[]]$AllowedFiles, [string]$BuildProfileId,
@@ -56,6 +62,30 @@ function Write-Task3PacketFixture {
     Write-Utf8NoBomFixture $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")
 }
 
+function Read-Task3PacketObjectFixture {
+    param([string]$Path)
+    $text = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+    $match = [regex]::Match($text, '(?s)<!-- canonical-work-packet-json:start -->\s*```json\s*(?<json>\{.*?\})\s*```\s*<!-- canonical-work-packet-json:end -->')
+    if (-not $match.Success) { throw "Task 3 packet fixture is malformed: $Path" }
+    return ($match.Groups['json'].Value | ConvertFrom-Json)
+}
+
+function Write-Task3PacketObjectFixture {
+    param([string]$Path, [object]$Packet)
+    $json = $Packet | ConvertTo-Json -Depth 20
+    Write-Utf8NoBomFixture $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")
+}
+
+function New-Task3PacketPathFixture {
+    param([string]$WorkingTree, [string]$TaskId, [string]$BuildProfileId, [switch]$WithoutResults)
+    $taskDirectory = Join-Path $WorkingTree ('team-bob-work/' + $TaskId)
+    New-Item -ItemType Directory -Path $taskDirectory -Force | Out-Null
+    if (-not $WithoutResults) { New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') -Force | Out-Null }
+    $path = Join-Path $taskDirectory 'work-packet.md'
+    Write-Task3PacketFixture $path $WorkingTree $TaskId @('src/example.cpp', 'src/日本.cpp') $BuildProfileId
+    return $path
+}
+
 function New-Task3FakeExecutables {
     param([string]$Directory)
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
@@ -71,9 +101,28 @@ using System.Reflection;
 public static class FakeMsdev {
     public static int Main(string[] args) {
         if (args.Length == 1 && args[0] == "--child") { Thread.Sleep(12000); return 0; }
+        if (args.Length == 1 && args[0] == "--watch-result") {
+            string directory = Environment.GetEnvironmentVariable("BOB3_MSDEV_RESULT_WATCH_DIRECTORY");
+            string postMutation = Environment.GetEnvironmentVariable("BOB3_MSDEV_POST_RESULT_MUTATE_PATH");
+            string signal = Environment.GetEnvironmentVariable("BOB3_MSDEV_POST_RESULT_SIGNAL_PATH");
+            using (FileSystemWatcher watcher = new FileSystemWatcher(directory, ".team-bob.*.tmp")) {
+                watcher.EnableRaisingEvents = true;
+                WaitForChangedResult changed = watcher.WaitForChanged(WatcherChangeTypes.Created, 10000);
+                if (changed.TimedOut) return 3;
+            }
+            File.WriteAllText(postMutation, "post-result mutation", new UTF8Encoding(false));
+            File.WriteAllText(signal, "mutated", new UTF8Encoding(false));
+            return 0;
+        }
         string commandLog = Environment.GetEnvironmentVariable("BOB3_MSDEV_COMMAND_LOG");
         if (!String.IsNullOrEmpty(commandLog)) File.AppendAllText(commandLog, String.Join("\t", args) + Environment.NewLine, new UTF8Encoding(false));
         string mode = Environment.GetEnvironmentVariable("BOB3_MSDEV_MODE") ?? "success";
+        if (mode == "post-publish-mutation") {
+            ProcessStartInfo watcher = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--watch-result");
+            watcher.UseShellExecute = true;
+            watcher.WindowStyle = ProcessWindowStyle.Hidden;
+            Process.Start(watcher);
+        }
         if (mode == "timeout-child") {
             ProcessStartInfo child = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--child");
             child.UseShellExecute = false;
@@ -98,13 +147,14 @@ public static class FakeMsdev {
         else if (mode == "invalid-log") { message = "invalid log"; exitCode = 1; }
         else if (mode == "environment") { message = "MSDEV fatal environment failure"; exitCode = 2; }
         else if (mode == "no-success") { message = "build ended without a success marker"; exitCode = 0; }
+        else if (mode == "unicode-success") { message = "構成 成功"; exitCode = 0; }
         else { message = "0 error(s), 0 warning(s)"; exitCode = 0; }
         if (!String.IsNullOrEmpty(outputLog)) {
             Directory.CreateDirectory(Path.GetDirectoryName(outputLog));
             if (mode == "invalid-log") File.WriteAllBytes(outputLog, new byte[] { 0x81 });
             else File.WriteAllText(outputLog, message + Environment.NewLine, Encoding.GetEncoding(932));
         }
-        if ((mode == "success" || mode == "no-success") && mode != "artifact-missing") {
+        if ((mode == "success" || mode == "no-success" || mode == "unicode-success" || mode == "post-publish-mutation") && mode != "artifact-missing") {
             string artifact = Path.Combine(Environment.CurrentDirectory, "bin", "fixture.exe");
             Directory.CreateDirectory(Path.GetDirectoryName(artifact));
             File.WriteAllText(artifact, "fixture artifact", new UTF8Encoding(false));
@@ -125,8 +175,22 @@ public static class FakeMsdev {
 using System;
 using System.IO;
 using System.Text;
+using System.Diagnostics;
 public static class FakeBazaar {
     public static int Main(string[] args) {
+        if (args.Length == 1 && args[0] == "--watch-evidence-result") {
+            string directory = Environment.GetEnvironmentVariable("BOB3_BZR_RESULT_WATCH_DIRECTORY");
+            string mutation = Environment.GetEnvironmentVariable("BOB3_BZR_POST_RESULT_MUTATE_PATH");
+            string signal = Environment.GetEnvironmentVariable("BOB3_BZR_POST_RESULT_SIGNAL_PATH");
+            using (FileSystemWatcher watcher = new FileSystemWatcher(directory, ".team-bob.*.tmp")) {
+                watcher.EnableRaisingEvents = true;
+                WaitForChangedResult changed = watcher.WaitForChanged(WatcherChangeTypes.Created, 10000);
+                if (changed.TimedOut) return 3;
+            }
+            File.WriteAllText(mutation, "post-evidence mutation", new UTF8Encoding(false));
+            File.WriteAllText(signal, "mutated", new UTF8Encoding(false));
+            return 0;
+        }
         string commandLog = Environment.GetEnvironmentVariable("BOB3_BZR_COMMAND_LOG");
         string command = args.Length == 0 ? "" : args[0];
         int occurrence = 1;
@@ -154,7 +218,15 @@ public static class FakeBazaar {
         if (command == "status") value = Environment.GetEnvironmentVariable("BOB3_BZR_STATUS") ?? "";
         else if (command == "diff") value = Environment.GetEnvironmentVariable("BOB3_BZR_DIFF") ?? "";
         else if (command == "nick") value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_NICK") ?? "fixture-branch";
-        else if (command == "version-info") value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_REVISION") ?? "fixture-revision-id-full-123";
+        else if (command == "version-info") {
+            value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_REVISION") ?? "fixture-revision-id-full-123";
+            if (String.Equals(Environment.GetEnvironmentVariable("BOB3_BZR_WATCH_RESULT"), "1", StringComparison.Ordinal)) {
+                ProcessStartInfo watcher = new ProcessStartInfo(System.Reflection.Assembly.GetExecutingAssembly().Location, "--watch-evidence-result");
+                watcher.UseShellExecute = true;
+                watcher.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
+                Process.Start(watcher);
+            }
+        }
         else { Console.Error.WriteLine("forbidden fixture command: " + command); return 42; }
         if (!String.IsNullOrEmpty(value)) Console.Out.Write(value.EndsWith("\n") ? value : value + Environment.NewLine);
         int diffExit;
@@ -203,13 +275,37 @@ function Assert-Task3BuildOutcome {
     Assert-True ($Result.Output -match ('(?m)^' + [regex]::Escape($Status) + '\s*$')) "$Message emits the fixed status token"
 }
 
+function Invoke-Task3BuildWithoutDurableResultFixture {
+    param([string]$ScriptPath, [string]$WorkPacketPath, [string]$Action, [int]$Attempt)
+    $resultDirectory = Join-Path (Split-Path -Parent $WorkPacketPath) 'results'
+    $before = @()
+    if (Test-Path -LiteralPath $resultDirectory -PathType Container) {
+        $before = @(Get-ChildItem -LiteralPath $resultDirectory -Filter 'build-result-*.json' -File | ForEach-Object FullName)
+    }
+    $invocation = Invoke-TestScript $ScriptPath @('-WorkPacket', $WorkPacketPath, '-Action', $Action, '-Attempt', ([string]$Attempt))
+    $after = @()
+    if (Test-Path -LiteralPath $resultDirectory -PathType Container) {
+        $after = @(Get-ChildItem -LiteralPath $resultDirectory -Filter 'build-result-*.json' -File | ForEach-Object FullName)
+    }
+    Assert-Equal @($after | Where-Object { $before -notcontains $_ }).Count 0 'A rejected untrusted packet creates no durable result path'
+    return $invocation
+}
+
+function Assert-Task3BuildWithoutDurableResult {
+    param([object]$Result, [string]$Message)
+    Assert-Equal $Result.ExitCode 30 "$Message uses the fixed integrity exit code"
+    Assert-True ($Result.Output -match '(?m)^INTEGRITY_FAILED\s*$') "$Message emits the fixed integrity status token"
+}
+
 $task3RepoRoot = Split-Path -Parent $PSScriptRoot
 $task3Installer = Join-Path $task3RepoRoot 'scripts/Install-TeamBobProfile.ps1'
 $task3FixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('team-bob-task3-' + [guid]::NewGuid().ToString('N'))
 $task3SavedEnvironment = @{}
 $task3EnvironmentNames = @(
     'LOCALAPPDATA', 'BOB3_MSDEV_COMMAND_LOG', 'BOB3_MSDEV_MODE', 'BOB3_MSDEV_SLEEP_MS', 'BOB3_MSDEV_MUTATE_PATH', 'BOB3_MSDEV_DELETE_PATH',
-    'BOB3_MSDEV_BLOCK_RESULT_DIRECTORY', 'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_DIFF_EXIT',
+    'BOB3_MSDEV_BLOCK_RESULT_DIRECTORY', 'BOB3_MSDEV_RESULT_WATCH_DIRECTORY', 'BOB3_MSDEV_POST_RESULT_MUTATE_PATH', 'BOB3_MSDEV_POST_RESULT_SIGNAL_PATH',
+    'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_DIFF_EXIT', 'BOB3_BZR_WATCH_RESULT',
+    'BOB3_BZR_RESULT_WATCH_DIRECTORY', 'BOB3_BZR_POST_RESULT_MUTATE_PATH', 'BOB3_BZR_POST_RESULT_SIGNAL_PATH',
     'BOB3_BZR_NICK', 'BOB3_BZR_NICK_SECOND', 'BOB3_BZR_REVISION', 'BOB3_BZR_REVISION_SECOND', 'BOB3_BZR_FAIL_COMMAND',
     'BOB3_BZR_FAIL_CODE', 'BOB3_BZR_FAIL_OCCURRENCE', 'BOB3_BZR_MUTATE_COMMAND', 'BOB3_BZR_MUTATE_OCCURRENCE', 'BOB3_BZR_MUTATE_PATH'
 )
@@ -230,18 +326,22 @@ try {
     Write-Cp932Fixture (Join-Path $workingTree 'alternate/example.cpp') "int duplicate_name() { return 0; }`r`n"
     Write-Cp932Fixture (Join-Path $workingTree 'src/日本.cpp') "int japanese() { return 0; }`r`n"
     Write-Cp932Fixture (Join-Path $workingTree 'project/fixture.dsp') "# Microsoft Developer Studio Project File`r`n"
+    Write-Cp932Fixture (Join-Path $workingTree 'project/日本.dsp') "# 日本語プロジェクト`r`n"
     Write-Utf8NoBomFixture (Join-Path $workingTree 'generated.pdb') 'excluded pdb'
     Write-Utf8NoBomFixture (Join-Path $workingTree 'obj/old.obj') 'excluded obj'
     $install = Invoke-TestScript $task3Installer @('-TargetPath', $workingTree)
     Assert-Equal $install.ExitCode 0 'Task 3 tests use a temporary installed repository copy'
 
-    $fakeTools = New-Task3FakeExecutables (Join-Path $task3FixtureRoot 'fake-bin')
-    $env:LOCALAPPDATA = Join-Path $task3FixtureRoot 'localappdata'
-    $sandboxRoot = Join-Path $task3FixtureRoot 'sandboxes'
-    $logRoot = Join-Path $task3FixtureRoot 'logs'
+    $fakeTools = New-Task3FakeExecutables (Join-Path $task3FixtureRoot '道具-日本')
+    $env:LOCALAPPDATA = Join-Path $task3FixtureRoot 'ローカル-日本'
+    $sandboxRoot = Join-Path $task3FixtureRoot 'サンドボックス-日本'
+    $logRoot = Join-Path $task3FixtureRoot 'ログ-日本'
     $initializePath = Join-Path $workingTree 'team-bob/tools/Initialize-LocalEnvironment.ps1'
     $initialize = Invoke-TestScript $initializePath @('-MsdevPath', $fakeTools.MsdevPath, '-BazaarPath', $fakeTools.BazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot)
     Assert-Equal $initialize.ExitCode 0 'Task 3 fixture registers only runtime fake executables in isolated LOCALAPPDATA'
+    $strictNonAscii = Invoke-TestScript (Join-Path $workingTree 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $workingTree, '-Strict')
+    Assert-Equal $strictNonAscii.ExitCode 0 'Strict validator round-trips non-ASCII LOCALAPPDATA, tool, sandbox, and log paths'
+    Assert-True ($strictNonAscii.Output -match 'SUMMARY.*Failed=0') 'Strict non-ASCII environment validation emits a zero-failure summary'
 
     $profile = [pscustomobject]@{
         id = 'qualified-task3-fixture'; enabled = $true; projectFile = 'project/fixture.dsp'; target = 'Fixture - Win32 Release'; timeoutSeconds = 2
@@ -273,7 +373,7 @@ try {
     $bzrFingerprint = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
 
     $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
-    $registeredEnvironment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $registeredEnvironment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 
     $toolJunctionAlias = Join-Path $task3FixtureRoot 'registered-tool-junction-alias'
     New-Item -ItemType Junction -Path $toolJunctionAlias -Target (Split-Path -Parent $fakeTools.MsdevPath) -ErrorAction Stop | Out-Null
@@ -356,10 +456,120 @@ try {
     $registeredEnvironment.logRoot = $logRoot
     Write-JsonFixture $environmentPath $registeredEnvironment
 
+    $environmentNoBomBytes = [System.IO.File]::ReadAllBytes($environmentPath)
+    $environmentBomBytes = New-Object byte[] ($environmentNoBomBytes.Length + 3)
+    $environmentBomBytes[0] = 0xEF; $environmentBomBytes[1] = 0xBB; $environmentBomBytes[2] = 0xBF
+    [Array]::Copy($environmentNoBomBytes, 0, $environmentBomBytes, 3, $environmentNoBomBytes.Length)
+    [System.IO.File]::WriteAllBytes($environmentPath, $environmentBomBytes)
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $environmentBomBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $environmentBomBuild 'ENVIRONMENT_FAILED' 20 'BOM-bearing production environment JSON'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'BOM environment rejection invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'BOM environment rejection invokes no Bazaar query'
+    [System.IO.File]::WriteAllBytes($environmentPath, $environmentNoBomBytes)
+
+    $catalogNoBomBytes = [System.IO.File]::ReadAllBytes($catalogPath)
+    $catalogBomBytes = New-Object byte[] ($catalogNoBomBytes.Length + 3)
+    $catalogBomBytes[0] = 0xEF; $catalogBomBytes[1] = 0xBB; $catalogBomBytes[2] = 0xBF
+    [Array]::Copy($catalogNoBomBytes, 0, $catalogBomBytes, 3, $catalogNoBomBytes.Length)
+    [System.IO.File]::WriteAllBytes($catalogPath, $catalogBomBytes)
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $catalogBomBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $catalogBomBuild 'ENVIRONMENT_FAILED' 20 'BOM-bearing production build catalog JSON'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'BOM build-catalog rejection invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'BOM build-catalog rejection invokes no Bazaar query'
+    [System.IO.File]::WriteAllBytes($catalogPath, $catalogNoBomBytes)
+
+    $packetTamperCases = @(
+        [pscustomobject]@{ Name = 'profile const'; Field = 'Profile Version'; Value = 'wrong-version' },
+        [pscustomobject]@{ Name = 'difficulty empty'; Field = 'Difficulty'; Value = '' },
+        [pscustomobject]@{ Name = 'risk enum'; Field = 'Risk'; Value = 'Blue' },
+        [pscustomobject]@{ Name = 'customer type'; Field = 'Customer'; Value = 7 },
+        [pscustomobject]@{ Name = 'ReqIDs empty array'; Field = 'ReqIDs'; EmptyArray = $true },
+        [pscustomobject]@{ Name = 'ReqIDs empty item'; Field = 'ReqIDs'; Value = @('') },
+        [pscustomobject]@{ Name = 'ReqIDs item type'; Field = 'ReqIDs'; Value = @('REQ-OK', 7) },
+        [pscustomobject]@{ Name = 'Word baseline empty'; Field = 'Word Baseline'; Value = '' },
+        [pscustomobject]@{ Name = 'QA baseline type'; Field = 'QA Baseline'; Value = 7 },
+        [pscustomobject]@{ Name = 'Spec baseline empty'; Field = 'Spec Baseline'; Value = '' },
+        [pscustomobject]@{ Name = 'branch empty'; Field = 'Bazaar Branch'; Value = '' },
+        [pscustomobject]@{ Name = 'revision type'; Field = 'Bazaar Full Revision ID'; Value = 7 },
+        [pscustomobject]@{ Name = 'Allowed Files type'; Field = 'Allowed Files'; Value = 'src/example.cpp' },
+        [pscustomobject]@{ Name = 'Forbidden Areas empty array'; Field = 'Forbidden Areas'; EmptyArray = $true },
+        [pscustomobject]@{ Name = 'RT impact empty'; Field = 'RT Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'Safety impact type'; Field = 'Safety Impact'; Value = 7 },
+        [pscustomobject]@{ Name = 'Board impact empty'; Field = 'Board Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'Driver impact empty'; Field = 'Driver Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'ABI impact empty'; Field = 'ABI Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'Build impact empty'; Field = 'Build Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'Customer branch impact empty'; Field = 'Customer Branch Impact'; Value = '' },
+        [pscustomobject]@{ Name = 'impact-clear enum'; Field = 'RT Impact Clear'; Value = 'MAYBE' },
+        [pscustomobject]@{ Name = 'Open QA type'; Field = 'Open QA'; Value = 'QA-OPEN' },
+        [pscustomobject]@{ Name = 'Build Profile ID empty'; Field = 'Build Profile ID'; Value = '' },
+        [pscustomobject]@{ Name = 'repair cycles type'; Field = 'Max-Repair-Cycles'; Value = '2' },
+        [pscustomobject]@{ Name = 'specification approver empty'; Field = 'Specification Approver'; Value = '' },
+        [pscustomobject]@{ Name = 'implementation approver type'; Field = 'Implementation Approver'; Value = 7 },
+        [pscustomobject]@{ Name = 'additional property'; Extra = $true }
+    )
+    $validPacketText = [System.IO.File]::ReadAllText($workPacketPath, [System.Text.Encoding]::UTF8)
+    foreach ($tamperCase in $packetTamperCases) {
+        [System.IO.File]::WriteAllText($workPacketPath, $validPacketText, (New-Object System.Text.UTF8Encoding($false)))
+        $tamperedPacket = Read-Task3PacketObjectFixture $workPacketPath
+        if ($tamperCase.Extra) {
+            $tamperedPacket | Add-Member -NotePropertyName 'Unexpected Trace Field' -NotePropertyValue 'unsupported'
+        } elseif ($tamperCase.EmptyArray) {
+            $tamperedPacket.PSObject.Properties[$tamperCase.Field].Value = [object[]]@()
+        } else {
+            $tamperedPacket.PSObject.Properties[$tamperCase.Field].Value = $tamperCase.Value
+        }
+        Write-Task3PacketObjectFixture $workPacketPath $tamperedPacket
+        [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+        [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+        $tamperedResult = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+        Assert-Task3BuildWithoutDurableResult $tamperedResult ("Tampered runtime work-packet contract: " + $tamperCase.Name)
+        Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' ("Tampered packet invokes no MSDEV: " + $tamperCase.Name)
+        Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' ("Tampered packet invokes no Bazaar query: " + $tamperCase.Name)
+    }
+    [System.IO.File]::WriteAllText($workPacketPath, $validPacketText, (New-Object System.Text.UTF8Encoding($false)))
+
+    $validPacketBytes = [System.IO.File]::ReadAllBytes($workPacketPath)
+    $customerToken = [System.Text.Encoding]::ASCII.GetBytes('Fixture Customer')
+    $invalidUtf8Bytes = New-Object byte[] $validPacketBytes.Length
+    [Array]::Copy($validPacketBytes, $invalidUtf8Bytes, $validPacketBytes.Length)
+    $customerOffset = -1
+    for ($byteIndex = 0; $byteIndex -le $validPacketBytes.Length - $customerToken.Length; $byteIndex++) {
+        $matchesToken = $true
+        for ($tokenIndex = 0; $tokenIndex -lt $customerToken.Length; $tokenIndex++) {
+            if ($validPacketBytes[$byteIndex + $tokenIndex] -ne $customerToken[$tokenIndex]) { $matchesToken = $false; break }
+        }
+        if ($matchesToken) { $customerOffset = $byteIndex; break }
+    }
+    Assert-True ($customerOffset -ge 0) 'Strict UTF-8 fixture locates the packet customer token'
+    $invalidUtf8Bytes[$customerOffset] = 0xFF
+    [System.IO.File]::WriteAllBytes($workPacketPath, $invalidUtf8Bytes)
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $invalidUtf8Packet = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildWithoutDurableResult $invalidUtf8Packet 'Malformed UTF-8 work packet'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Malformed UTF-8 packet invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'Malformed UTF-8 packet invokes no Bazaar query'
+    $bomPacketBytes = New-Object byte[] ($validPacketBytes.Length + 3)
+    $bomPacketBytes[0] = 0xEF; $bomPacketBytes[1] = 0xBB; $bomPacketBytes[2] = 0xBF
+    [Array]::Copy($validPacketBytes, 0, $bomPacketBytes, 3, $validPacketBytes.Length)
+    [System.IO.File]::WriteAllBytes($workPacketPath, $bomPacketBytes)
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $bomPacket = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildWithoutDurableResult $bomPacket 'UTF-8 BOM work packet under the no-BOM production policy'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'BOM packet invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'BOM packet invokes no Bazaar query'
+    [System.IO.File]::WriteAllBytes($workPacketPath, $validPacketBytes)
+
     Write-Task3PacketFixture $workPacketPath '\\fixture-server.invalid\fixture-share\working-tree' $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
-    $uncBazaarRoot = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
-    Assert-Task3BuildOutcome $uncBazaarRoot 'INTEGRITY_FAILED' 30 'Work Packet UNC Bazaar root'
-    Assert-True ($uncBazaarRoot.Json.message -match 'local non-UNC|network') 'Work Packet UNC Bazaar root rejection identifies the local-only boundary'
+    $uncBazaarRoot = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildWithoutDurableResult $uncBazaarRoot 'Work Packet UNC Bazaar root'
+    Assert-True ($uncBazaarRoot.Output -match 'local non-UNC|network') 'Work Packet UNC Bazaar root rejection identifies the local-only boundary'
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
 
     $profile.projectFile = '\\fixture-server.invalid\fixture-share\fixture.dsp'
@@ -395,6 +605,70 @@ try {
         Write-JsonFixture $environmentPath $registeredEnvironment
         [System.IO.Directory]::Delete($junctionAlias)
     }
+
+    $aliasTaskId = 'BUILD-TASK-ALIAS'
+    $outsideAliasTask = Join-Path $task3FixtureRoot 'outside-task-alias-target'
+    New-Item -ItemType Directory -Path (Join-Path $outsideAliasTask 'results') -Force | Out-Null
+    Write-Task3PacketFixture (Join-Path $outsideAliasTask 'work-packet.md') $workingTree $aliasTaskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    $taskAliasPath = Join-Path $workingTree ('team-bob-work/' + $aliasTaskId)
+    New-Item -ItemType Junction -Path $taskAliasPath -Target $outsideAliasTask -ErrorAction Stop | Out-Null
+    $outsideAliasFingerprint = Get-TreeFingerprintFixture $outsideAliasTask
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $taskAliasBuild = Invoke-TestScript $buildPath @('-WorkPacket', (Join-Path $taskAliasPath 'work-packet.md'), '-Action', 'Make', '-Attempt', '0')
+    Assert-Equal $taskAliasBuild.ExitCode 30 'Build rejects a WorkPacket/task path containing a junction alias'
+    Assert-True ($taskAliasBuild.Output -match '(?m)^INTEGRITY_FAILED\s*$') 'WorkPacket/task alias rejection emits no false success'
+    Assert-Equal (Get-TreeFingerprintFixture $outsideAliasTask) $outsideAliasFingerprint 'WorkPacket/task alias rejection writes no result through the alias'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'WorkPacket/task alias rejection invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'WorkPacket/task alias rejection invokes no Bazaar query'
+    [System.IO.Directory]::Delete($taskAliasPath)
+
+    $bzrResultsTaskId = 'BUILD-RESULTS-BZR'
+    $bzrResultsPacket = New-Task3PacketPathFixture $workingTree $bzrResultsTaskId $profile.id -WithoutResults
+    $bzrResultsDirectory = Join-Path (Split-Path -Parent $bzrResultsPacket) 'results'
+    New-Item -ItemType Junction -Path $bzrResultsDirectory -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
+    $bzrBeforeUnsafeResult = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+    $bzrResultsBuild = Invoke-TestScript $buildPath @('-WorkPacket', $bzrResultsPacket, '-Action', 'Make', '-Attempt', '0')
+    Assert-Equal $bzrResultsBuild.ExitCode 30 'Build rejects a results junction targeting protected .bzr metadata'
+    Assert-True ($bzrResultsBuild.Output -match '(?m)^INTEGRITY_FAILED\s*$') 'Protected results-junction rejection emits no false success'
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeUnsafeResult 'Protected results-junction rejection writes no durable output into .bzr'
+    [System.IO.Directory]::Delete($bzrResultsDirectory)
+
+    $outsideResultsTarget = Join-Path $task3FixtureRoot 'outside-results-target'
+    New-Item -ItemType Directory -Path $outsideResultsTarget | Out-Null
+    Write-Utf8NoBomFixture (Join-Path $outsideResultsTarget 'marker.txt') 'outside-results-unchanged'
+    $outsideResultsTaskId = 'BUILD-RESULTS-OUTSIDE'
+    $outsideResultsPacket = New-Task3PacketPathFixture $workingTree $outsideResultsTaskId $profile.id -WithoutResults
+    $outsideResultsDirectory = Join-Path (Split-Path -Parent $outsideResultsPacket) 'results'
+    New-Item -ItemType Junction -Path $outsideResultsDirectory -Target $outsideResultsTarget -ErrorAction Stop | Out-Null
+    $outsideResultsFingerprint = Get-TreeFingerprintFixture $outsideResultsTarget
+    $outsideResultsBuild = Invoke-TestScript $buildPath @('-WorkPacket', $outsideResultsPacket, '-Action', 'Make', '-Attempt', '0')
+    Assert-Equal $outsideResultsBuild.ExitCode 30 'Build rejects a results junction targeting an outside directory'
+    Assert-True ($outsideResultsBuild.Output -match '(?m)^INTEGRITY_FAILED\s*$') 'Outside results-junction rejection emits no false success'
+    Assert-Equal (Get-TreeFingerprintFixture $outsideResultsTarget) $outsideResultsFingerprint 'Outside results-junction rejection writes no durable output through the alias'
+    [System.IO.Directory]::Delete($outsideResultsDirectory)
+
+    $sandboxAliasTaskId = 'BUILD-SANDBOX-ALIAS'
+    $sandboxAliasPacket = New-Task3PacketPathFixture $workingTree $sandboxAliasTaskId $profile.id
+    $sandboxTaskAlias = Join-Path $sandboxRoot $sandboxAliasTaskId
+    New-Item -ItemType Junction -Path $sandboxTaskAlias -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
+    $bzrBeforeSandboxAlias = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+    $sandboxAliasBuild = Invoke-Task3BuildFixture $buildPath $sandboxAliasPacket 'Make' 0
+    Assert-Task3BuildOutcome $sandboxAliasBuild 'INTEGRITY_FAILED' 30 'Per-task sandbox junction targeting .bzr'
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeSandboxAlias 'Sandbox task-child alias rejection does not copy source into .bzr'
+    Assert-True (-not ($sandboxAliasBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Sandbox task-child alias cannot produce false success'
+    [System.IO.Directory]::Delete($sandboxTaskAlias)
+
+    $logAliasTaskId = 'BUILD-LOG-ALIAS'
+    $logAliasPacket = New-Task3PacketPathFixture $workingTree $logAliasTaskId $profile.id
+    $logTaskAlias = Join-Path $logRoot $logAliasTaskId
+    New-Item -ItemType Junction -Path $logTaskAlias -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
+    $bzrBeforeLogAlias = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+    $logAliasBuild = Invoke-Task3BuildFixture $buildPath $logAliasPacket 'Make' 0
+    Assert-Task3BuildOutcome $logAliasBuild 'INTEGRITY_FAILED' 30 'Per-task log junction targeting .bzr'
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeLogAlias 'Log task-child alias rejection writes no log evidence into .bzr'
+    Assert-True (-not ($logAliasBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Log task-child alias cannot produce false success'
+    [System.IO.Directory]::Delete($logTaskAlias)
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
 
     $make = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
@@ -414,21 +688,58 @@ try {
     Assert-Equal $make.Json.postBazaarStatus $env:BOB3_BZR_STATUS 'Result proves Bazaar status is unchanged after build'
     Assert-True ([System.IO.File]::ReadAllText($make.Json.stdoutPath) -match '0 error') 'Build captures stdout to the registered log root'
     Assert-True ([System.IO.File]::ReadAllText($make.Json.stderrPath) -match 'fixture stderr') 'Build captures stderr without deadlock'
-    $makeCommands = @(Get-Content -LiteralPath $env:BOB3_MSDEV_COMMAND_LOG)
+    $makeCommands = @(Read-Utf8LinesFixture $env:BOB3_MSDEV_COMMAND_LOG)
     Assert-Equal $makeCommands.Count 1 'Make invokes MSDEV exactly once'
     $makeArguments = @($makeCommands[0] -split "`t")
     Assert-Equal $makeArguments[1] '/MAKE' 'Make selects only the qualified /MAKE switch'
     Assert-Equal $makeArguments[2] $profile.target 'Make passes the configuration-only target as one argument'
     Assert-Equal $makeArguments[3] '/OUT' 'Make passes the fixed output-log switch directly'
-    $makeBazaarCommands = @(Get-Content -LiteralPath $env:BOB3_BZR_COMMAND_LOG)
+    $makeBazaarCommands = @(Read-Utf8LinesFixture $env:BOB3_BZR_COMMAND_LOG)
     Assert-Equal ($makeBazaarCommands -join '|') 'status --short|nick|version-info --custom --template={revision_id}|status --short|nick|version-info --custom --template={revision_id}' 'Build proves pre/post status, branch, and full revision using read-only queries'
+
+    $postResultSignal = Join-Path $task3FixtureRoot 'post-result-mutation.signal'
+    $env:BOB3_MSDEV_MODE = 'post-publish-mutation'
+    $env:BOB3_MSDEV_RESULT_WATCH_DIRECTORY = Join-Path $taskDirectory 'results'
+    $env:BOB3_MSDEV_POST_RESULT_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
+    $env:BOB3_MSDEV_POST_RESULT_SIGNAL_PATH = $postResultSignal
+    $postPublicationBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    $postResultDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    while (-not (Test-Path -LiteralPath $postResultSignal -PathType Leaf) -and [DateTime]::UtcNow -lt $postResultDeadline) { Start-Sleep -Milliseconds 25 }
+    $postResultMutationObserved = Test-Path -LiteralPath $postResultSignal -PathType Leaf
+    Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
+    $env:BOB3_MSDEV_MODE = 'success'
+    $env:BOB3_MSDEV_RESULT_WATCH_DIRECTORY = $null
+    $env:BOB3_MSDEV_POST_RESULT_MUTATE_PATH = $null
+    $env:BOB3_MSDEV_POST_RESULT_SIGNAL_PATH = $null
+    Assert-True $postResultMutationObserved 'Build final-check fixture mutates .bzr during result publication'
+    Assert-Task3BuildOutcome $postPublicationBuild 'INTEGRITY_FAILED' 30 'Protected-state change during build result publication'
+    Assert-True (-not ($postPublicationBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Build publication mutation cannot return false success'
 
     [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
     $rebuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Rebuild' 1
     Assert-Task3BuildOutcome $rebuild 'SUCCEEDED' 0 'Successful Rebuild'
-    $rebuildCommand = @(Get-Content -LiteralPath $env:BOB3_MSDEV_COMMAND_LOG)[0] -split "`t"
+    $rebuildCommand = @(Read-Utf8LinesFixture $env:BOB3_MSDEV_COMMAND_LOG)[0] -split "`t"
     Assert-Equal $rebuildCommand[1] '/REBUILD' 'Rebuild performs exactly the requested /REBUILD action'
+
+    $profile.projectFile = 'project/日本.dsp'
+    $profile.target = '日本語構成 - Win32 Release'
+    $profile.successPattern = '構成\s+成功'
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    $env:BOB3_MSDEV_MODE = 'unicode-success'
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    $unicodeBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $unicodeBuild 'SUCCEEDED' 0 'Strict UTF-8 non-ASCII environment, project, target, and success regex'
+    Assert-True ($unicodeBuild.Json.sandboxPath -match '日本|サンドボックス') 'Non-ASCII registered sandbox path round-trips into the actual build result'
+    Assert-True (Test-Path -LiteralPath (Join-Path $unicodeBuild.Json.sandboxPath 'project/日本.dsp') -PathType Leaf) 'Non-ASCII qualified projectFile participates in sandbox build selection'
+    $unicodeArguments = @(Read-Utf8LinesFixture $env:BOB3_MSDEV_COMMAND_LOG)[0] -split "`t"
+    Assert-Equal $unicodeArguments[2] $profile.target 'Non-ASCII qualified target reaches the fake MSDEV invocation exactly'
+    Assert-True ([System.IO.File]::ReadAllText($unicodeBuild.Json.outputLogPath, [System.Text.Encoding]::GetEncoding(932)) -match $profile.successPattern) 'Non-ASCII success token is matched from the real CP932 build log'
+    $profile.projectFile = 'project/fixture.dsp'
+    $profile.target = 'Fixture - Win32 Release'
+    $profile.successPattern = '0 error\(s\)'
+    $env:BOB3_MSDEV_MODE = 'success'
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
 
     $env:BOB3_MSDEV_MODE = 'compile'
     $compileRetry = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
@@ -498,6 +809,37 @@ try {
     Assert-Task3BuildOutcome $allowedExcluded 'INTEGRITY_FAILED' 30 'Profile exclusion removes an Allowed File from sandbox'
     Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Sandbox copy verification fails before MSDEV launch'
     $profile.excludePatterns = @('*.pdb', '**/*.obj')
+
+    $secretSentinelText = 'TEAM-BOB-LOCKED-SECRET-SENTINEL-7f83d'
+    $secretSentinelPath = Join-Path $workingTree 'secrets/sentinel.txt'
+    Write-Utf8NoBomFixture $secretSentinelPath $secretSentinelText
+    $lockedSecret = [System.IO.File]::Open($secretSentinelPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $env:BOB3_MSDEV_MODE = 'success'
+        Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+        $secretExcludedBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+        Assert-Task3BuildOutcome $secretExcludedBuild 'SUCCEEDED' 0 'Locked Forbidden Areas sentinel remains non-accessed during inventory and sandbox copy'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $secretExcludedBuild.Json.sandboxPath 'secrets'))) 'Sandbox copy does not descend into or copy Forbidden Areas'
+        Assert-True (-not ([System.IO.File]::ReadAllText($secretExcludedBuild.ResultPath, [System.Text.Encoding]::UTF8).Contains($secretSentinelText))) 'Build result emits no forbidden sentinel content'
+    } finally {
+        $lockedSecret.Dispose()
+    }
+
+    Write-Cp932Fixture (Join-Path $workingTree 'secrets/fixture.dsp') "# forbidden project`r`n"
+    $profile.projectFile = 'secrets/fixture.dsp'
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    $forbiddenProject = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $forbiddenProject 'ENVIRONMENT_FAILED' 20 'Qualified projectFile below Forbidden Areas'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Forbidden qualified projectFile is rejected before MSDEV launch'
+    $profile.projectFile = 'project/fixture.dsp'
+    $profile.expectedArtifacts = @('secrets/fixture.exe')
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    $forbiddenArtifact = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $forbiddenArtifact 'ENVIRONMENT_FAILED' 20 'Qualified expectedArtifact below Forbidden Areas'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Forbidden expectedArtifact is rejected before MSDEV launch'
+    $profile.expectedArtifacts = @('bin/fixture.exe')
 
     $profile.timeoutSeconds = 1
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
@@ -578,11 +920,11 @@ try {
     Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
 
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id @('../unsafe')
-    $unsafeForbidden = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
-    Assert-Task3BuildOutcome $unsafeForbidden 'INTEGRITY_FAILED' 30 'Unsafe Forbidden Areas entry'
+    $unsafeForbidden = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildWithoutDurableResult $unsafeForbidden 'Unsafe Forbidden Areas entry'
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id @("unsafe`tpath")
-    $controlForbidden = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
-    Assert-Task3BuildOutcome $controlForbidden 'INTEGRITY_FAILED' 30 'Forbidden Areas control-character entry'
+    $controlForbidden = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildWithoutDurableResult $controlForbidden 'Forbidden Areas control-character entry'
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
 
     $env:BOB3_MSDEV_MODE = 'success'
@@ -594,12 +936,64 @@ try {
     Remove-Item -LiteralPath (Join-Path $taskDirectory 'results') -Force
     New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') | Out-Null
 
+    $evidenceAliasTaskId = 'EVIDENCE-TASK-ALIAS'
+    $outsideEvidenceTask = Join-Path $task3FixtureRoot 'outside-evidence-task-target'
+    New-Item -ItemType Directory -Path (Join-Path $outsideEvidenceTask 'results') -Force | Out-Null
+    Write-Task3PacketFixture (Join-Path $outsideEvidenceTask 'work-packet.md') $workingTree $evidenceAliasTaskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    $evidenceTaskAliasPath = Join-Path $workingTree ('team-bob-work/' + $evidenceAliasTaskId)
+    New-Item -ItemType Junction -Path $evidenceTaskAliasPath -Target $outsideEvidenceTask -ErrorAction Stop | Out-Null
+    $outsideEvidenceFingerprint = Get-TreeFingerprintFixture $outsideEvidenceTask
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $evidenceTaskAlias = Invoke-TestScript $evidencePath @('-WorkPacket', (Join-Path $evidenceTaskAliasPath 'work-packet.md'))
+    Assert-Equal $evidenceTaskAlias.ExitCode 30 'Evidence rejects a WorkPacket/task path containing a junction alias'
+    Assert-Equal (Get-TreeFingerprintFixture $outsideEvidenceTask) $outsideEvidenceFingerprint 'Evidence WorkPacket/task alias rejection writes no files through the alias'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'Evidence WorkPacket/task alias rejection invokes no Bazaar query'
+    [System.IO.Directory]::Delete($evidenceTaskAliasPath)
+
+    $evidenceBzrTaskId = 'EVIDENCE-RESULTS-BZR'
+    $evidenceBzrPacket = New-Task3PacketPathFixture $workingTree $evidenceBzrTaskId $profile.id -WithoutResults
+    $evidenceBzrResults = Join-Path (Split-Path -Parent $evidenceBzrPacket) 'results'
+    New-Item -ItemType Junction -Path $evidenceBzrResults -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
+    $bzrBeforeEvidenceResults = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $evidenceBzrAlias = Invoke-TestScript $evidencePath @('-WorkPacket', $evidenceBzrPacket)
+    Assert-Equal $evidenceBzrAlias.ExitCode 30 'Evidence rejects a results junction targeting protected .bzr metadata'
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeEvidenceResults 'Evidence results-junction rejection writes no files into .bzr'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'Evidence validates an unsafe results boundary before Bazaar queries'
+    [System.IO.Directory]::Delete($evidenceBzrResults)
+
+    $evidenceOutsideTarget = Join-Path $task3FixtureRoot 'outside-evidence-results'
+    New-Item -ItemType Directory -Path $evidenceOutsideTarget | Out-Null
+    Write-Utf8NoBomFixture (Join-Path $evidenceOutsideTarget 'marker.txt') 'outside-evidence-unchanged'
+    $evidenceOutsideTaskId = 'EVIDENCE-RESULTS-OUTSIDE'
+    $evidenceOutsidePacket = New-Task3PacketPathFixture $workingTree $evidenceOutsideTaskId $profile.id -WithoutResults
+    $evidenceOutsideResults = Join-Path (Split-Path -Parent $evidenceOutsidePacket) 'results'
+    New-Item -ItemType Junction -Path $evidenceOutsideResults -Target $evidenceOutsideTarget -ErrorAction Stop | Out-Null
+    $outsideEvidenceResultsFingerprint = Get-TreeFingerprintFixture $evidenceOutsideTarget
+    $evidenceOutsideAlias = Invoke-TestScript $evidencePath @('-WorkPacket', $evidenceOutsidePacket)
+    Assert-Equal $evidenceOutsideAlias.ExitCode 30 'Evidence rejects a results junction targeting an outside directory'
+    Assert-Equal (Get-TreeFingerprintFixture $evidenceOutsideTarget) $outsideEvidenceResultsFingerprint 'Evidence outside-results rejection writes no files through the alias'
+    [System.IO.Directory]::Delete($evidenceOutsideResults)
+
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $env:BOB3_BZR_STATUS = ' M  secrets/sentinel.txt'
+    $env:BOB3_BZR_DIFF = "=== modified file 'secrets/sentinel.txt'`n$secretSentinelText`n"
+    $forbiddenStatusEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    Assert-Equal $forbiddenStatusEvidence.ExitCode 30 'Evidence rejects a forbidden-path status before requesting full diff content'
+    $forbiddenStatusCommands = @(Read-Utf8LinesFixture $env:BOB3_BZR_COMMAND_LOG)
+    Assert-Equal ($forbiddenStatusCommands -join '|') 'status --short' 'Evidence validates Allowed Files status before invoking diff'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $taskDirectory 'results/bazaar-diff.patch'))) 'Forbidden status emits no diff evidence file'
+    $resultsText = ((Get-ChildItem -LiteralPath (Join-Path $taskDirectory 'results') -File | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8) }) -join "`n")
+    Assert-True (-not $resultsText.Contains($secretSentinelText)) 'Forbidden status emits no secret sentinel content into task results'
+    $env:BOB3_BZR_STATUS = ' M  src/example.cpp'
+    $env:BOB3_BZR_DIFF = "=== modified file 'src/example.cpp'`ndiff --git a/src/example.cpp b/src/example.cpp`n"
+
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
     $evidenceSourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash
     $evidenceBzrFingerprint = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
     $evidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
     Assert-Equal $evidence.ExitCode 0 'Bazaar evidence export succeeds with the registered fake executable'
-    $evidenceCommands = @(Get-Content -LiteralPath $env:BOB3_BZR_COMMAND_LOG)
+    $evidenceCommands = @(Read-Utf8LinesFixture $env:BOB3_BZR_COMMAND_LOG)
     Assert-Equal ($evidenceCommands -join '|') 'status --short|diff|nick|version-info --custom --template={revision_id}' 'Evidence invokes exactly the four approved read-only Bazaar queries in order'
     $evidenceResults = Join-Path $taskDirectory 'results'
     foreach ($name in @('bazaar-status.txt', 'bazaar-diff.patch', 'bazaar-nick.txt', 'bazaar-revision-id.txt', 'bazaar-evidence-manifest.json')) {
@@ -614,6 +1008,24 @@ try {
     Assert-SetEqual $evidenceManifest.commands @('status --short', 'diff', 'nick', 'version-info --custom --template={revision_id}') 'Evidence manifest records only read-only commands'
     Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash $evidenceSourceHash 'Evidence export preserves source bytes'
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $evidenceBzrFingerprint 'Evidence export preserves .bzr bytes'
+
+    $postEvidenceSignal = Join-Path $task3FixtureRoot 'post-evidence-mutation.signal'
+    $env:BOB3_BZR_WATCH_RESULT = '1'
+    $env:BOB3_BZR_RESULT_WATCH_DIRECTORY = $evidenceResults
+    $env:BOB3_BZR_POST_RESULT_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
+    $env:BOB3_BZR_POST_RESULT_SIGNAL_PATH = $postEvidenceSignal
+    $postPublicationEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    $postEvidenceDeadline = [DateTime]::UtcNow.AddSeconds(3)
+    while (-not (Test-Path -LiteralPath $postEvidenceSignal -PathType Leaf) -and [DateTime]::UtcNow -lt $postEvidenceDeadline) { Start-Sleep -Milliseconds 25 }
+    $postEvidenceMutationObserved = Test-Path -LiteralPath $postEvidenceSignal -PathType Leaf
+    Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
+    $env:BOB3_BZR_WATCH_RESULT = $null
+    $env:BOB3_BZR_RESULT_WATCH_DIRECTORY = $null
+    $env:BOB3_BZR_POST_RESULT_MUTATE_PATH = $null
+    $env:BOB3_BZR_POST_RESULT_SIGNAL_PATH = $null
+    Assert-True $postEvidenceMutationObserved 'Evidence final-check fixture mutates .bzr during evidence publication'
+    Assert-Equal $postPublicationEvidence.ExitCode 30 'Evidence publication mutation fails the final protected-state check'
+    Assert-True (-not ($postPublicationEvidence.Output -match 'EXPORTED')) 'Evidence publication mutation cannot report false export success'
 
     [System.IO.File]::Move($fakeTools.MsdevPath, ($fakeTools.MsdevPath + '.missing'))
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')

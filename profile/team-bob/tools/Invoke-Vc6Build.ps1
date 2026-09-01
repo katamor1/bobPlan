@@ -19,6 +19,9 @@ $result = [ordered]@{
     preAllowedHashes = @(); postAllowedHashes = @(); expectedArtifacts = @(); invokedArguments = @(); resultPath = $null
 }
 $resultPath = $null
+$resultTrustedParentPhysical = $null
+$protectedContext = $null
+$protectedBaseline = $null
 
 function Complete-TeamBobBuild {
     param([string]$Status, [string]$Message)
@@ -26,19 +29,37 @@ function Complete-TeamBobBuild {
     $result.exitCode = [int]$exitCodes[$Status]
     $result.message = $Message
     if ($null -eq $resultPath) {
+        if (-not [string]::IsNullOrWhiteSpace($Message)) { [Console]::Error.WriteLine($Message) }
         [Console]::Error.WriteLine('Build result path could not be established; durable result evidence is unavailable.')
         [Console]::Out.WriteLine('INTEGRITY_FAILED')
         exit 30
     }
     $result.resultPath = $resultPath
     try {
-        Write-TeamBobUtf8File $resultPath (($result | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+        Write-TeamBobUtf8File $resultPath (($result | ConvertTo-Json -Depth 20) + [Environment]::NewLine) $resultTrustedParentPhysical
     } catch {
         $result.status = 'INTEGRITY_FAILED'
         $result.exitCode = 30
         [Console]::Error.WriteLine("Failed to persist durable build result: $($_.Exception.Message)")
         [Console]::Out.WriteLine('INTEGRITY_FAILED')
         exit 30
+    }
+    if ($null -ne $protectedContext -and $null -ne $protectedBaseline) {
+        try {
+            Assert-TeamBobProtectedSnapshot $protectedBaseline (Get-TeamBobProtectedSnapshot $protectedContext) 'build result publication'
+        } catch {
+            $Status = 'INTEGRITY_FAILED'
+            $result.status = $Status
+            $result.exitCode = 30
+            $result.message = 'Final protected-state proof failed after result publication: ' + $_.Exception.Message
+            try {
+                Write-TeamBobUtf8File $resultPath (($result | ConvertTo-Json -Depth 20) + [Environment]::NewLine) $resultTrustedParentPhysical
+            } catch {
+                [Console]::Error.WriteLine("Failed to persist the final integrity result: $($_.Exception.Message)")
+                [Console]::Out.WriteLine('INTEGRITY_FAILED')
+                exit 30
+            }
+        }
     }
     [Console]::Out.WriteLine($Status)
     exit ([int]$exitCodes[$Status])
@@ -53,13 +74,13 @@ function Get-TeamBobExceptionStatus {
 try {
     $workPacketFull = Get-TeamBobCanonicalPath $WorkPacket 'Work packet' 'INTEGRITY_FAILED'
     if (-not (Test-Path -LiteralPath $workPacketFull -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $workPacketFull") }
+    [void](Get-TeamBobPhysicalPath $workPacketFull 'Work packet' 'Leaf' 'INTEGRITY_FAILED')
     $result.workPacket = $workPacketFull
-    $resultDirectory = Join-Path (Split-Path -Parent $workPacketFull) 'results'
-    if (Test-Path -LiteralPath $resultDirectory -PathType Leaf) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Task results path is an existing file.') }
-    $resultPath = Join-Path $resultDirectory ('build-result-' + [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ') + '-' + [guid]::NewGuid().ToString('N') + '.json')
-
     $packet = Read-TeamBobCanonicalPacket $workPacketFull
     $context = Get-TeamBobPacketContext $packet $workPacketFull
+    $resultsInfo = Get-TeamBobTaskResultsContext $context -Create
+    $resultPath = Join-Path $resultsInfo.FullPath ('build-result-' + [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ') + '-' + [guid]::NewGuid().ToString('N') + '.json')
+    $resultTrustedParentPhysical = $context.TaskPhysical
     $result.taskId = $context.TaskId
     $result.buildProfileId = $context.BuildProfileId
     $profileRoot = Split-Path -Parent $PSScriptRoot
@@ -67,32 +88,52 @@ try {
     $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
     $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
     $catalogPath = Join-Path $profileRoot 'config/vc6-build-targets.json'
-    foreach ($path in @($manifestPath, $workSchemaPath, $buildSchemaPath, $catalogPath)) { if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Installed profile contract is missing: $path") } }
-    $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath
+    foreach ($path in @($manifestPath, $workSchemaPath, $buildSchemaPath, $catalogPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Installed profile contract is missing: $path") }
+        [void](Get-TeamBobPhysicalPath $path 'Installed profile contract' 'Leaf' 'ENVIRONMENT_FAILED')
+    }
+    $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath -RootFailureStatus 'INTEGRITY_FAILED'
     $profile = Get-TeamBobBuildProfile $catalogPath $context.BuildProfileId ([string]$environment.pcId)
 
-    $sourcePhysical = Get-TeamBobPhysicalPath $context.BazaarRoot 'Bazaar source root'
-    $sandboxPhysical = Get-TeamBobPhysicalPath $environment.sandboxRoot 'Sandbox root'
-    $logPhysical = Get-TeamBobPhysicalPath $environment.logRoot 'Log root'
-    if ((Test-TeamBobResolvedPathAtOrBelow $sandboxPhysical $sourcePhysical) -or (Test-TeamBobResolvedPathAtOrBelow $sourcePhysical $sandboxPhysical) -or
-        (Test-TeamBobResolvedPathAtOrBelow $logPhysical $sourcePhysical) -or (Test-TeamBobResolvedPathAtOrBelow $sourcePhysical $logPhysical) -or
-        (Test-TeamBobResolvedPathAtOrBelow $sandboxPhysical $logPhysical) -or (Test-TeamBobResolvedPathAtOrBelow $logPhysical $sandboxPhysical)) {
-        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Source, sandbox, and log roots physically overlap or alias each other.')
-    }
-    if (-not (Test-Path -LiteralPath $resultDirectory -PathType Container)) { [System.IO.Directory]::CreateDirectory($resultDirectory) | Out-Null }
+    $sourcePhysical = $context.BazaarPhysical
+    $sandboxPhysical = Get-TeamBobPhysicalPath $environment.sandboxRoot 'Sandbox root' 'Container' 'INTEGRITY_FAILED'
+    $logPhysical = Get-TeamBobPhysicalPath $environment.logRoot 'Log root' 'Container' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $sourcePhysical $sandboxPhysical 'Source and sandbox roots' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $sourcePhysical $logPhysical 'Source and log roots' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $sandboxPhysical $logPhysical 'Sandbox and log roots' 'INTEGRITY_FAILED'
 
     $project = ConvertTo-TeamBobRelativePath $context.BazaarRoot ([string]$profile.projectFile) 'Build profile projectFile' 'ENVIRONMENT_FAILED'
+    foreach ($forbidden in $context.ForbiddenAreas) {
+        if (Test-TeamBobRelativePathAtOrBelow $project.RelativePath $forbidden) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Qualified projectFile must not be at or below a Forbidden Area.') }
+    }
     if ([System.IO.Path]::GetExtension($project.FullPath).ToLowerInvariant() -notin @('.dsw', '.dsp') -or -not (Test-Path -LiteralPath $project.FullPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Qualified VC6 project file is invalid or missing.') }
+    $projectPhysical = Get-TeamBobPhysicalPath $project.FullPath 'Qualified VC6 project file' 'Leaf' 'ENVIRONMENT_FAILED'
+    $projectPhysicalRelative = Get-TeamBobPhysicalRelativePath $projectPhysical $sourcePhysical 'Qualified VC6 project file' 'ENVIRONMENT_FAILED'
+    foreach ($forbidden in $context.ForbiddenAreas) {
+        if (Test-TeamBobRelativePathAtOrBelow $projectPhysicalRelative $forbidden) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Qualified projectFile physically resolves at or below a Forbidden Area.') }
+    }
+    $project.RelativePath = $projectPhysicalRelative
     $expectedArtifacts = @()
     foreach ($entry in @($profile.expectedArtifacts)) {
         if (-not ($entry -is [string])) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Expected artifact entries must be strings.') }
         $artifact = ConvertTo-TeamBobRelativePath $context.BazaarRoot $entry 'Expected artifact' 'ENVIRONMENT_FAILED'
-        $expectedArtifacts += $artifact.RelativePath
+        foreach ($forbidden in $context.ForbiddenAreas) {
+            if (Test-TeamBobRelativePathAtOrBelow $artifact.RelativePath $forbidden) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Expected artifacts must not be at or below a Forbidden Area.') }
+        }
+        $artifactParentInfo = Get-TeamBobProspectiveDirectory (Split-Path -Parent $artifact.FullPath) 'Expected artifact parent' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
+        $artifactParentRelative = Get-TeamBobPhysicalRelativePath $artifactParentInfo.PhysicalPath $sourcePhysical 'Expected artifact parent' 'ENVIRONMENT_FAILED'
+        $artifactPhysicalRelative = ($artifactParentRelative.TrimEnd('/') + '/' + [System.IO.Path]::GetFileName($artifact.FullPath)).TrimStart('/')
+        foreach ($forbidden in $context.ForbiddenAreas) {
+            if (Test-TeamBobRelativePathAtOrBelow $artifactPhysicalRelative $forbidden) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Expected artifacts physically resolve at or below a Forbidden Area.') }
+        }
+        $expectedArtifacts += $artifactPhysicalRelative
     }
     $result.expectedArtifacts = @($expectedArtifacts)
     Assert-TeamBobAllowedEncoding $context.AllowedFiles
 
     $baseline = Get-TeamBobProtectedSnapshot $context
+    $protectedContext = $context
+    $protectedBaseline = $baseline
     $result.preAllowedHashes = @($baseline.AllowedHashes)
     $result.preSourceInventory = @($baseline.SourceInventory)
     $result.preBzrInventory = @($baseline.BzrInventory)
@@ -111,23 +152,28 @@ try {
         $preflightComplete = $true
 
         $invocationId = 'attempt-' + $Attempt + '-' + $Action.ToLowerInvariant() + '-' + [guid]::NewGuid().ToString('N')
-        $taskSandboxRoot = Join-Path $environment.sandboxRoot $context.TaskId
-        $taskLogRoot = Join-Path $environment.logRoot $context.TaskId
-        if (-not (Test-Path -LiteralPath $taskSandboxRoot -PathType Container)) { [System.IO.Directory]::CreateDirectory($taskSandboxRoot) | Out-Null }
-        if (-not (Test-Path -LiteralPath $taskLogRoot -PathType Container)) { [System.IO.Directory]::CreateDirectory($taskLogRoot) | Out-Null }
-        $sandboxPath = Join-Path $taskSandboxRoot $invocationId
-        $logDirectory = Join-Path $taskLogRoot $invocationId
-        if (Test-Path -LiteralPath $logDirectory) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Per-invocation log directory already exists.') }
-        [System.IO.Directory]::CreateDirectory($logDirectory) | Out-Null
+        $taskSandboxInfo = Get-TeamBobTrustedChildDirectory $environment.sandboxRoot $sandboxPhysical $context.TaskId 'Task sandbox directory' 'INTEGRITY_FAILED' -Create
+        $taskLogInfo = Get-TeamBobTrustedChildDirectory $environment.logRoot $logPhysical $context.TaskId 'Task log directory' 'INTEGRITY_FAILED' -Create
+        $sandboxInfo = Get-TeamBobTrustedChildDirectory $taskSandboxInfo.FullPath $taskSandboxInfo.PhysicalPath $invocationId 'Per-invocation sandbox directory' 'INTEGRITY_FAILED' -Create -RequireMissing
+        $logInfo = Get-TeamBobTrustedChildDirectory $taskLogInfo.FullPath $taskLogInfo.PhysicalPath $invocationId 'Per-invocation log directory' 'INTEGRITY_FAILED' -Create -RequireMissing
+        $sandboxPath = $sandboxInfo.FullPath
+        $logDirectory = $logInfo.FullPath
         $result.sandboxPath = $sandboxPath
         $result.logDirectory = $logDirectory
-        Copy-TeamBobSandboxTree $context.BazaarRoot $sandboxPath @($profile.excludePatterns) @($expectedArtifacts)
+        [void](Get-TeamBobPhysicalPath $sandboxPath 'New per-invocation sandbox directory' 'Container' 'INTEGRITY_FAILED')
+        Copy-TeamBobSandboxTree $context.BazaarRoot $sandboxPath @($profile.excludePatterns) @($expectedArtifacts) @($context.ForbiddenAreas)
 
         $sandboxProject = Join-Path $sandboxPath ($project.RelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
-        if (-not (Test-Path -LiteralPath $sandboxProject -PathType Leaf) -or (Get-TeamBobFileHash $sandboxProject) -ne (Get-TeamBobFileHash $project.FullPath)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Sandbox project file is missing or differs from the qualified source project.') }
+        if (-not (Test-Path -LiteralPath $sandboxProject -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Sandbox project file is missing.') }
+        $sandboxProjectPhysical = Get-TeamBobPhysicalPath $sandboxProject 'Sandbox project file' 'Leaf' 'INTEGRITY_FAILED'
+        Assert-TeamBobPhysicalChild $sandboxProjectPhysical $sandboxInfo.PhysicalPath 'Sandbox project file' 'INTEGRITY_FAILED'
+        if ((Get-TeamBobFileHash $sandboxProject) -ne (Get-TeamBobFileHash $project.FullPath)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Sandbox project file differs from the qualified source project.') }
         foreach ($allowedFile in $context.AllowedFiles) {
             $sandboxAllowed = Join-Path $sandboxPath ($allowedFile.RelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
-            if (-not (Test-Path -LiteralPath $sandboxAllowed -PathType Leaf) -or (Get-TeamBobFileHash $sandboxAllowed) -ne (Get-TeamBobFileHash $allowedFile.FullPath)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox Allowed File is missing or differs from source: $($allowedFile.RelativePath)") }
+            if (-not (Test-Path -LiteralPath $sandboxAllowed -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox Allowed File is missing: $($allowedFile.RelativePath)") }
+            $sandboxAllowedPhysical = Get-TeamBobPhysicalPath $sandboxAllowed 'Sandbox Allowed File' 'Leaf' 'INTEGRITY_FAILED'
+            Assert-TeamBobPhysicalChild $sandboxAllowedPhysical $sandboxInfo.PhysicalPath 'Sandbox Allowed File' 'INTEGRITY_FAILED'
+            if ((Get-TeamBobFileHash $sandboxAllowed) -ne (Get-TeamBobFileHash $allowedFile.FullPath)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox Allowed File differs from source: $($allowedFile.RelativePath)") }
         }
 
         $outputLogPath = Join-Path $logDirectory 'build.log'
@@ -145,8 +191,8 @@ try {
         $result.captureComplete = $processResult.CaptureComplete
         $stdoutPath = Join-Path $logDirectory 'stdout.log'
         $stderrPath = Join-Path $logDirectory 'stderr.log'
-        Write-TeamBobUtf8File $stdoutPath $processResult.StandardOutput
-        Write-TeamBobUtf8File $stderrPath $processResult.StandardError
+        Write-TeamBobUtf8File $stdoutPath $processResult.StandardOutput $taskLogInfo.PhysicalPath
+        Write-TeamBobUtf8File $stderrPath $processResult.StandardError $taskLogInfo.PhysicalPath
         $result.stdoutPath = $stdoutPath
         $result.stderrPath = $stderrPath
 
@@ -157,7 +203,11 @@ try {
             $pendingStatus = 'ENVIRONMENT_FAILED'; $pendingMessage = 'MSDEV exited but redirected output capture did not complete within the bounded grace period.'
         } else {
             $outputLogText = ''
-            if (Test-Path -LiteralPath $outputLogPath -PathType Leaf) { $outputLogText = Read-TeamBobStrictCp932File $outputLogPath }
+            if (Test-Path -LiteralPath $outputLogPath -PathType Leaf) {
+                $outputLogPhysical = Get-TeamBobPhysicalPath $outputLogPath 'VC6 output log' 'Leaf' 'INTEGRITY_FAILED'
+                Assert-TeamBobPhysicalChild $outputLogPhysical $logInfo.PhysicalPath 'VC6 output log' 'INTEGRITY_FAILED'
+                $outputLogText = Read-TeamBobStrictCp932File $outputLogPath
+            }
             $combinedOutput = $processResult.StandardOutput + "`n" + $processResult.StandardError + "`n" + $outputLogText
             if ([regex]::IsMatch($combinedOutput, [string]$profile.environmentErrorPattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
                 $pendingStatus = 'ENVIRONMENT_FAILED'; $pendingMessage = 'MSDEV output matched the qualified environment-error pattern.'
@@ -176,6 +226,8 @@ try {
                         foreach ($artifact in $expectedArtifacts) {
                             $artifactPath = Join-Path $sandboxPath ($artifact.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
                             if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { $missingArtifact = $artifact; break }
+                            $artifactPhysical = Get-TeamBobPhysicalPath $artifactPath 'Expected build artifact' 'Leaf' 'INTEGRITY_FAILED'
+                            Assert-TeamBobPhysicalChild $artifactPhysical $sandboxInfo.PhysicalPath 'Expected build artifact' 'INTEGRITY_FAILED'
                         }
                         if ($null -ne $missingArtifact) { $pendingStatus = 'ENVIRONMENT_FAILED'; $pendingMessage = "Expected build artifact is missing: $missingArtifact" }
                         else { $pendingStatus = 'SUCCEEDED'; $pendingMessage = 'The requested VC6 action completed with qualified success evidence and expected artifacts.' }

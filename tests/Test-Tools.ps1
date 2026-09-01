@@ -1,6 +1,12 @@
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
+if ($null -eq (Get-Command Assert-True -ErrorAction SilentlyContinue)) {
+    $script:Assertions = 0
+    function Assert-True { param([bool]$Condition, [string]$Message); $script:Assertions++; if (-not $Condition) { throw "ASSERTION FAILED: $Message" } }
+    function Assert-Equal { param([object]$Actual, [object]$Expected, [string]$Message); Assert-True ($Actual -eq $Expected) "$Message (expected '$Expected', got '$Actual')" }
+}
+
 function Get-FileHash {
     param(
         [Parameter(Mandatory = $true)][ValidateSet('SHA256')][string]$Algorithm,
@@ -78,7 +84,7 @@ $originalBzrLog = $env:BOB_TEST_BZR_LOG
 
 try {
     New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
-    $env:LOCALAPPDATA = Join-Path $fixtureRoot 'localappdata'
+    $env:LOCALAPPDATA = Join-Path $fixtureRoot 'ローカル-日本'
 
     # Installer: WhatIf is a complete preflight and never writes.
     $installTarget = Join-Path $fixtureRoot 'installed-profile'
@@ -131,12 +137,68 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $sourceDescendant)) 'Rejected source-descendant install creates no directory'
     Assert-Equal (Get-TreeFingerprintFixture $toolsProfileRoot) $sourceFingerprint 'Rejected source-descendant install leaves the source tree unchanged'
 
+    $distributionFingerprint = Get-TreeFingerprintFixture $toolsRepoRoot
+    $distributionRootInstall = Invoke-TestScript $installerPath @('-TargetPath', $toolsRepoRoot, '-WhatIf')
+    Assert-True ($distributionRootInstall.ExitCode -ne 0) 'Installer rejects the protected distribution repository root as TargetPath'
+    Assert-True ($distributionRootInstall.Output -match 'protected|source|ancestor') 'Distribution-root rejection identifies the protected source boundary'
+    Assert-Equal (Get-TreeFingerprintFixture $toolsRepoRoot) $distributionFingerprint 'Rejected distribution-root install preserves the complete source repository fingerprint'
+
+    $distributionAncestor = Split-Path -Parent $toolsRepoRoot
+    $distributionAncestorInstall = Invoke-TestScript $installerPath @('-TargetPath', $distributionAncestor, '-WhatIf')
+    Assert-True ($distributionAncestorInstall.ExitCode -ne 0) 'Installer rejects a TargetPath that is an ancestor of the distribution repository'
+    Assert-True ($distributionAncestorInstall.Output -match 'protected|source|ancestor') 'Distribution-ancestor rejection identifies the protected source boundary'
+    Assert-Equal (Get-TreeFingerprintFixture $toolsRepoRoot) $distributionFingerprint 'Rejected distribution-ancestor install preserves the complete source repository fingerprint'
+
+    $sourceAlias = Join-Path $fixtureRoot 'installer-source-alias'
+    New-Item -ItemType Junction -Path $sourceAlias -Target $toolsRepoRoot -ErrorAction Stop | Out-Null
+    $sourceAliasInstall = Invoke-TestScript $installerPath @('-TargetPath', $sourceAlias, '-WhatIf')
+    Assert-True ($sourceAliasInstall.ExitCode -ne 0) 'Installer rejects a target junction that physically aliases the protected source repository'
+    Assert-True ($sourceAliasInstall.Output -match 'reparse|alias|physical|protected') 'Source-alias rejection identifies the physical/reparse boundary'
+    Assert-Equal (Get-TreeFingerprintFixture $toolsRepoRoot) $distributionFingerprint 'Rejected source-alias install preserves the source repository fingerprint'
+    [System.IO.Directory]::Delete($sourceAlias)
+
+    $junctionTarget = Join-Path $fixtureRoot 'installer-junction-target'
+    New-Item -ItemType Directory -Path (Join-Path $junctionTarget 'code') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $junctionTarget '.bzr') -Force | Out-Null
+    Write-Utf8NoBomFixture (Join-Path $junctionTarget 'code/source.cpp') "int untouched = 1;`r`n"
+    Write-Utf8NoBomFixture (Join-Path $junctionTarget '.bzr/branch.conf') 'junction-target-bzr'
+    $junctionTargetFingerprint = Get-TreeFingerprintFixture $junctionTarget
+    $targetAlias = Join-Path $fixtureRoot 'installer-target-alias'
+    New-Item -ItemType Junction -Path $targetAlias -Target $junctionTarget -ErrorAction Stop | Out-Null
+    $targetAliasInstall = Invoke-TestScript $installerPath @('-TargetPath', $targetAlias)
+    Assert-True ($targetAliasInstall.ExitCode -ne 0) 'Installer rejects an existing destination root junction before publication'
+    Assert-True ($targetAliasInstall.Output -match 'reparse|alias|physical') 'Destination-junction rejection identifies the physical/reparse boundary'
+    Assert-Equal (Get-TreeFingerprintFixture $junctionTarget) $junctionTargetFingerprint 'Rejected target junction preserves target code and .bzr fingerprints'
+    Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $junctionTarget 'code/source.cpp'))) "int untouched = 1;`r`n" 'Rejected target junction preserves target code bytes'
+    Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $junctionTarget '.bzr/branch.conf'))) 'junction-target-bzr' 'Rejected target junction preserves target .bzr bytes'
+    [System.IO.Directory]::Delete($targetAlias)
+
+    $raceTarget = Join-Path $fixtureRoot 'installer-create-new-race'
+    $raceSentinel = 'TOCTOU-CREATE-ONLY-SENTINEL-91af'
+    $raceDestination = Join-Path $raceTarget 'team-bob/USAGE.md'
+    $raceJob = Start-Job -ScriptBlock {
+        param($Parent, $Destination, $Sentinel)
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not [System.IO.Directory]::Exists($Parent) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 1 }
+        if (-not [System.IO.Directory]::Exists($Parent)) { throw 'Timed out waiting for installer destination parent.' }
+        [System.IO.File]::WriteAllText($Destination, $Sentinel, (New-Object System.Text.UTF8Encoding($false)))
+    } -ArgumentList (Split-Path -Parent $raceDestination), $raceDestination, $raceSentinel
+    try {
+        $raceInstall = Invoke-TestScript $installerPath @('-TargetPath', $raceTarget)
+        Wait-Job -Job $raceJob -Timeout 10 | Out-Null
+        Receive-Job -Job $raceJob -ErrorAction Stop | Out-Null
+        Assert-True ($raceInstall.ExitCode -ne 0) 'Installer aborts when a destination appears after complete preflight'
+        Assert-Equal ([System.IO.File]::ReadAllText($raceDestination)) $raceSentinel 'Installer create-only publication never overwrites a TOCTOU destination'
+    } finally {
+        Remove-Job -Job $raceJob -Force -ErrorAction SilentlyContinue
+    }
+
     $catalogProfileRoot = Join-Path $fixtureRoot 'catalog-profile'
     $catalogInstallResult = Invoke-TestScript $installerPath @('-TargetPath', $catalogProfileRoot)
     Assert-Equal $catalogInstallResult.ExitCode 0 'Installer still accepts a normal external profile target'
 
     # Fixed local environment: isolated LOCALAPPDATA, real file hashing, force-only replacement.
-    $fakeBin = Join-Path $fixtureRoot 'fake-bin'
+    $fakeBin = Join-Path $fixtureRoot '道具-日本'
     New-Item -ItemType Directory -Path $fakeBin | Out-Null
     $msdevPath = Join-Path $fakeBin 'MSDEV.COM'
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-v1'
@@ -159,14 +221,14 @@ if "%1"=="version-info" (
 exit /b 41
 '@
     Write-Utf8NoBomFixture $bazaarPath $fakeBazaar
-    $sandboxRoot = Join-Path $fixtureRoot 'sandboxes'
-    $logRoot = Join-Path $fixtureRoot 'logs'
+    $sandboxRoot = Join-Path $fixtureRoot 'サンドボックス-日本'
+    $logRoot = Join-Path $fixtureRoot 'ログ-日本'
     $initializeArguments = @('-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot)
     $initializeResult = Invoke-TestScript $initializePath $initializeArguments
     Assert-Equal $initializeResult.ExitCode 0 'Environment initializer writes a valid fixed local registration'
     $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     Assert-True (Test-Path -LiteralPath $environmentPath -PathType Leaf) 'Environment registration uses the fixed LOCALAPPDATA path'
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.schemaVersion '1.0' 'Environment registration has a stable schema version'
     Assert-Equal $environment.profileId 'team-bob-vc6-bazaar' 'Environment registration records profile identity'
     Assert-Equal $environment.profileVersion '0.1.0-poc' 'Environment registration records profile version'
@@ -201,21 +263,84 @@ exit /b 41
     )
     Assert-True ($nestedRootsResult.ExitCode -ne 0) 'Environment initializer rejects sandbox and log roots nested beneath each other'
 
+    $repositoryAncestorResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', (Split-Path -Parent $toolsRepoRoot), '-LogRoot', $logRoot, '-Force'
+    )
+    Assert-True ($repositoryAncestorResult.ExitCode -ne 0) 'Environment initializer rejects a sandbox root that is an ancestor of the source repository'
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fixtureRoot)
+    $volumeRootResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $volumeRoot, '-LogRoot', $logRoot, '-Force'
+    )
+    Assert-True ($volumeRootResult.ExitCode -ne 0) 'Environment initializer rejects a drive-volume root as a sandbox root'
+
+    $rootJunction = Join-Path $fixtureRoot 'initializer-root-junction'
+    New-Item -ItemType Junction -Path $rootJunction -Target $toolsRepoRoot -ErrorAction Stop | Out-Null
+    $rootJunctionResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $rootJunction, '-LogRoot', $logRoot, '-Force'
+    )
+    Assert-True ($rootJunctionResult.ExitCode -ne 0) 'Environment initializer rejects a sandbox root containing a junction or physical repository alias'
+    Assert-True ($rootJunctionResult.Output -match 'reparse|alias|physical|repository') 'Initializer junction rejection identifies the physical boundary'
+    [System.IO.Directory]::Delete($rootJunction)
+
+    $toolJunction = Join-Path $fixtureRoot 'initializer-tool-junction'
+    New-Item -ItemType Junction -Path $toolJunction -Target $fakeBin -ErrorAction Stop | Out-Null
+    $toolJunctionResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', (Join-Path $toolJunction 'MSDEV.COM'), '-BazaarPath', $bazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot, '-Force'
+    )
+    Assert-True ($toolJunctionResult.ExitCode -ne 0) 'Environment initializer rejects a registered tool path through a junction component'
+    Assert-True ($toolJunctionResult.Output -match 'reparse|alias|physical') 'Initializer tool-junction rejection identifies the physical boundary'
+    [System.IO.Directory]::Delete($toolJunction)
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after initializer physical-boundary tests'
+
     Write-Utf8NoBomFixture $environmentPath '{"different":true}'
     $noForceResult = Invoke-TestScript $initializePath $initializeArguments
     Assert-True ($noForceResult.ExitCode -ne 0) 'Environment initializer refuses a different existing registration without Force'
     Assert-Equal ([System.IO.File]::ReadAllText($environmentPath)) '{"different":true}' 'Environment initializer preserves conflicting registration without Force'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment initializer replaces a different registration with Force'
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.bazaarPath ([System.IO.Path]::GetFullPath($bazaarPath)) 'Environment initializer records canonical Bazaar path after Force'
 
     # Strict validator accepts the complete source profile and rejects environment/hash/profile selection failures.
     $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
-    Assert-Equal $strictResult.ExitCode 0 'Strict profile validation succeeds with registered tools and external roots'
+    Assert-Equal $strictResult.ExitCode 0 "Strict profile validation succeeds with registered tools and external roots; output: $($strictResult.Output.Trim())"
     Assert-True ($strictResult.Output -match 'SUMMARY.*Failed=0') 'Strict validator emits a zero-failure summary'
 
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environmentBytesWithoutBom = [System.IO.File]::ReadAllBytes($environmentPath)
+    $environmentBytesWithBom = New-Object byte[] ($environmentBytesWithoutBom.Length + 3)
+    $environmentBytesWithBom[0] = 0xEF; $environmentBytesWithBom[1] = 0xBB; $environmentBytesWithBom[2] = 0xBF
+    [Array]::Copy($environmentBytesWithoutBom, 0, $environmentBytesWithBom, 3, $environmentBytesWithoutBom.Length)
+    [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithBom)
+    $strictBomEnvironment = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($strictBomEnvironment.ExitCode -ne 0) 'Strict validator rejects a BOM-bearing production environment JSON file'
+    [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithoutBom)
+
+    $strictToolAlias = Join-Path $fixtureRoot 'strict-tool-junction'
+    New-Item -ItemType Junction -Path $strictToolAlias -Target $fakeBin -ErrorAction Stop | Out-Null
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $environment.msdevPath = Join-Path $strictToolAlias 'MSDEV.COM'
+    Write-JsonFixture $environmentPath $environment
+    $strictToolAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($strictToolAliasResult.ExitCode -ne 0) 'Strict validator rejects a registered tool path through a junction component'
+    Assert-True ($strictToolAliasResult.Output -match 'FAIL.*MSDEV|reparse|physical') 'Strict validator reports the tool physical-boundary failure'
+    [System.IO.Directory]::Delete($strictToolAlias)
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after strict tool-junction validation test'
+
+    $strictRootAlias = Join-Path $fixtureRoot 'strict-root-junction'
+    New-Item -ItemType Junction -Path $strictRootAlias -Target $toolsRepoRoot -ErrorAction Stop | Out-Null
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $environment.sandboxRoot = $strictRootAlias
+    Write-JsonFixture $environmentPath $environment
+    $strictRootAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($strictRootAliasResult.ExitCode -ne 0) 'Strict validator rejects a sandbox root junction that aliases the source repository'
+    Assert-True ($strictRootAliasResult.Output -match 'FAIL.*Sandbox|reparse|physical') 'Strict validator reports the root physical-boundary failure'
+    [System.IO.Directory]::Delete($strictRootAlias)
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after strict root-junction validation test'
+
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.msdevPath = 'scripts/Install-TeamBobProfile.ps1'
     $environment.msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $toolsRepoRoot 'scripts/Install-TeamBobProfile.ps1')).Hash.ToLowerInvariant()
     Write-JsonFixture $environmentPath $environment
@@ -224,7 +349,7 @@ exit /b 41
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-tool validation test'
 
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.sandboxRoot = 'tests'
     Write-JsonFixture $environmentPath $environment
     $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
@@ -232,7 +357,7 @@ exit /b 41
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-root validation test'
 
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.pcId = 'different-machine'
     Write-JsonFixture $environmentPath $environment
     $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
@@ -280,7 +405,7 @@ exit /b 41
     $qualifiedProfile.qualification.pcId = [Environment]::MachineName
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($qualifiedProfile) })
     $qualifiedProfileResult = Invoke-TestScript (Join-Path $catalogProfileRoot 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $catalogProfileRoot, '-BuildProfileId', 'qualified-fixture', '-Strict')
-    Assert-Equal $qualifiedProfileResult.ExitCode 0 'Validator accepts one complete enabled qualification for the registered PC'
+    Assert-Equal $qualifiedProfileResult.ExitCode 0 "Validator accepts one complete enabled qualification for the registered PC; output: $($qualifiedProfileResult.Output.Trim())"
 
     # Start task: fake Bazaar observes only the allowed read-only command set.
     $bazaarRoot = Join-Path $fixtureRoot 'working-tree'
@@ -318,10 +443,23 @@ exit /b 41
     Assert-Equal $bazaarCommands[1] 'nick' 'Start task reads branch nick'
     Assert-Equal $bazaarCommands[2] 'version-info --custom --template={revision_id}' 'Start task reads the full revision id'
 
+    $installedTemplatePath = Join-Path $catalogProfileRoot 'team-bob/templates/work-packet.md'
+    $installedTemplateBytes = [System.IO.File]::ReadAllBytes($installedTemplatePath)
+    $installedTemplateBomBytes = New-Object byte[] ($installedTemplateBytes.Length + 3)
+    $installedTemplateBomBytes[0] = 0xEF; $installedTemplateBomBytes[1] = 0xBB; $installedTemplateBomBytes[2] = 0xBF
+    [Array]::Copy($installedTemplateBytes, 0, $installedTemplateBomBytes, 3, $installedTemplateBytes.Length)
+    [System.IO.File]::WriteAllBytes($installedTemplatePath, $installedTemplateBomBytes)
+    $templateBomArguments = @($greenArguments)
+    $templateBomArguments[1] = 'GREEN-TEMPLATE-BOM'
+    $templateBomResult = Invoke-TestScript (Join-Path $catalogProfileRoot 'team-bob/tools/Start-TeamBobTask.ps1') $templateBomArguments
+    Assert-True ($templateBomResult.ExitCode -ne 0) 'Start task rejects a BOM-bearing production work-packet template'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-TEMPLATE-BOM'))) 'Template BOM rejection creates no task artifacts'
+    [System.IO.File]::WriteAllBytes($installedTemplatePath, $installedTemplateBytes)
+
     $metacharArguments = @($greenArguments)
     $metacharArguments[1] = 'GREEN-METACHAR'
     $customerIndex = [array]::IndexOf($metacharArguments, '-Customer')
-    $metacharCustomer = 'Customer $1 ${2} $&'
+    $metacharCustomer = '顧客-日本 $1 ${2} $&'
     $metacharArguments[$customerIndex + 1] = $metacharCustomer
     $metacharResult = Invoke-TestScript $startTaskPath $metacharArguments
     Assert-Equal $metacharResult.ExitCode 0 'Start task safely inserts regex-replacement metacharacters from metadata'
@@ -383,6 +521,88 @@ exit /b 41
     $unsupportedArguments[$allowedIndex + 1] = 'src/resource.rc'
     $unsupportedResult = Invoke-TestScript $startTaskPath $unsupportedArguments
     Assert-True ($unsupportedResult.ExitCode -ne 0) 'Start task refuses unsupported legacy file extensions'
+
+    Write-Utf8NoBomFixture (Join-Path $bazaarRoot 'secrets/allowed.cpp') "int secret_allowed = 1;`r`n"
+    $forbiddenAllowedArguments = @($greenArguments)
+    $forbiddenAllowedArguments[1] = 'GREEN-FORBIDDEN-ALLOWED'
+    $forbiddenAllowedArguments[$allowedIndex + 1] = 'secrets/allowed.cpp'
+    $forbiddenAllowedResult = Invoke-TestScript $startTaskPath $forbiddenAllowedArguments
+    Assert-True ($forbiddenAllowedResult.ExitCode -ne 0) 'Start task refuses an Allowed File equal to or below a normalized Forbidden Areas prefix'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-FORBIDDEN-ALLOWED'))) 'Forbidden Allowed File rejection creates no task artifacts'
+
+    $emptyImpactArguments = @($greenArguments)
+    $emptyImpactArguments[1] = 'GREEN-EMPTY-IMPACT'
+    $emptyImpactArguments += @('-RTImpact', '')
+    $emptyImpactResult = Invoke-TestScript $startTaskPath $emptyImpactArguments
+    Assert-True ($emptyImpactResult.ExitCode -ne 0) 'Start task refuses empty required impact evidence that the schema consumer rejects'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-EMPTY-IMPACT'))) 'Empty impact rejection creates no task artifacts'
+
+    foreach ($unsafeForbiddenEntry in @('../unsafe', "unsafe`tpath", '/rooted', 'C:\rooted', 'secrets.', 'CON', 'nested /secret')) {
+        $unsafeForbiddenArguments = @($greenArguments)
+        $unsafeForbiddenArguments[1] = 'GREEN-UNSAFE-FORBIDDEN-' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+        $unsafeForbiddenArguments += @('-ForbiddenAreas', $unsafeForbiddenEntry)
+        $unsafeForbiddenResult = Invoke-TestScript $startTaskPath $unsafeForbiddenArguments
+        Assert-True ($unsafeForbiddenResult.ExitCode -ne 0) "Start task rejects unsafe Forbidden Areas entry '$unsafeForbiddenEntry'"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot ('team-bob-work/' + $unsafeForbiddenArguments[1])))) "Unsafe Forbidden Areas rejection creates no task artifacts for '$unsafeForbiddenEntry'"
+    }
+
+    $bazaarAlias = Join-Path $fixtureRoot 'start-bazaar-root-junction'
+    New-Item -ItemType Junction -Path $bazaarAlias -Target $bazaarRoot -ErrorAction Stop | Out-Null
+    $bazaarAliasArguments = @($greenArguments)
+    $bazaarAliasArguments[1] = 'GREEN-ROOT-ALIAS'
+    $bazaarAliasArguments[$bazaarRootIndex + 1] = $bazaarAlias
+    $bazaarAliasResult = Invoke-TestScript $startTaskPath $bazaarAliasArguments
+    Assert-True ($bazaarAliasResult.ExitCode -ne 0) 'Start task rejects a Bazaar root containing a junction/reparse alias'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-ROOT-ALIAS'))) 'Bazaar-root alias rejection creates no physical task artifacts'
+    [System.IO.Directory]::Delete($bazaarAlias)
+
+    $outsideAllowedRoot = Join-Path $fixtureRoot 'outside-allowed-root'
+    Write-Utf8NoBomFixture (Join-Path $outsideAllowedRoot 'escaped.cpp') "int escaped = 1;`r`n"
+    $allowedAlias = Join-Path $bazaarRoot 'allowed-junction'
+    New-Item -ItemType Junction -Path $allowedAlias -Target $outsideAllowedRoot -ErrorAction Stop | Out-Null
+    $allowedAliasArguments = @($greenArguments)
+    $allowedAliasArguments[1] = 'GREEN-ALLOWED-ALIAS'
+    $allowedAliasArguments[$allowedIndex + 1] = 'allowed-junction/escaped.cpp'
+    $allowedAliasResult = Invoke-TestScript $startTaskPath $allowedAliasArguments
+    Assert-True ($allowedAliasResult.ExitCode -ne 0) 'Start task rejects an Allowed File whose component is a junction/reparse escape'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-ALLOWED-ALIAS'))) 'Allowed-file reparse rejection creates no task artifacts'
+
+    $forbiddenAliasArguments = @($greenArguments)
+    $forbiddenAliasArguments[1] = 'GREEN-FORBIDDEN-ALIAS'
+    $forbiddenAliasArguments += @('-ForbiddenAreas', 'allowed-junction')
+    $forbiddenAliasResult = Invoke-TestScript $startTaskPath $forbiddenAliasArguments
+    Assert-True ($forbiddenAliasResult.ExitCode -ne 0) 'Start task fully validates and rejects a Forbidden Areas junction/reparse alias'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-FORBIDDEN-ALIAS'))) 'Forbidden-area reparse rejection creates no task artifacts'
+    [System.IO.Directory]::Delete($allowedAlias)
+
+    $registeredToolAlias = Join-Path $fixtureRoot 'start-bazaar-tool-junction'
+    New-Item -ItemType Junction -Path $registeredToolAlias -Target $fakeBin -ErrorAction Stop | Out-Null
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $environment.bazaarPath = Join-Path $registeredToolAlias 'bzr.cmd'
+    Write-JsonFixture $environmentPath $environment
+    [System.IO.File]::WriteAllText($env:BOB_TEST_BZR_LOG, '')
+    $registeredToolAliasArguments = @($greenArguments)
+    $registeredToolAliasArguments[1] = 'GREEN-TOOL-ALIAS'
+    $registeredToolAliasResult = Invoke-TestScript $startTaskPath $registeredToolAliasArguments
+    Assert-True ($registeredToolAliasResult.ExitCode -ne 0) 'Start task physically validates the registered Bazaar tool before invocation'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB_TEST_BZR_LOG)) '' 'Registered Bazaar tool reparse rejection invokes no Bazaar command'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-TOOL-ALIAS'))) 'Registered Bazaar tool rejection creates no task artifacts'
+    [System.IO.Directory]::Delete($registeredToolAlias)
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after Start registered-tool boundary test'
+
+    $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    $environment.sandboxRoot = $bazaarRoot
+    Write-JsonFixture $environmentPath $environment
+    [System.IO.File]::WriteAllText($env:BOB_TEST_BZR_LOG, '')
+    $startOverlapArguments = @($greenArguments)
+    $startOverlapArguments[1] = 'GREEN-ROOT-OVERLAP'
+    $startOverlapResult = Invoke-TestScript $startTaskPath $startOverlapArguments
+    Assert-True ($startOverlapResult.ExitCode -ne 0) 'Start task rejects a registered sandbox root equal to the Bazaar source root'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB_TEST_BZR_LOG)) '' 'Start root-overlap rejection occurs before every Bazaar command'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-ROOT-OVERLAP'))) 'Start root-overlap rejection creates no task artifacts'
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after Start root-overlap boundary test'
 
     Remove-Item -LiteralPath $environmentPath
     $missingEnvironmentResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')

@@ -16,6 +16,8 @@ Word/Excel baseline は不変です。人が stable ReqID と source anchor を�
 
 以下の `<Bazaar-root>` は、`.bzr` を直下にもつ専用かつ clean な Bazaar working copy の絶対パスです。インストール後の操作はこの root を current directory にし、**すべて** `<Bazaar-root>\team-bob\tools` の installed tools を呼びます。配布 source の `profile\team-bob\...` はインストール前の参照用であり、日常運用では実行しません。
 
+profile が読む JSON、JSON 形式の YAML、work packet、environment registration、config、template は strict UTF-8 **without BOM** です。production writer も UTF-8 without BOM を出力し、Windows PowerShell 5.1 の既定 ANSI decoding には依存しません。VC6 legacy source と `/OUT` log の CP932 contract はこれとは別です。
+
 ```powershell
 Set-Location "<Bazaar-root>"
 ```
@@ -35,6 +37,8 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File 
 ```
 
 `.bobignore.base` と `.bzrignore.snippet` は自動結合しません。人が既存 ignore 設定へレビューして統合します。前者は `.bzr/`、secrets、credentials、限定した生成物を Bob から隠せますが、Word/Excel baseline と `team-bob-work` の packet/drafts/results を隠してはいけません。後者は `team-bob-work/` 全体を Bazaar ignore にして task artifact が working copy を dirty にしないようにします。
+
+インストールと human ignore merge の後は、人が管理する release/integration process が profile と ignore の変更を version 化して承認します。Bob はこの移行でも commit、merge、tag その他の Bazaar write を実行しません。承認済み状態から fresh dedicated checkout を取得するか、人が read-only の `bzr status --short` を実行して出力が空であることを確認してから `Start-TeamBobTask.ps1` を実行します。
 
 target PC で次を実行します。四つの必須引数はすべて絶対パスです。sandbox と log root は Bazaar root の外で、互いを含まない別 directory にします。
 

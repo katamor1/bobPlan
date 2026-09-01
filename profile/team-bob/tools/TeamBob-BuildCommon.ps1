@@ -101,6 +101,14 @@ function Get-TeamBobCanonicalPath {
     return $fullPath.TrimEnd('\', '/')
 }
 
+function Assert-TeamBobNotVolumeRoot {
+    param([string]$Path, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    $volumeRoot = [System.IO.Path]::GetPathRoot($Path)
+    if ($Path.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must not be a drive-volume root.")
+    }
+}
+
 function Get-TeamBobPhysicalPath {
     param(
         [string]$Path, [string]$Label, [ValidateSet('Container', 'Leaf')][string]$PathType = 'Container',
@@ -125,12 +133,102 @@ function Get-TeamBobPhysicalPath {
     return $physical
 }
 
+function Read-TeamBobUtf8File {
+    param([string]$Path, [string]$Label = 'UTF-8 file', [string]$FailureStatus = 'ENVIRONMENT_FAILED')
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw (New-TeamBobFailure $FailureStatus "$Label is missing: $Path") }
+    try { $bytes = [System.IO.File]::ReadAllBytes($Path) } catch { throw (New-TeamBobFailure $FailureStatus ("$Label could not be read: " + $_.Exception.Message)) }
+    if (($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) -or
+        ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF)))) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must be UTF-8 without a byte-order mark: $Path")
+    }
+    $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+    try { return $encoding.GetString($bytes) } catch { throw (New-TeamBobFailure $FailureStatus ("$Label is not strict UTF-8: " + $_.Exception.Message)) }
+}
+
+function Read-TeamBobJsonFile {
+    param([string]$Path, [string]$Label = 'JSON file', [string]$FailureStatus = 'ENVIRONMENT_FAILED')
+    $text = Read-TeamBobUtf8File $Path $Label $FailureStatus
+    try { return ($text | ConvertFrom-Json) } catch { throw (New-TeamBobFailure $FailureStatus ("$Label is invalid JSON: " + $_.Exception.Message)) }
+}
+
+function Get-TeamBobProspectiveDirectory {
+    param(
+        [string]$Path, [string]$Label = 'Directory', [string]$FailureStatus = 'INTEGRITY_FAILED',
+        [switch]$Create, [switch]$RejectVolumeRoot
+    )
+    $fullPath = Get-TeamBobCanonicalPath $Path $Label $FailureStatus
+    if ($RejectVolumeRoot) { Assert-TeamBobNotVolumeRoot $fullPath $Label $FailureStatus }
+    if (Test-Path -LiteralPath $fullPath -PathType Leaf) { throw (New-TeamBobFailure $FailureStatus "$Label is an existing file: $fullPath") }
+
+    $nearest = $fullPath
+    while (-not (Test-Path -LiteralPath $nearest -PathType Container)) {
+        if (Test-Path -LiteralPath $nearest) { throw (New-TeamBobFailure $FailureStatus "$Label has a non-directory ancestor: $nearest") }
+        $parent = [System.IO.Path]::GetDirectoryName($nearest.TrimEnd('\', '/'))
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent.Equals($nearest, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw (New-TeamBobFailure $FailureStatus "$Label has no verifiable existing local ancestor.")
+        }
+        $nearest = $parent
+    }
+    $nearest = Get-TeamBobCanonicalPath $nearest $Label $FailureStatus
+    $nearestPhysical = Get-TeamBobPhysicalPath $nearest "$Label nearest existing ancestor" 'Container' $FailureStatus
+    $suffix = $fullPath.Substring($nearest.Length).TrimStart('\', '/')
+    $prospectivePhysical = $nearestPhysical
+    if (-not [string]::IsNullOrWhiteSpace($suffix)) { $prospectivePhysical = $nearestPhysical.TrimEnd('\') + '\' + $suffix.Replace('/', '\') }
+
+    if ($Create) {
+        $current = $nearest
+        $currentPhysical = $nearestPhysical
+        foreach ($component in @($suffix -split '[\\/]' | Where-Object { $_.Length -gt 0 })) {
+            $next = Join-Path $current $component
+            if (Test-Path -LiteralPath $next -PathType Leaf) { throw (New-TeamBobFailure $FailureStatus "$Label creation encountered an existing file: $next") }
+            if (-not (Test-Path -LiteralPath $next -PathType Container)) {
+                [System.IO.Directory]::CreateDirectory($next) | Out-Null
+            }
+            $nextPhysical = Get-TeamBobPhysicalPath $next $Label 'Container' $FailureStatus
+            if (-not (Test-TeamBobResolvedPathAtOrBelow $nextPhysical $currentPhysical) -or $nextPhysical.Equals($currentPhysical, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw (New-TeamBobFailure $FailureStatus "$Label creation escaped or aliased its trusted physical parent.")
+            }
+            $current = $next
+            $currentPhysical = $nextPhysical
+        }
+        $prospectivePhysical = Get-TeamBobPhysicalPath $fullPath $Label 'Container' $FailureStatus
+    }
+    return [pscustomobject]@{ FullPath = $fullPath; PhysicalPath = $prospectivePhysical; ExistingAncestor = $nearest; ExistingAncestorPhysical = $nearestPhysical }
+}
+
 function Test-TeamBobResolvedPathAtOrBelow {
     param([string]$Candidate, [string]$Root)
     $candidateValue = $Candidate.Replace('/', '\').TrimEnd('\')
     $rootValue = $Root.Replace('/', '\').TrimEnd('\')
     if ($candidateValue.Equals($rootValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
     return $candidateValue.StartsWith($rootValue + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-TeamBobPhysicalChild {
+    param([string]$CandidatePhysical, [string]$ParentPhysical, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    if (-not (Test-TeamBobResolvedPathAtOrBelow $CandidatePhysical $ParentPhysical) -or $CandidatePhysical.Equals($ParentPhysical, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must remain physically below its trusted parent.")
+    }
+}
+
+function Assert-TeamBobPhysicalAtOrBelow {
+    param([string]$CandidatePhysical, [string]$RootPhysical, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    if (-not (Test-TeamBobResolvedPathAtOrBelow $CandidatePhysical $RootPhysical)) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must remain physically at or below its trusted root.")
+    }
+}
+
+function Get-TeamBobPhysicalRelativePath {
+    param([string]$CandidatePhysical, [string]$RootPhysical, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    Assert-TeamBobPhysicalAtOrBelow $CandidatePhysical $RootPhysical $Label $FailureStatus
+    return $CandidatePhysical.Substring($RootPhysical.TrimEnd('\').Length).TrimStart('\').Replace('\', '/')
+}
+
+function Assert-TeamBobPhysicalSeparation {
+    param([string]$FirstPhysical, [string]$SecondPhysical, [string]$Label = 'Paths', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    if ((Test-TeamBobResolvedPathAtOrBelow $FirstPhysical $SecondPhysical) -or (Test-TeamBobResolvedPathAtOrBelow $SecondPhysical $FirstPhysical)) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must not be equal, nested, ancestral, or physically aliased.")
+    }
 }
 
 function Test-TeamBobPathAtOrBelow {
@@ -155,12 +253,64 @@ function Get-TeamBobRelativePath {
     return $candidateFull.Substring($prefix.Length).Replace('\', '/')
 }
 
+function ConvertTo-TeamBobNormalizedRelativeText {
+    param([object]$Value, [string]$Label, [string]$FailureStatus = 'INTEGRITY_FAILED')
+    if (-not ($Value -is [string]) -or [string]::IsNullOrWhiteSpace($Value) -or $Value -match '[\x00-\x1F\x7F]' -or
+        (Test-TeamBobNetworkPathForm $Value) -or [System.IO.Path]::IsPathRooted($Value) -or $Value -match '[:*?"<>|]') {
+        throw (New-TeamBobFailure $FailureStatus "$Label must be a safe non-empty relative path: $Value")
+    }
+    $components = @()
+    foreach ($component in @($Value -split '[\\/]' | Where-Object { $_.Length -gt 0 })) {
+        if ($component -eq '.' -or $component -eq '..') { throw (New-TeamBobFailure $FailureStatus "$Label contains a forbidden dot path component: $Value") }
+        if ([string]::IsNullOrWhiteSpace($component) -or $component.Length -gt 255 -or $component.EndsWith('.') -or $component.EndsWith(' ') -or
+            $component -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$') {
+            throw (New-TeamBobFailure $FailureStatus "$Label contains a Windows-unsafe or aliasing path component: $Value")
+        }
+        $components += $component
+    }
+    if ($components.Count -eq 0) { throw (New-TeamBobFailure $FailureStatus "$Label normalizes to an empty path.") }
+    return ($components -join '/')
+}
+
+function Test-TeamBobRelativePathAtOrBelow {
+    param([string]$Candidate, [string]$Root)
+    $candidateValue = $Candidate.Replace('\', '/').Trim('/')
+    $rootValue = $Root.Replace('\', '/').Trim('/')
+    if ($candidateValue.Equals($rootValue, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $candidateValue.StartsWith($rootValue + '/', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function ConvertTo-TeamBobForbiddenAreas {
+    param(
+        [object[]]$Entries, [string]$FailureStatus = 'INTEGRITY_FAILED',
+        [string]$Root = '', [string]$RootPhysical = ''
+    )
+    $normalized = @()
+    $seen = @{}
+    foreach ($entry in @($Entries)) {
+        $value = ConvertTo-TeamBobNormalizedRelativeText $entry 'Forbidden Areas entry' $FailureStatus
+        if (-not [string]::IsNullOrWhiteSpace($Root)) {
+            $resolved = ConvertTo-TeamBobRelativePath $Root $value 'Forbidden Areas entry' $FailureStatus
+            $value = $resolved.RelativePath
+            $pathType = $null
+            if (Test-Path -LiteralPath $resolved.FullPath -PathType Container) { $pathType = 'Container' }
+            elseif (Test-Path -LiteralPath $resolved.FullPath -PathType Leaf) { $pathType = 'Leaf' }
+            if ($null -ne $pathType) {
+                $physical = Get-TeamBobPhysicalPath $resolved.FullPath 'Forbidden Areas entry' $pathType $FailureStatus
+                $value = Get-TeamBobPhysicalRelativePath $physical $RootPhysical 'Forbidden Areas entry' $FailureStatus
+            }
+        }
+        $key = $value.ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; $normalized += $value }
+    }
+    if ($normalized.Count -eq 0) { throw (New-TeamBobFailure $FailureStatus 'Forbidden Areas must contain at least one safe entry.') }
+    return @($normalized)
+}
+
 function ConvertTo-TeamBobRelativePath {
     param([string]$Root, [string]$RelativePath, [string]$Label, [string]$FailureStatus = 'INTEGRITY_FAILED')
-    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '[\x00-\x1F\x7F]' -or (Test-TeamBobNetworkPathForm $RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|[\\/])\.\.?([\\/]|$)') {
-        throw (New-TeamBobFailure $FailureStatus "$Label must be a safe relative path: $RelativePath")
-    }
-    $candidate = Get-TeamBobCanonicalPath (Join-Path $Root $RelativePath) $Label $FailureStatus
+    $normalizedRelative = ConvertTo-TeamBobNormalizedRelativeText $RelativePath $Label $FailureStatus
+    $candidate = Get-TeamBobCanonicalPath (Join-Path $Root ($normalizedRelative.Replace('/', [System.IO.Path]::DirectorySeparatorChar))) $Label $FailureStatus
     if (-not (Test-TeamBobPathAtOrBelow $candidate $Root) -or $candidate.Equals((Get-TeamBobCanonicalPath $Root), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw (New-TeamBobFailure $FailureStatus "$Label resolves outside its root: $RelativePath")
     }
@@ -181,10 +331,48 @@ function Test-TeamBobInteger {
         $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Assert-TeamBobWorkPacketContract {
+    param([object]$Packet)
+    $failureStatus = 'INTEGRITY_FAILED'
+    if (-not ($Packet.'Profile Version' -is [string]) -or $Packet.'Profile Version' -cne '0.1.0-poc') { throw (New-TeamBobFailure $failureStatus 'Work packet Profile Version must be the supported string constant.') }
+    foreach ($field in @(
+        'Task ID', 'Difficulty', 'Customer', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch',
+        'Bazaar Full Revision ID', 'RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact',
+        'Customer Branch Impact', 'Build Profile ID', 'Specification Approver', 'Implementation Approver'
+    )) {
+        $value = $Packet.PSObject.Properties[$field].Value
+        if (-not ($value -is [string]) -or [string]::IsNullOrWhiteSpace($value)) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be a non-empty string.") }
+    }
+    if (-not ($Packet.Risk -is [string]) -or @('Green', 'Amber', 'Red') -notcontains $Packet.Risk) { throw (New-TeamBobFailure $failureStatus 'Work packet Risk must be Green, Amber, or Red.') }
+    foreach ($field in @('ReqIDs', 'Allowed Files', 'Forbidden Areas')) {
+        $value = $Packet.PSObject.Properties[$field].Value
+        if (-not ($value -is [System.Array]) -or $value.Count -lt 1) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be a non-empty array.") }
+        foreach ($item in @($value)) { if (-not ($item -is [string]) -or [string]::IsNullOrWhiteSpace($item)) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must contain non-empty strings only.") } }
+    }
+    $openQa = $Packet.'Open QA'
+    if (-not ($openQa -is [System.Array])) { throw (New-TeamBobFailure $failureStatus 'Work packet Open QA must be an array.') }
+    foreach ($item in @($openQa)) { if (-not ($item -is [string]) -or [string]::IsNullOrWhiteSpace($item)) { throw (New-TeamBobFailure $failureStatus 'Work packet Open QA must contain non-empty strings only.') } }
+    foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) {
+        $value = $Packet.PSObject.Properties[$field].Value
+        if (-not ($value -is [string]) -or @('YES', 'NO') -notcontains $value) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be the string YES or NO.") }
+    }
+    foreach ($field in @('Autonomous-Edit-Build-Approved', 'Soft-Execute-Risk-Accepted')) {
+        $value = $Packet.PSObject.Properties[$field].Value
+        if (-not ($value -is [string]) -or $value -cne 'YES') { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be the string constant YES.") }
+    }
+    if (-not (Test-TeamBobInteger $Packet.'Max-Repair-Cycles') -or [int64]$Packet.'Max-Repair-Cycles' -ne 2) { throw (New-TeamBobFailure $failureStatus 'Work packet Max-Repair-Cycles must be the integer constant 2.') }
+    if ($Packet.Risk -eq 'Green') {
+        if ($openQa.Count -ne 0) { throw (New-TeamBobFailure $failureStatus 'Green work packets must have an empty Open QA array.') }
+        foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) {
+            if ($Packet.PSObject.Properties[$field].Value -cne 'YES') { throw (New-TeamBobFailure $failureStatus "Green work packet field '$field' must be YES.") }
+        }
+    }
+}
+
 function Read-TeamBobCanonicalPacket {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $Path") }
-    $text = [System.IO.File]::ReadAllText($Path)
+    $text = Read-TeamBobUtf8File $Path 'Work packet' 'INTEGRITY_FAILED'
     $match = [regex]::Match($text, '(?s)<!-- canonical-work-packet-json:start -->\s*```json\s*(?<json>\{.*?\})\s*```\s*<!-- canonical-work-packet-json:end -->')
     if (-not $match.Success) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet canonical JSON block is missing or malformed.') }
     try { $packet = $match.Groups['json'].Value | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ('Work packet canonical JSON is invalid: ' + $_.Exception.Message)) }
@@ -197,66 +385,91 @@ function Read-TeamBobCanonicalPacket {
         'Specification Approver', 'Implementation Approver'
     )
     Assert-TeamBobExactProperties $packet $fields 'Work packet' 'INTEGRITY_FAILED'
+    Assert-TeamBobWorkPacketContract $packet
     return $packet
 }
 
 function Get-TeamBobPacketContext {
     param([object]$Packet, [string]$WorkPacketPath)
-    if ($Packet.'Profile Version' -ne '0.1.0-poc' -or $Packet.Risk -ne 'Green' -or @($Packet.'Open QA').Count -ne 0 -or
-        $Packet.'Autonomous-Edit-Build-Approved' -ne 'YES' -or $Packet.'Soft-Execute-Risk-Accepted' -ne 'YES' -or
-        -not (Test-TeamBobInteger $Packet.'Max-Repair-Cycles') -or [int64]$Packet.'Max-Repair-Cycles' -ne 2) {
-        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet does not satisfy the Green approval and repair-budget gates.')
-    }
-    foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) {
-        if ($Packet.$field -ne 'YES') { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet field '$field' must be YES.") }
-    }
-    foreach ($field in @('Task ID', 'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Build Profile ID', 'Specification Approver', 'Implementation Approver')) {
-        if ([string]::IsNullOrWhiteSpace([string]$Packet.$field)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet field '$field' is empty.") }
-    }
+    if ($Packet.Risk -cne 'Green') { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Build and evidence consumers require a Green work packet.') }
     if ([string]$Packet.'Task ID' -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet Task ID is unsafe.') }
     if (-not (Test-TeamBobAbsolutePath ([string]$Packet.'Bazaar Root'))) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar Root must be absolute.') }
-    $bazaarRoot = Get-TeamBobCanonicalPath ([string]$Packet.'Bazaar Root')
+    $bazaarRoot = Get-TeamBobCanonicalPath ([string]$Packet.'Bazaar Root') 'Bazaar Root' 'INTEGRITY_FAILED'
+    Assert-TeamBobNotVolumeRoot $bazaarRoot 'Bazaar Root' 'INTEGRITY_FAILED'
     if (-not (Test-Path -LiteralPath $bazaarRoot -PathType Container) -or -not (Test-Path -LiteralPath (Join-Path $bazaarRoot '.bzr') -PathType Container)) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar Root must be an existing Bazaar working-tree root.')
     }
+    $bazaarPhysical = Get-TeamBobPhysicalPath $bazaarRoot 'Bazaar Root' 'Container' 'INTEGRITY_FAILED'
+    $bzrPath = Join-Path $bazaarRoot '.bzr'
+    $bzrPhysical = Get-TeamBobPhysicalPath $bzrPath 'Bazaar metadata root' 'Container' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalChild $bzrPhysical $bazaarPhysical 'Bazaar metadata root' 'INTEGRITY_FAILED'
     $expectedPacket = Get-TeamBobCanonicalPath (Join-Path $bazaarRoot (Join-Path (Join-Path 'team-bob-work' ([string]$Packet.'Task ID')) 'work-packet.md'))
-    if (-not $expectedPacket.Equals((Get-TeamBobCanonicalPath $WorkPacketPath), [System.StringComparison]::OrdinalIgnoreCase)) {
+    $workPacketFull = Get-TeamBobCanonicalPath $WorkPacketPath 'Work packet' 'INTEGRITY_FAILED'
+    if (-not $expectedPacket.Equals($workPacketFull, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet path does not match its Bazaar Root and Task ID.')
     }
-    $forbiddenAreas = @()
-    foreach ($forbidden in @($Packet.'Forbidden Areas')) {
-        if (-not ($forbidden -is [string]) -or [string]::IsNullOrWhiteSpace($forbidden) -or $forbidden -match '[\x00-\x1F\x7F]' -or
-            [System.IO.Path]::IsPathRooted($forbidden) -or $forbidden -match '(^|[\\/])\.\.?([\\/]|$)') {
-            throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Forbidden Areas contains an unsafe entry: $forbidden")
-        }
-        $normalizedForbidden = $forbidden.Replace('\', '/').Trim('/')
-        if ([string]::IsNullOrWhiteSpace($normalizedForbidden)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Forbidden Areas contains an empty normalized path.') }
-        $forbiddenAreas += $normalizedForbidden
-    }
-    if ($forbiddenAreas.Count -eq 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Forbidden Areas must contain at least one safe entry.') }
+    $teamBobWorkPath = Join-Path $bazaarRoot 'team-bob-work'
+    $taskPath = Join-Path $teamBobWorkPath ([string]$Packet.'Task ID')
+    $teamBobWorkPhysical = Get-TeamBobPhysicalPath $teamBobWorkPath 'team-bob-work root' 'Container' 'INTEGRITY_FAILED'
+    $taskPhysical = Get-TeamBobPhysicalPath $taskPath 'Task directory' 'Container' 'INTEGRITY_FAILED'
+    $packetPhysical = Get-TeamBobPhysicalPath $workPacketFull 'Work packet' 'Leaf' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalChild $teamBobWorkPhysical $bazaarPhysical 'team-bob-work root' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalChild $taskPhysical $teamBobWorkPhysical 'Task directory' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalChild $packetPhysical $taskPhysical 'Work packet' 'INTEGRITY_FAILED'
+
+    $forbiddenAreas = @(ConvertTo-TeamBobForbiddenAreas @($Packet.'Forbidden Areas') 'INTEGRITY_FAILED' $bazaarRoot $bazaarPhysical)
     $supported = @('.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl')
     $allowed = @()
     $seen = @{}
     foreach ($entry in @($Packet.'Allowed Files')) {
-        if (-not ($entry -is [string])) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Allowed Files must contain strings only.') }
         $resolved = ConvertTo-TeamBobRelativePath $bazaarRoot $entry 'Allowed File' 'INTEGRITY_FAILED'
         if (-not ($supported -contains [System.IO.Path]::GetExtension($resolved.FullPath).ToLowerInvariant())) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File extension is unsupported: $entry") }
         if (-not (Test-Path -LiteralPath $resolved.FullPath -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is missing: $entry") }
-        $key = $resolved.RelativePath.ToLowerInvariant()
+        $allowedPhysical = Get-TeamBobPhysicalPath $resolved.FullPath "Allowed File '$entry'" 'Leaf' 'INTEGRITY_FAILED'
+        $allowedPhysicalRelative = Get-TeamBobPhysicalRelativePath $allowedPhysical $bazaarPhysical "Allowed File '$entry'" 'INTEGRITY_FAILED'
+        $key = $allowedPhysicalRelative.ToLowerInvariant()
         if ($seen.ContainsKey($key)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is duplicated: $entry") }
         $seen[$key] = $true
         foreach ($forbiddenNormalized in $forbiddenAreas) {
-            if ($resolved.RelativePath.Equals($forbiddenNormalized, [System.StringComparison]::OrdinalIgnoreCase) -or $resolved.RelativePath.StartsWith($forbiddenNormalized + '/', [System.StringComparison]::OrdinalIgnoreCase)) {
+            if ((Test-TeamBobRelativePathAtOrBelow $resolved.RelativePath $forbiddenNormalized) -or
+                (Test-TeamBobRelativePathAtOrBelow $allowedPhysicalRelative $forbiddenNormalized)) {
                 throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Allowed File is inside a forbidden area: $entry")
             }
         }
+        $resolved.RelativePath = $allowedPhysicalRelative
+        $resolved | Add-Member -NotePropertyName PhysicalPath -NotePropertyValue $allowedPhysical
         $allowed += $resolved
     }
     if ($allowed.Count -eq 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'At least one Allowed File is required.') }
     return [pscustomobject]@{
-        TaskId = [string]$Packet.'Task ID'; BazaarRoot = $bazaarRoot; AllowedFiles = @($allowed); ForbiddenAreas = @($forbiddenAreas)
+        TaskId = [string]$Packet.'Task ID'; BazaarRoot = $bazaarRoot; BazaarPhysical = $bazaarPhysical; BzrPath = $bzrPath; BzrPhysical = $bzrPhysical
+        TeamBobWorkPath = $teamBobWorkPath; TeamBobWorkPhysical = $teamBobWorkPhysical; TaskPath = $taskPath; TaskPhysical = $taskPhysical
+        WorkPacketPath = $workPacketFull; WorkPacketPhysical = $packetPhysical; AllowedFiles = @($allowed); ForbiddenAreas = @($forbiddenAreas)
         BuildProfileId = [string]$Packet.'Build Profile ID'; BazaarBranch = [string]$Packet.'Bazaar Branch'; BazaarRevision = [string]$Packet.'Bazaar Full Revision ID'
     }
+}
+
+function Get-TeamBobTaskResultsContext {
+    param([object]$Context, [switch]$Create)
+    $resultsPath = Join-Path $Context.TaskPath 'results'
+    if (Test-Path -LiteralPath $resultsPath -PathType Leaf) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Task results path is an existing file.') }
+    $resultsInfo = Get-TeamBobProspectiveDirectory $resultsPath 'Task results directory' 'INTEGRITY_FAILED' -RejectVolumeRoot -Create:$Create
+    Assert-TeamBobPhysicalChild $resultsInfo.PhysicalPath $Context.TaskPhysical 'Task results directory' 'INTEGRITY_FAILED'
+    return $resultsInfo
+}
+
+function Get-TeamBobTrustedChildDirectory {
+    param(
+        [string]$ParentPath, [string]$ParentPhysical, [string]$ChildName, [string]$Label,
+        [string]$FailureStatus = 'INTEGRITY_FAILED', [switch]$Create, [switch]$RequireMissing
+    )
+    $normalizedName = ConvertTo-TeamBobNormalizedRelativeText $ChildName $Label $FailureStatus
+    if ($normalizedName.Contains('/')) { throw (New-TeamBobFailure $FailureStatus "$Label must be one direct child directory name.") }
+    $childPath = Join-Path $ParentPath $normalizedName
+    if ($RequireMissing -and (Test-Path -LiteralPath $childPath)) { throw (New-TeamBobFailure $FailureStatus "$Label already exists and cannot be reused: $childPath") }
+    $info = Get-TeamBobProspectiveDirectory $childPath $Label $FailureStatus -RejectVolumeRoot -Create:$Create
+    Assert-TeamBobPhysicalChild $info.PhysicalPath $ParentPhysical $Label $FailureStatus
+    return $info
 }
 
 function Get-TeamBobFileHash {
@@ -266,13 +479,22 @@ function Get-TeamBobFileHash {
 }
 
 function Write-TeamBobUtf8File {
-    param([string]$Path, [string]$Text)
+    param([string]$Path, [string]$Text, [string]$TrustedParentPhysical)
     $parent = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { [System.IO.Directory]::CreateDirectory($parent) | Out-Null }
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "UTF-8 output parent is missing: $parent") }
+    $parentPhysical = Get-TeamBobPhysicalPath $parent 'UTF-8 output parent' 'Container' 'INTEGRITY_FAILED'
+    if (-not [string]::IsNullOrWhiteSpace($TrustedParentPhysical)) { Assert-TeamBobPhysicalAtOrBelow $parentPhysical $TrustedParentPhysical 'UTF-8 output parent' 'INTEGRITY_FAILED' }
+    if (Test-Path -LiteralPath $Path -PathType Container) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "UTF-8 output path is an existing directory: $Path") }
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        $existingPhysical = Get-TeamBobPhysicalPath $Path 'Existing UTF-8 output file' 'Leaf' 'INTEGRITY_FAILED'
+        Assert-TeamBobPhysicalChild $existingPhysical $parentPhysical 'Existing UTF-8 output file' 'INTEGRITY_FAILED'
+    }
     $temporaryPath = Join-Path $parent ('.team-bob.' + [guid]::NewGuid().ToString('N') + '.tmp')
     $backupPath = Join-Path $parent ('.team-bob.' + [guid]::NewGuid().ToString('N') + '.bak')
     try {
-        [System.IO.File]::WriteAllText($temporaryPath, $Text, (New-Object System.Text.UTF8Encoding($false)))
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Text)
+        $stream = New-Object System.IO.FileStream($temporaryPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush() } finally { $stream.Dispose() }
         if (Test-Path -LiteralPath $Path -PathType Leaf) { [System.IO.File]::Replace($temporaryPath, $Path, $backupPath) } else { [System.IO.File]::Move($temporaryPath, $Path) }
     } finally {
         if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
@@ -392,17 +614,21 @@ function Invoke-TeamBobProcess {
 }
 
 function Get-TeamBobLocalEnvironment {
-    param([string]$ManifestPath, [string]$WorkSchemaPath, [string]$BuildSchemaPath, [switch]$BazaarOnly)
+    param(
+        [string]$ManifestPath, [string]$WorkSchemaPath, [string]$BuildSchemaPath, [switch]$BazaarOnly,
+        [string]$RootFailureStatus = 'ENVIRONMENT_FAILED'
+    )
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'LOCALAPPDATA must be an absolute path.') }
     $localAppData = Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED'
     $path = Join-Path $localAppData 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment registration is missing: $path") }
-    try { $environment = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ('Local environment registration is invalid JSON: ' + $_.Exception.Message)) }
+    [void](Get-TeamBobPhysicalPath $path 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
+    $environment = Read-TeamBobJsonFile $path 'Local environment registration' 'ENVIRONMENT_FAILED'
     $fields = @('schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId', 'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot')
     Assert-TeamBobExactProperties $environment $fields 'Local environment registration' 'ENVIRONMENT_FAILED'
-    $manifest = Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json
-    $workSchema = Get-Content -Raw -LiteralPath $WorkSchemaPath | ConvertFrom-Json
-    $buildSchema = Get-Content -Raw -LiteralPath $BuildSchemaPath | ConvertFrom-Json
+    $manifest = Read-TeamBobJsonFile $ManifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
+    $workSchema = Read-TeamBobJsonFile $WorkSchemaPath 'Work-packet schema' 'ENVIRONMENT_FAILED'
+    $buildSchema = Read-TeamBobJsonFile $BuildSchemaPath 'Build-target schema' 'ENVIRONMENT_FAILED'
     if ($environment.schemaVersion -ne '1.0' -or $environment.profileId -ne $manifest.profile.id -or $environment.profileVersion -ne $manifest.version -or
         $environment.workPacketSchemaId -ne $workSchema.'$id' -or $environment.buildTargetSchemaId -ne $buildSchema.'$id') {
         throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Local environment profile/schema identity does not match the installed profile.')
@@ -417,10 +643,13 @@ function Get-TeamBobLocalEnvironment {
     if (-not (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered Bazaar tool is missing: $($environment.bazaarPath)") }
     [void](Get-TeamBobPhysicalPath $environment.bazaarPath 'Registered Bazaar tool' 'Leaf' 'ENVIRONMENT_FAILED')
     if ((Get-TeamBobFileHash $environment.bazaarPath) -ne ([string]$environment.bazaarSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered Bazaar hash does not match.') }
+    foreach ($field in @('sandboxRoot', 'logRoot')) {
+        if (-not (Test-Path -LiteralPath $environment.$field -PathType Container)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered root is missing or not a directory: $($environment.$field)") }
+        [void](Get-TeamBobPhysicalPath $environment.$field "Registered $field" 'Container' $RootFailureStatus)
+    }
     if (-not $BazaarOnly) {
         if (-not (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered MSDEV tool is missing: $($environment.msdevPath)") }
         [void](Get-TeamBobPhysicalPath $environment.msdevPath 'Registered MSDEV tool' 'Leaf' 'ENVIRONMENT_FAILED')
-        foreach ($field in @('sandboxRoot', 'logRoot')) { if (-not (Test-Path -LiteralPath $environment.$field -PathType Container)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered root is missing or not a directory: $($environment.$field)") } }
         if ((Get-TeamBobFileHash $environment.msdevPath) -ne ([string]$environment.msdevSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered MSDEV hash does not match.') }
     }
     return $environment
@@ -428,7 +657,7 @@ function Get-TeamBobLocalEnvironment {
 
 function Get-TeamBobBuildProfile {
     param([string]$CatalogPath, [string]$ProfileId, [string]$PcId)
-    try { $catalog = Get-Content -Raw -LiteralPath $CatalogPath | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ('Build target catalog is invalid JSON: ' + $_.Exception.Message)) }
+    $catalog = Read-TeamBobJsonFile $CatalogPath 'Build target catalog' 'ENVIRONMENT_FAILED'
     Assert-TeamBobExactProperties $catalog @('profiles') 'Build target catalog' 'ENVIRONMENT_FAILED'
     $profileFields = @('id', 'enabled', 'projectFile', 'target', 'timeoutSeconds', 'expectedArtifacts', 'excludePatterns', 'outputLogPattern', 'successPattern', 'compilerErrorPattern', 'linkerErrorPattern', 'environmentErrorPattern', 'qualification')
     $qualificationFields = @('msdevHelp', 'makeSucceeded', 'rebuildSucceeded', 'compileFailureObserved', 'linkFailureObserved', 'pcId', 'recordId', 'recordedAt')
@@ -461,7 +690,7 @@ function Get-TeamBobBuildProfile {
 }
 
 function Get-TeamBobInventory {
-    param([string]$Root, [string[]]$ExcludedTopNames = @())
+    param([string]$Root, [string[]]$ExcludedTopNames = @(), [string[]]$ForbiddenAreas = @())
     $rootFull = Get-TeamBobCanonicalPath $Root
     $records = @()
     $pending = New-Object System.Collections.ArrayList
@@ -473,6 +702,9 @@ function Get-TeamBobInventory {
             $relative = Get-TeamBobRelativePath $rootFull $item.FullName
             $top = ($relative -split '/')[0]
             if ($ExcludedTopNames -contains $top) { continue }
+            $insideForbidden = $false
+            foreach ($forbidden in $ForbiddenAreas) { if (Test-TeamBobRelativePathAtOrBelow $relative $forbidden) { $insideForbidden = $true; break } }
+            if ($insideForbidden) { continue }
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Reparse points are forbidden in the protected tree: $relative") }
             if ($item.PSIsContainer) {
                 $records += ('D|' + $relative)
@@ -495,7 +727,7 @@ function Get-TeamBobAllowedHashes {
 function Get-TeamBobProtectedSnapshot {
     param([object]$Context)
     return [pscustomobject]@{
-        SourceInventory = @(Get-TeamBobInventory $Context.BazaarRoot @('.bzr', 'team-bob-work'))
+        SourceInventory = @(Get-TeamBobInventory $Context.BazaarRoot @('.bzr', 'team-bob-work') $Context.ForbiddenAreas)
         BzrInventory = @(Get-TeamBobInventory (Join-Path $Context.BazaarRoot '.bzr'))
         AllowedHashes = @(Get-TeamBobAllowedHashes $Context.AllowedFiles)
     }
@@ -580,10 +812,11 @@ function Get-TeamBobBuildBazaarState {
 }
 
 function Test-TeamBobCopyExclusion {
-    param([string]$RelativePath, [string[]]$Patterns, [string[]]$ExpectedArtifacts)
+    param([string]$RelativePath, [string[]]$Patterns, [string[]]$ExpectedArtifacts, [string[]]$ForbiddenAreas)
     $normalized = $RelativePath.Replace('\', '/')
     $top = ($normalized -split '/')[0]
     if ($top -ieq '.bzr' -or $top -ieq 'team-bob-work') { return $true }
+    foreach ($forbidden in $ForbiddenAreas) { if (Test-TeamBobRelativePathAtOrBelow $normalized $forbidden) { return $true } }
     foreach ($artifact in $ExpectedArtifacts) { if ($normalized.Equals($artifact.Replace('\', '/'), [System.StringComparison]::OrdinalIgnoreCase)) { return $true } }
     foreach ($pattern in $Patterns) {
         $normalizedPattern = $pattern.Replace('\', '/')
@@ -597,9 +830,10 @@ function Test-TeamBobCopyExclusion {
 }
 
 function Copy-TeamBobSandboxTree {
-    param([string]$SourceRoot, [string]$DestinationRoot, [string[]]$Patterns, [string[]]$ExpectedArtifacts)
-    if (Test-Path -LiteralPath $DestinationRoot) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox destination already exists: $DestinationRoot") }
-    [System.IO.Directory]::CreateDirectory($DestinationRoot) | Out-Null
+    param([string]$SourceRoot, [string]$DestinationRoot, [string[]]$Patterns, [string[]]$ExpectedArtifacts, [string[]]$ForbiddenAreas)
+    if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox destination must be a newly validated directory: $DestinationRoot") }
+    [void](Get-TeamBobPhysicalPath $DestinationRoot 'Sandbox destination' 'Container' 'INTEGRITY_FAILED')
+    if (@(Get-ChildItem -LiteralPath $DestinationRoot -Force).Count -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Sandbox destination must be empty and never reused: $DestinationRoot") }
     $sourceFull = Get-TeamBobCanonicalPath $SourceRoot
     $pending = New-Object System.Collections.ArrayList
     [void]$pending.Add($sourceFull)
@@ -608,7 +842,7 @@ function Copy-TeamBobSandboxTree {
         $pending.RemoveAt(0)
         foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force | Sort-Object Name)) {
             $relative = Get-TeamBobRelativePath $sourceFull $item.FullName
-            if (Test-TeamBobCopyExclusion $relative $Patterns $ExpectedArtifacts) { continue }
+            if (Test-TeamBobCopyExclusion $relative $Patterns $ExpectedArtifacts $ForbiddenAreas) { continue }
             if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Reparse points are forbidden during sandbox copy: $relative") }
             $destination = Join-Path $DestinationRoot ($relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
             if ($item.PSIsContainer) {

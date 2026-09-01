@@ -1,6 +1,6 @@
 # Work Packet
 
-Commands and tools must parse the canonical JSON object below and validate it against `../config/work-packet.schema.json`. The surrounding Markdown is explanatory only; the JSON object is the authoritative packet representation.
+Commands and tools must parse the canonical JSON object below and validate it against the Bazaar-root-relative `team-bob/config/work-packet.schema.json`. The surrounding Markdown is explanatory only; the JSON object is the authoritative packet representation.
 
 <!-- canonical-work-packet-json:start -->
 ```json

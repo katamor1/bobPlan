@@ -35,35 +35,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
 
-function Get-TeamBobSha256 {
-    param([Parameter(Mandatory = $true)][string]$Path)
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try { $stream = [System.IO.File]::OpenRead($Path); try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()) } finally { $stream.Dispose() } } finally { $sha256.Dispose() }
-}
-
-function Test-TeamBobAbsolutePath {
-    param([string]$Path)
-    return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
-}
-
-function Get-TeamBobCanonicalDirectory {
-    param([string]$Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
-    if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
-    return $fullPath.TrimEnd('\', '/')
-}
-
-function Invoke-TeamBobBazaarRead {
+function Invoke-TeamBobStartBazaarRead {
     param([string]$Executable, [string]$WorkingDirectory, [string[]]$Arguments)
     Push-Location -LiteralPath $WorkingDirectory
-    try {
-        $lines = @(& $Executable @Arguments 2>&1)
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+    try { $lines = @(& $Executable @Arguments 2>&1); $exitCode = $LASTEXITCODE } finally { Pop-Location }
     if ($exitCode -ne 0) { throw "Bazaar command failed with exit code ${exitCode}: $($Arguments -join ' ')" }
     return (($lines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
 }
@@ -74,26 +51,45 @@ try {
         if ([string]::IsNullOrWhiteSpace($requiredText)) { throw 'Required task metadata must not be empty.' }
     }
     if (@($ReqIds).Count -eq 0 -or @($ReqIds | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw 'ReqIds must contain non-empty values.' }
-    if (@($ForbiddenAreas).Count -eq 0 -or @($ForbiddenAreas | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw 'ForbiddenAreas must contain non-empty values.' }
+    foreach ($impact in @($RTImpact, $SafetyImpact, $BoardImpact, $DriverImpact, $ABIImpact, $BuildImpact, $CustomerBranchImpact)) { if ([string]::IsNullOrWhiteSpace($impact)) { throw 'Impact evidence fields must not be empty.' } }
+    if (@($OpenQa | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw 'OpenQa entries must be non-empty strings.' }
     if ($MaxRepairCycles -ne 2) { throw 'MaxRepairCycles is fixed to 2.' }
     if (-not (Test-TeamBobAbsolutePath $BazaarRoot) -or -not (Test-Path -LiteralPath $BazaarRoot -PathType Container)) { throw 'BazaarRoot must be an absolute existing directory.' }
-    $bazaarRootFull = Get-TeamBobCanonicalDirectory $BazaarRoot
+    $bazaarRootFull = Get-TeamBobCanonicalPath $BazaarRoot 'BazaarRoot' 'INTEGRITY_FAILED'
+    Assert-TeamBobNotVolumeRoot $bazaarRootFull 'BazaarRoot' 'INTEGRITY_FAILED'
+    $bazaarRootPhysical = Get-TeamBobPhysicalPath $bazaarRootFull 'BazaarRoot' 'Container' 'INTEGRITY_FAILED'
     if (-not (Test-Path -LiteralPath (Join-Path $bazaarRootFull '.bzr') -PathType Container)) { throw 'BazaarRoot must itself contain a .bzr directory.' }
-    $taskDirectory = Join-Path $bazaarRootFull (Join-Path 'team-bob-work' $TaskId)
+    $bzrPhysical = Get-TeamBobPhysicalPath (Join-Path $bazaarRootFull '.bzr') 'Bazaar metadata root' 'Container' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalChild $bzrPhysical $bazaarRootPhysical 'Bazaar metadata root' 'INTEGRITY_FAILED'
+    $normalizedForbidden = @(ConvertTo-TeamBobForbiddenAreas @($ForbiddenAreas) 'INTEGRITY_FAILED' $bazaarRootFull $bazaarRootPhysical)
+
+    $teamBobWorkPath = Join-Path $bazaarRootFull 'team-bob-work'
+    $teamBobWorkPlan = Get-TeamBobProspectiveDirectory $teamBobWorkPath 'team-bob-work root' 'INTEGRITY_FAILED' -RejectVolumeRoot
+    Assert-TeamBobPhysicalChild $teamBobWorkPlan.PhysicalPath $bazaarRootPhysical 'team-bob-work root' 'INTEGRITY_FAILED'
+    $taskDirectory = Join-Path $teamBobWorkPath $TaskId
     if (Test-Path -LiteralPath $taskDirectory) { throw "Task directory already exists: $taskDirectory" }
+    $taskPlan = Get-TeamBobTrustedChildDirectory $teamBobWorkPlan.FullPath $teamBobWorkPlan.PhysicalPath $TaskId 'Task directory' 'INTEGRITY_FAILED' -RequireMissing
+    $draftsPlan = Get-TeamBobTrustedChildDirectory $taskPlan.FullPath $taskPlan.PhysicalPath 'drafts' 'Task drafts directory' 'INTEGRITY_FAILED' -RequireMissing
+    $resultsPlan = Get-TeamBobTrustedChildDirectory $taskPlan.FullPath $taskPlan.PhysicalPath 'results' 'Task results directory' 'INTEGRITY_FAILED' -RequireMissing
 
     $supportedExtensions = @('.c', '.cc', '.cpp', '.cxx', '.h', '.hh', '.hpp', '.hxx', '.inl')
     $normalizedAllowed = @()
+    $seenAllowed = @{}
     foreach ($allowed in @($AllowedFiles)) {
         if ([string]::IsNullOrWhiteSpace($allowed)) { throw 'AllowedFiles must contain non-empty values.' }
-        if ([System.IO.Path]::IsPathRooted($allowed) -or $allowed -match '(^|[\\/])\.\.?([\\/]|$)') { throw "Allowed file must be a relative path within BazaarRoot: $allowed" }
-        $candidate = [System.IO.Path]::GetFullPath((Join-Path $bazaarRootFull $allowed))
-        $prefix = $bazaarRootFull
-        if (-not ($prefix.EndsWith('\') -or $prefix.EndsWith('/'))) { $prefix += [System.IO.Path]::DirectorySeparatorChar }
-        if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Allowed file resolves outside BazaarRoot: $allowed" }
-        if (-not ($supportedExtensions -contains [System.IO.Path]::GetExtension($candidate).ToLowerInvariant())) { throw "Allowed file extension is unsupported: $allowed" }
-        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "Allowed file does not exist as a file: $allowed" }
-        $normalizedAllowed += ($candidate.Substring($prefix.Length).Replace('\', '/'))
+        $resolved = ConvertTo-TeamBobRelativePath $bazaarRootFull $allowed 'Allowed File' 'INTEGRITY_FAILED'
+        if (-not ($supportedExtensions -contains [System.IO.Path]::GetExtension($resolved.FullPath).ToLowerInvariant())) { throw "Allowed file extension is unsupported: $allowed" }
+        if (-not (Test-Path -LiteralPath $resolved.FullPath -PathType Leaf)) { throw "Allowed file does not exist as a file: $allowed" }
+        $allowedPhysical = Get-TeamBobPhysicalPath $resolved.FullPath "Allowed File '$allowed'" 'Leaf' 'INTEGRITY_FAILED'
+        $allowedPhysicalRelative = Get-TeamBobPhysicalRelativePath $allowedPhysical $bazaarRootPhysical "Allowed File '$allowed'" 'INTEGRITY_FAILED'
+        foreach ($forbidden in $normalizedForbidden) {
+            if ((Test-TeamBobRelativePathAtOrBelow $resolved.RelativePath $forbidden) -or
+                (Test-TeamBobRelativePathAtOrBelow $allowedPhysicalRelative $forbidden)) { throw "Allowed file is equal to or below Forbidden Areas entry '$forbidden': $allowed" }
+        }
+        $allowedKey = $allowedPhysicalRelative.ToLowerInvariant()
+        if ($seenAllowed.ContainsKey($allowedKey)) { throw "Allowed file is duplicated after normalization: $allowed" }
+        $seenAllowed[$allowedKey] = $true
+        $normalizedAllowed += $allowedPhysicalRelative
     }
     if ($normalizedAllowed.Count -eq 0) { throw 'AllowedFiles must contain at least one supported file.' }
 
@@ -105,19 +101,22 @@ try {
     }
     if ($AutonomousEditBuildApproved -ne 'YES' -or $SoftExecuteRiskAccepted -ne 'YES') { throw 'A schema-valid work packet requires both explicit YES approvals.' }
 
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
-    if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) { throw "Local environment registration is missing: $environmentPath" }
-    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
-    if ($environment.profileId -ne 'team-bob-vc6-bazaar' -or $environment.profileVersion -ne '0.1.0-poc') { throw 'Local environment profile identity does not match this profile.' }
-    if (-not (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)) { throw 'Registered Bazaar executable is missing.' }
-    $actualBazaarHash = Get-TeamBobSha256 $environment.bazaarPath
-    if ($actualBazaarHash -ne $environment.bazaarSha256) { throw 'Registered Bazaar executable hash does not match.' }
+    $profileRoot = Split-Path -Parent $PSScriptRoot
+    $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
+    $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
+    $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
+    $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath -BazaarOnly
+    $sandboxPhysical = Get-TeamBobPhysicalPath $environment.sandboxRoot 'Registered sandbox root' 'Container' 'INTEGRITY_FAILED'
+    $logPhysical = Get-TeamBobPhysicalPath $environment.logRoot 'Registered log root' 'Container' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $bazaarRootPhysical $sandboxPhysical 'Bazaar and sandbox roots' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $bazaarRootPhysical $logPhysical 'Bazaar and log roots' 'INTEGRITY_FAILED'
+    Assert-TeamBobPhysicalSeparation $sandboxPhysical $logPhysical 'Sandbox and log roots' 'INTEGRITY_FAILED'
 
-    $status = Invoke-TeamBobBazaarRead $environment.bazaarPath $bazaarRootFull @('status', '--short')
+    $status = Invoke-TeamBobStartBazaarRead $environment.bazaarPath $bazaarRootFull @('status', '--short')
     if (-not [string]::IsNullOrWhiteSpace($status)) { throw 'Bazaar working tree is not clean.' }
-    $branch = Invoke-TeamBobBazaarRead $environment.bazaarPath $bazaarRootFull @('nick')
+    $branch = Invoke-TeamBobStartBazaarRead $environment.bazaarPath $bazaarRootFull @('nick')
     if ([string]::IsNullOrWhiteSpace($branch)) { throw 'Bazaar branch nick is empty.' }
-    $revision = Invoke-TeamBobBazaarRead $environment.bazaarPath $bazaarRootFull @('version-info', '--custom', '--template={revision_id}')
+    $revision = Invoke-TeamBobStartBazaarRead $environment.bazaarPath $bazaarRootFull @('version-info', '--custom', '--template={revision_id}')
     if ([string]::IsNullOrWhiteSpace($revision)) { throw 'Bazaar full revision id is empty.' }
 
     $templatePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'templates/work-packet.md'
@@ -126,7 +125,7 @@ try {
         'Profile Version' = '0.1.0-poc'; 'Task ID' = $TaskId; 'Difficulty' = $Difficulty; 'Risk' = $Classification; 'Customer' = $Customer
         'ReqIDs' = @($ReqIds); 'Word Baseline' = $WordBaseline; 'QA Baseline' = $QaBaseline; 'Spec Baseline' = $SpecBaseline
         'Bazaar Root' = $bazaarRootFull; 'Bazaar Branch' = $branch; 'Bazaar Full Revision ID' = $revision
-        'Allowed Files' = @($normalizedAllowed); 'Forbidden Areas' = @($ForbiddenAreas)
+        'Allowed Files' = @($normalizedAllowed); 'Forbidden Areas' = @($normalizedForbidden)
         'RT Impact' = $RTImpact; 'Safety Impact' = $SafetyImpact; 'Board Impact' = $BoardImpact; 'Driver Impact' = $DriverImpact
         'ABI Impact' = $ABIImpact; 'Build Impact' = $BuildImpact; 'Customer Branch Impact' = $CustomerBranchImpact
         'RT Impact Clear' = $RTImpactClear; 'Safety Impact Clear' = $SafetyImpactClear; 'Board Impact Clear' = $BoardImpactClear
@@ -136,7 +135,9 @@ try {
         'Soft-Execute-Risk-Accepted' = $SoftExecuteRiskAccepted; 'Max-Repair-Cycles' = 2
         'Specification Approver' = $SpecificationApprover; 'Implementation Approver' = $ImplementationApprover
     }
-    $template = [System.IO.File]::ReadAllText($templatePath)
+    Assert-TeamBobWorkPacketContract ([pscustomobject]$packet)
+    [void](Get-TeamBobPhysicalPath $templatePath 'Work-packet template' 'Leaf' 'INTEGRITY_FAILED')
+    $template = Read-TeamBobUtf8File $templatePath 'Work-packet template' 'INTEGRITY_FAILED'
     $pattern = '(?s)(<!-- canonical-work-packet-json:start -->\s*```json\s*)\{.*?\}(\s*```\s*<!-- canonical-work-packet-json:end -->)'
     if (-not [regex]::IsMatch($template, $pattern)) { throw 'Work-packet template canonical JSON block is malformed.' }
     $packetJson = $packet | ConvertTo-Json -Depth 10
@@ -146,14 +147,13 @@ try {
     }
     $document = [regex]::Replace($template, $pattern, $replacementEvaluator, 1)
 
-    $draftsDirectory = Join-Path $taskDirectory 'drafts'
-    $resultsDirectory = Join-Path $taskDirectory 'results'
-    New-Item -ItemType Directory -Path $draftsDirectory -Force | Out-Null
-    New-Item -ItemType Directory -Path $resultsDirectory -Force | Out-Null
+    $teamBobWorkCreated = Get-TeamBobProspectiveDirectory $teamBobWorkPlan.FullPath 'team-bob-work root' 'INTEGRITY_FAILED' -RejectVolumeRoot -Create
+    Assert-TeamBobPhysicalChild $teamBobWorkCreated.PhysicalPath $bazaarRootPhysical 'team-bob-work root' 'INTEGRITY_FAILED'
+    $taskCreated = Get-TeamBobTrustedChildDirectory $teamBobWorkCreated.FullPath $teamBobWorkCreated.PhysicalPath $TaskId 'Task directory' 'INTEGRITY_FAILED' -RequireMissing -Create
+    $draftsCreated = Get-TeamBobTrustedChildDirectory $taskCreated.FullPath $taskCreated.PhysicalPath 'drafts' 'Task drafts directory' 'INTEGRITY_FAILED' -RequireMissing -Create
+    $resultsCreated = Get-TeamBobTrustedChildDirectory $taskCreated.FullPath $taskCreated.PhysicalPath 'results' 'Task results directory' 'INTEGRITY_FAILED' -RequireMissing -Create
     $packetPath = Join-Path $taskDirectory 'work-packet.md'
-    $temporaryPacket = Join-Path $taskDirectory ('.work-packet.' + [guid]::NewGuid().ToString('N') + '.tmp')
-    [System.IO.File]::WriteAllText($temporaryPacket, $document, (New-Object System.Text.UTF8Encoding($false)))
-    [System.IO.File]::Move($temporaryPacket, $packetPath)
+    Write-TeamBobUtf8File $packetPath $document $teamBobWorkCreated.PhysicalPath
     Write-Output "CREATED $packetPath"
     exit 0
 } catch {
