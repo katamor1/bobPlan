@@ -1,0 +1,95 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][string]$MsdevPath,
+    [Parameter(Mandatory = $true)][string]$BazaarPath,
+    [Parameter(Mandatory = $true)][string]$SandboxRoot,
+    [Parameter(Mandatory = $true)][string]$LogRoot,
+    [switch]$Force
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Test-TeamBobAbsolutePath {
+    param([string]$Path)
+    return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
+}
+
+function Get-TeamBobCanonicalPath {
+    param([string]$Path)
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+try {
+    foreach ($entry in @(
+        @{ Name = 'MsdevPath'; Value = $MsdevPath }, @{ Name = 'BazaarPath'; Value = $BazaarPath },
+        @{ Name = 'SandboxRoot'; Value = $SandboxRoot }, @{ Name = 'LogRoot'; Value = $LogRoot }
+    )) {
+        if (-not (Test-TeamBobAbsolutePath $entry.Value)) { throw "$($entry.Name) must be an absolute path." }
+    }
+    if (-not (Test-Path -LiteralPath $MsdevPath -PathType Leaf)) { throw "MsdevPath must name an existing file: $MsdevPath" }
+    if (-not (Test-Path -LiteralPath $BazaarPath -PathType Leaf)) { throw "BazaarPath must name an existing file: $BazaarPath" }
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw 'LOCALAPPDATA must be an absolute path.' }
+
+    $profileRoot = Split-Path -Parent $PSScriptRoot
+    $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
+    $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
+    $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
+    foreach ($required in @($manifestPath, $workSchemaPath, $buildSchemaPath)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required profile identity file is missing: $required" }
+    }
+    $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    $workSchema = Get-Content -Raw -LiteralPath $workSchemaPath | ConvertFrom-Json
+    $buildSchema = Get-Content -Raw -LiteralPath $buildSchemaPath | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace($manifest.profile.id) -or [string]::IsNullOrWhiteSpace($manifest.version)) { throw 'Profile manifest identity is incomplete.' }
+    if ([string]::IsNullOrWhiteSpace($workSchema.'$id') -or [string]::IsNullOrWhiteSpace($buildSchema.'$id')) { throw 'Profile schema identity is incomplete.' }
+
+    $registration = [ordered]@{
+        schemaVersion = '1.0'
+        profileId = [string]$manifest.profile.id
+        profileVersion = [string]$manifest.version
+        workPacketSchemaId = [string]$workSchema.'$id'
+        buildTargetSchemaId = [string]$buildSchema.'$id'
+        msdevPath = Get-TeamBobCanonicalPath $MsdevPath
+        msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $MsdevPath).Hash.ToLowerInvariant()
+        bazaarPath = Get-TeamBobCanonicalPath $BazaarPath
+        bazaarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $BazaarPath).Hash.ToLowerInvariant()
+        sandboxRoot = Get-TeamBobCanonicalPath $SandboxRoot
+        logRoot = Get-TeamBobCanonicalPath $LogRoot
+    }
+    $json = ($registration | ConvertTo-Json -Depth 5) + [Environment]::NewLine
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+
+    if (Test-Path -LiteralPath $environmentPath -PathType Container) { throw "Environment registration path is an existing directory: $environmentPath" }
+    if (Test-Path -LiteralPath $environmentPath -PathType Leaf) {
+        $existing = [System.IO.File]::ReadAllText($environmentPath)
+        if ($existing -eq $json) {
+            Write-Output "IDENTICAL $environmentPath"
+            exit 0
+        }
+        if (-not $Force) { throw 'A different local environment registration already exists; use -Force to replace it.' }
+    }
+
+    foreach ($directory in @($registration.sandboxRoot, $registration.logRoot, (Split-Path -Parent $environmentPath))) {
+        if (Test-Path -LiteralPath $directory -PathType Leaf) { throw "Required directory path is an existing file: $directory" }
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    }
+
+    $temporaryPath = Join-Path (Split-Path -Parent $environmentPath) ('.environment.' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $backupPath = Join-Path (Split-Path -Parent $environmentPath) ('.environment.' + [guid]::NewGuid().ToString('N') + '.bak')
+    try {
+        [System.IO.File]::WriteAllText($temporaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $environmentPath -PathType Leaf) {
+            [System.IO.File]::Replace($temporaryPath, $environmentPath, $backupPath)
+        } else {
+            [System.IO.File]::Move($temporaryPath, $environmentPath)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
+        if (Test-Path -LiteralPath $backupPath -PathType Leaf) { Remove-Item -LiteralPath $backupPath -Force }
+    }
+    Write-Output "WROTE $environmentPath"
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}

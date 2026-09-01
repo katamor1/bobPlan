@@ -278,3 +278,5 @@ $statusSection = Get-MarkdownSection $outputRule 'Build Statuses'
 foreach ($status in @('SUCCEEDED', 'CODE_FAILED_RETRYABLE', 'CODE_FAILED_STOP', 'ENVIRONMENT_FAILED', 'TIMED_OUT', 'INTEGRITY_FAILED')) { Assert-True ($statusSection -match "(?m)^\| $status \|") "Output contract includes build status '$status'" }
 
 Write-Host "PASS: $script:Assertions package contract assertions succeeded."
+
+. (Join-Path $PSScriptRoot 'Test-Tools.ps1')
