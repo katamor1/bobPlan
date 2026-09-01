@@ -24,12 +24,92 @@ function Add-TeamBobCheck {
     }
 }
 
+function Test-TeamBobAbsolutePath {
+    param([string]$Path)
+    return -not [string]::IsNullOrWhiteSpace($Path) -and $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
+}
+
+function Get-TeamBobCanonicalDirectory {
+    param([string]$Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
+    return $fullPath.TrimEnd('\', '/')
+}
+
 function Test-TeamBobPathOutside {
     param([string]$Candidate, [string]$Root)
-    $candidateFull = [System.IO.Path]::GetFullPath($Candidate).TrimEnd('\', '/')
-    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    $candidateFull = Get-TeamBobCanonicalDirectory $Candidate
+    $rootFull = Get-TeamBobCanonicalDirectory $Root
     if ($candidateFull.Equals($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    return -not $candidateFull.StartsWith($rootFull + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+    return -not $candidateFull.StartsWith($rootFull.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-TeamBobRelativePath {
+    param([object]$Value, [string]$ExtensionPattern = '')
+    if (-not ($Value -is [string]) -or [string]::IsNullOrWhiteSpace($Value) -or [System.IO.Path]::IsPathRooted($Value)) { return $false }
+    if ($Value -match '(^|[\\/])\.\.?([\\/]|$)') { return $false }
+    if (-not [string]::IsNullOrWhiteSpace($ExtensionPattern) -and $Value -notmatch $ExtensionPattern) { return $false }
+    return $true
+}
+
+function Test-TeamBobInteger {
+    param([object]$Value)
+    return $Value -is [sbyte] -or $Value -is [byte] -or $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Test-TeamBobBuildProfileContract {
+    param([object]$Profile)
+    $errors = @()
+    if (-not ($Profile -is [System.Management.Automation.PSCustomObject])) { return @('profile type') }
+    $required = @('id', 'enabled', 'projectFile', 'target', 'timeoutSeconds', 'expectedArtifacts', 'excludePatterns', 'outputLogPattern', 'successPattern', 'compilerErrorPattern', 'linkerErrorPattern', 'environmentErrorPattern', 'qualification')
+    $actual = @($Profile.PSObject.Properties.Name)
+    $actualFieldsKey = (($actual | Sort-Object) -join ',')
+    $requiredFieldsKey = (($required | Sort-Object) -join ',')
+    if ($actualFieldsKey -ne $requiredFieldsKey) { $errors += 'profile fields' }
+    if (-not ($Profile.id -is [string]) -or [string]::IsNullOrWhiteSpace($Profile.id)) { $errors += 'id' }
+    if (-not ($Profile.enabled -is [bool])) { $errors += 'enabled' }
+    if (-not (Test-TeamBobRelativePath $Profile.projectFile '\.(?:dsw|dsp)$')) { $errors += 'projectFile' }
+    if (-not ($Profile.target -is [string]) -or [string]::IsNullOrWhiteSpace($Profile.target)) { $errors += 'target' }
+    if (-not (Test-TeamBobInteger $Profile.timeoutSeconds) -or [int64]$Profile.timeoutSeconds -lt 1) { $errors += 'timeoutSeconds' }
+    if (-not ($Profile.expectedArtifacts -is [System.Array]) -or @($Profile.expectedArtifacts).Count -lt 1) {
+        $errors += 'expectedArtifacts'
+    } else {
+        foreach ($artifact in @($Profile.expectedArtifacts)) { if (-not (Test-TeamBobRelativePath $artifact)) { $errors += 'expectedArtifact item' } }
+    }
+    if (-not ($Profile.excludePatterns -is [System.Array])) {
+        $errors += 'excludePatterns'
+    } else {
+        foreach ($exclude in @($Profile.excludePatterns)) { if (-not ($exclude -is [string]) -or [string]::IsNullOrWhiteSpace($exclude)) { $errors += 'excludePatterns item' } }
+    }
+    foreach ($field in @('outputLogPattern', 'successPattern', 'compilerErrorPattern', 'linkerErrorPattern', 'environmentErrorPattern')) {
+        $pattern = $Profile.PSObject.Properties[$field].Value
+        if (-not ($pattern -is [string]) -or [string]::IsNullOrWhiteSpace($pattern)) {
+            $errors += $field
+        } else {
+            try { [void][regex]::IsMatch('', $pattern) } catch { $errors += "$field regex" }
+        }
+    }
+    $qualification = $Profile.qualification
+    $qualificationFields = @('msdevHelp', 'makeSucceeded', 'rebuildSucceeded', 'compileFailureObserved', 'linkFailureObserved', 'pcId', 'recordId', 'recordedAt')
+    if (-not ($qualification -is [System.Management.Automation.PSCustomObject])) {
+        $errors += 'qualification type'
+    } else {
+        $actualQualificationKey = ((@($qualification.PSObject.Properties.Name) | Sort-Object) -join ',')
+        $requiredQualificationKey = (($qualificationFields | Sort-Object) -join ',')
+        if ($actualQualificationKey -ne $requiredQualificationKey) { $errors += 'qualification fields' }
+        foreach ($field in @('msdevHelp', 'makeSucceeded', 'rebuildSucceeded', 'compileFailureObserved', 'linkFailureObserved')) {
+            if (-not ($qualification.PSObject.Properties[$field].Value -is [bool])) { $errors += "qualification $field" }
+        }
+        foreach ($field in @('pcId', 'recordId')) {
+            $value = $qualification.PSObject.Properties[$field].Value
+            if (-not ($value -is [string]) -or [string]::IsNullOrWhiteSpace($value)) { $errors += "qualification $field" }
+        }
+        $recordedAt = $qualification.PSObject.Properties['recordedAt'].Value
+        if ((-not ($recordedAt -is [string]) -or [string]::IsNullOrWhiteSpace($recordedAt)) -and -not ($recordedAt -is [datetime])) { $errors += 'qualification recordedAt' }
+    }
+    return @($errors)
 }
 
 if ([string]::IsNullOrWhiteSpace($RepositoryRoot)) { $RepositoryRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot) }
@@ -41,6 +121,12 @@ if (-not $rootValid) {
 }
 $RepositoryRoot = [System.IO.Path]::GetFullPath($RepositoryRoot)
 $teamBobRoot = Join-Path $RepositoryRoot 'team-bob'
+$environmentBoundaryRoot = $RepositoryRoot
+$sourceRepositoryCandidate = Split-Path -Parent $RepositoryRoot
+if ((Split-Path -Leaf $RepositoryRoot) -eq 'profile' -and
+    (Test-Path -LiteralPath (Join-Path $sourceRepositoryCandidate 'scripts/Install-TeamBobProfile.ps1') -PathType Leaf)) {
+    $environmentBoundaryRoot = $sourceRepositoryCandidate
+}
 
 $manifest = $null
 $manifestPath = Join-Path $teamBobRoot 'profile-manifest.json'
@@ -85,14 +171,24 @@ try {
 $buildSchema = $null
 try {
     $buildSchema = Get-Content -Raw -LiteralPath (Join-Path $teamBobRoot 'config/vc6-build-targets.schema.json') | ConvertFrom-Json
-    $buildShape = $buildSchema.type -eq 'object' -and $buildSchema.properties.profiles.type -eq 'array' -and @($buildSchema.properties.profiles.items.required).Count -ge 13
+    $buildShape = $buildSchema.type -eq 'object' -and $buildSchema.properties.profiles.type -eq 'array' -and
+        @($buildSchema.properties.profiles.items.required).Count -eq 13 -and $buildSchema.properties.profiles.items.properties.expectedArtifacts.minItems -eq 1
     Add-TeamBobCheck 'Build-target JSON schema shape' $buildShape 'Profiles array has the fixed qualified target interface'
 } catch { Add-TeamBobCheck 'Build-target JSON schema shape' $false $_.Exception.Message }
 
 $targets = $null
+$catalogProfilesValid = $false
 try {
     $targets = Get-Content -Raw -LiteralPath (Join-Path $teamBobRoot 'config/vc6-build-targets.json') | ConvertFrom-Json
-    Add-TeamBobCheck 'Build-target catalog JSON shape' ($null -ne $targets.PSObject.Properties['profiles'] -and $targets.profiles -is [System.Array]) 'Catalog exposes a profiles array'
+    $catalogShape = $targets -is [System.Management.Automation.PSCustomObject] -and
+        (@($targets.PSObject.Properties.Name) -join ',') -eq 'profiles' -and $targets.profiles -is [System.Array]
+    Add-TeamBobCheck 'Build-target catalog JSON shape' $catalogShape 'Catalog is a closed object exposing a profiles array'
+    if ($catalogShape) {
+        $profileErrors = @()
+        foreach ($profile in @($targets.profiles)) { $profileErrors += @(Test-TeamBobBuildProfileContract $profile) }
+        $catalogProfilesValid = $profileErrors.Count -eq 0
+        Add-TeamBobCheck 'Build-target catalog profile contracts' $catalogProfilesValid (($profileErrors | Select-Object -Unique) -join ', ')
+    }
 } catch { Add-TeamBobCheck 'Build-target catalog JSON shape' $false $_.Exception.Message }
 
 $environment = $null
@@ -106,23 +202,29 @@ if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
         $identityValid = $null -ne $manifest -and $null -ne $workSchema -and $null -ne $buildSchema -and
             $environment.schemaVersion -eq '1.0' -and $environment.profileId -eq $manifest.profile.id -and
             $environment.profileVersion -eq $manifest.version -and $environment.workPacketSchemaId -eq $workSchema.'$id' -and
-            $environment.buildTargetSchemaId -eq $buildSchema.'$id'
+            $environment.buildTargetSchemaId -eq $buildSchema.'$id' -and $environment.pcId -eq [Environment]::MachineName
         Add-TeamBobCheck 'Local environment identity' $identityValid 'Registration matches manifest and schema identities'
 
-        $msdevExists = Test-Path -LiteralPath $environment.msdevPath -PathType Leaf
-        Add-TeamBobCheck 'MSDEV file' $msdevExists ([string]$environment.msdevPath)
+        $msdevAbsolute = Test-TeamBobAbsolutePath $environment.msdevPath
+        $msdevExists = $msdevAbsolute -and (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)
+        Add-TeamBobCheck 'MSDEV file' $msdevExists 'Absolute existing registered tool path'
         $msdevHashValid = $msdevExists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $environment.msdevPath).Hash.ToLowerInvariant() -eq $environment.msdevSha256
         Add-TeamBobCheck 'MSDEV hash' $msdevHashValid 'Registered SHA-256 matches tool bytes'
 
-        $bazaarExists = Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf
-        Add-TeamBobCheck 'Bazaar file' $bazaarExists ([string]$environment.bazaarPath)
+        $bazaarAbsolute = Test-TeamBobAbsolutePath $environment.bazaarPath
+        $bazaarExists = $bazaarAbsolute -and (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)
+        Add-TeamBobCheck 'Bazaar file' $bazaarExists 'Absolute existing registered tool path'
         $bazaarHashValid = $bazaarExists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $environment.bazaarPath).Hash.ToLowerInvariant() -eq $environment.bazaarSha256
         Add-TeamBobCheck 'Bazaar hash' $bazaarHashValid 'Registered SHA-256 matches tool bytes'
 
-        $sandboxExists = Test-Path -LiteralPath $environment.sandboxRoot -PathType Container
-        $logExists = Test-Path -LiteralPath $environment.logRoot -PathType Container
-        Add-TeamBobCheck 'Sandbox root' ($sandboxExists -and (Test-TeamBobPathOutside $environment.sandboxRoot $RepositoryRoot)) 'Exists outside RepositoryRoot'
-        Add-TeamBobCheck 'Log root' ($logExists -and (Test-TeamBobPathOutside $environment.logRoot $RepositoryRoot)) 'Exists outside RepositoryRoot'
+        $sandboxAbsolute = Test-TeamBobAbsolutePath $environment.sandboxRoot
+        $logAbsolute = Test-TeamBobAbsolutePath $environment.logRoot
+        $sandboxExists = $sandboxAbsolute -and (Test-Path -LiteralPath $environment.sandboxRoot -PathType Container)
+        $logExists = $logAbsolute -and (Test-Path -LiteralPath $environment.logRoot -PathType Container)
+        Add-TeamBobCheck 'Sandbox root' ($sandboxExists -and (Test-TeamBobPathOutside $environment.sandboxRoot $environmentBoundaryRoot)) 'Absolute, existing, and outside the repository'
+        Add-TeamBobCheck 'Log root' ($logExists -and (Test-TeamBobPathOutside $environment.logRoot $environmentBoundaryRoot)) 'Absolute, existing, and outside the repository'
+        $rootsSeparate = $sandboxExists -and $logExists -and (Test-TeamBobPathOutside $environment.sandboxRoot $environment.logRoot) -and (Test-TeamBobPathOutside $environment.logRoot $environment.sandboxRoot)
+        Add-TeamBobCheck 'Sandbox and log root separation' $rootsSeparate 'Neither root equals or contains the other'
     } catch { Add-TeamBobCheck 'Local environment JSON' $false $_.Exception.Message }
 }
 
@@ -131,13 +233,17 @@ if (-not [string]::IsNullOrWhiteSpace($BuildProfileId)) {
     Add-TeamBobCheck 'Selected build profile exists' ($selected.Count -eq 1) $BuildProfileId
     if ($selected.Count -eq 1) {
         $profile = $selected[0]
-        Add-TeamBobCheck 'Selected build profile enabled' ($profile.enabled -eq $true) $BuildProfileId
+        $selectedContractValid = @(Test-TeamBobBuildProfileContract $profile).Count -eq 0
+        Add-TeamBobCheck 'Selected build profile contract' $selectedContractValid $BuildProfileId
+        Add-TeamBobCheck 'Selected build profile enabled' ($selectedContractValid -and $profile.enabled -eq $true) $BuildProfileId
         $qualification = $profile.qualification
-        $qualified = $null -ne $qualification -and $qualification.msdevHelp -eq $true -and $qualification.makeSucceeded -eq $true -and
+        $qualified = $selectedContractValid -and $null -ne $qualification -and $qualification.msdevHelp -eq $true -and $qualification.makeSucceeded -eq $true -and
             $qualification.rebuildSucceeded -eq $true -and $qualification.compileFailureObserved -eq $true -and
             $qualification.linkFailureObserved -eq $true -and -not [string]::IsNullOrWhiteSpace($qualification.pcId) -and
             -not [string]::IsNullOrWhiteSpace($qualification.recordId) -and -not [string]::IsNullOrWhiteSpace($qualification.recordedAt)
         Add-TeamBobCheck 'Selected build profile qualified' $qualified $BuildProfileId
+        $qualificationPcMatches = $qualified -and $null -ne $environment -and $qualification.pcId -eq $environment.pcId
+        Add-TeamBobCheck 'Selected build profile PC identity' $qualificationPcMatches 'Qualification pcId matches the registered environment'
     }
 } else {
     Add-TeamBobCheck 'Build profile selection' $true 'No BuildProfileId requested; empty or disabled catalogs are allowed'

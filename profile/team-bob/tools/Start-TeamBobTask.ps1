@@ -41,6 +41,14 @@ function Test-TeamBobAbsolutePath {
     return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
 }
 
+function Get-TeamBobCanonicalDirectory {
+    param([string]$Path)
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
+    return $fullPath.TrimEnd('\', '/')
+}
+
 function Invoke-TeamBobBazaarRead {
     param([string]$Executable, [string]$WorkingDirectory, [string[]]$Arguments)
     Push-Location -LiteralPath $WorkingDirectory
@@ -63,7 +71,8 @@ try {
     if (@($ForbiddenAreas).Count -eq 0 -or @($ForbiddenAreas | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0) { throw 'ForbiddenAreas must contain non-empty values.' }
     if ($MaxRepairCycles -ne 2) { throw 'MaxRepairCycles is fixed to 2.' }
     if (-not (Test-TeamBobAbsolutePath $BazaarRoot) -or -not (Test-Path -LiteralPath $BazaarRoot -PathType Container)) { throw 'BazaarRoot must be an absolute existing directory.' }
-    $bazaarRootFull = [System.IO.Path]::GetFullPath($BazaarRoot).TrimEnd('\', '/')
+    $bazaarRootFull = Get-TeamBobCanonicalDirectory $BazaarRoot
+    if (-not (Test-Path -LiteralPath (Join-Path $bazaarRootFull '.bzr') -PathType Container)) { throw 'BazaarRoot must itself contain a .bzr directory.' }
     $taskDirectory = Join-Path $bazaarRootFull (Join-Path 'team-bob-work' $TaskId)
     if (Test-Path -LiteralPath $taskDirectory) { throw "Task directory already exists: $taskDirectory" }
 
@@ -73,9 +82,11 @@ try {
         if ([string]::IsNullOrWhiteSpace($allowed)) { throw 'AllowedFiles must contain non-empty values.' }
         if ([System.IO.Path]::IsPathRooted($allowed) -or $allowed -match '(^|[\\/])\.\.?([\\/]|$)') { throw "Allowed file must be a relative path within BazaarRoot: $allowed" }
         $candidate = [System.IO.Path]::GetFullPath((Join-Path $bazaarRootFull $allowed))
-        $prefix = $bazaarRootFull + [System.IO.Path]::DirectorySeparatorChar
+        $prefix = $bazaarRootFull
+        if (-not ($prefix.EndsWith('\') -or $prefix.EndsWith('/'))) { $prefix += [System.IO.Path]::DirectorySeparatorChar }
         if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Allowed file resolves outside BazaarRoot: $allowed" }
         if (-not ($supportedExtensions -contains [System.IO.Path]::GetExtension($candidate).ToLowerInvariant())) { throw "Allowed file extension is unsupported: $allowed" }
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw "Allowed file does not exist as a file: $allowed" }
         $normalizedAllowed += ($candidate.Substring($prefix.Length).Replace('\', '/'))
     }
     if ($normalizedAllowed.Count -eq 0) { throw 'AllowedFiles must contain at least one supported file.' }
@@ -123,8 +134,11 @@ try {
     $pattern = '(?s)(<!-- canonical-work-packet-json:start -->\s*```json\s*)\{.*?\}(\s*```\s*<!-- canonical-work-packet-json:end -->)'
     if (-not [regex]::IsMatch($template, $pattern)) { throw 'Work-packet template canonical JSON block is malformed.' }
     $packetJson = $packet | ConvertTo-Json -Depth 10
-    $replacement = '${1}' + $packetJson + '${2}'
-    $document = [regex]::Replace($template, $pattern, $replacement, 1)
+    $replacementEvaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($match)
+        return $match.Groups[1].Value + $packetJson + $match.Groups[2].Value
+    }
+    $document = [regex]::Replace($template, $pattern, $replacementEvaluator, 1)
 
     $draftsDirectory = Join-Path $taskDirectory 'drafts'
     $resultsDirectory = Join-Path $taskDirectory 'results'

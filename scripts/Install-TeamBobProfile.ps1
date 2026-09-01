@@ -20,6 +20,11 @@ try {
 
     $sourcePath = [System.IO.Path]::GetFullPath($sourcePath)
     $targetFullPath = [System.IO.Path]::GetFullPath($TargetPath)
+    $sourcePrefix = $sourcePath.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+    if ($targetFullPath.Equals($sourcePath, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $targetFullPath.StartsWith($sourcePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'TargetPath must not be the profile source directory or a directory beneath it.'
+    }
     if (Test-Path -LiteralPath $targetFullPath -PathType Leaf) { throw "TargetPath is an existing file: $targetFullPath" }
 
     $directories = @(Get-ChildItem -LiteralPath $sourcePath -Directory -Force -Recurse | Sort-Object FullName)

@@ -108,3 +108,122 @@ Default-location validator smoke check, with an isolated nonexistent LOCALAPPDAT
 - The environment JSON shape is now the Task 3 contract and must be consumed without renaming its flat fields.
 - Actual VC6/Bazaar qualification remains intentionally out of scope; the shipped build-target catalog remains empty, and tests use fake executables only.
 - Atomic replacement uses the Windows/.NET same-volume `File.Replace` behavior with a short-lived backup that is removed immediately after successful replacement.
+
+## Fix round 1/5
+
+### Findings addressed
+
+All reviewer and controller findings in round 1 were addressed:
+
+1. Local initialization now derives the whole source repository boundary for `profile/team-bob/tools`, uses the installed target root for `team-bob/tools`, and rejects sandbox/log roots equal to or below that boundary.
+2. Identical registration validation now checks root/file collisions and creates missing sandbox/log directories before returning `IDENTICAL`.
+3. Task bootstrap now requires `<BazaarRoot>/.bzr` without adding a Bazaar command.
+4. Every catalog profile, selected or not, is validated for exact fields, types, safe project/artifact paths, positive timeout, arrays, compilable regexes, and complete qualification shape.
+5. Strict validation now requires absolute existing tool paths and absolute external sandbox/log roots before checking hashes/containment.
+6. Directory canonicalization preserves volume roots such as `C:\`; the Allowed Files containment prefix does not append a second separator to a volume root.
+7. Work-packet insertion uses a `MatchEvaluator`, so `$1`, `${2}`, `$&`, and related replacement metacharacters remain ordinary JSON data.
+8. Every Allowed File must exist as a leaf beneath the Bazaar root.
+9. The installer rejects its profile source directory and descendants before enumeration/preflight while still accepting an unrelated `profile` directory in an ordinary external target.
+10. The flat environment contract now includes `pcId = [Environment]::MachineName`; Strict validation checks the registration machine and requires the selected qualification `pcId` to match it.
+
+The build-target schema now declares `expectedArtifacts.minItems = 1`; the shipped catalog remains empty and the example remains disabled.
+
+### Covering test names
+
+- `Installer rejects its own profile source directory as TargetPath`
+- `Rejected source-directory install leaves every source file unchanged`
+- `Installer rejects a TargetPath beneath its profile source directory`
+- `Rejected source-descendant install creates no directory`
+- `Rejected source-descendant install leaves the source tree unchanged`
+- `Installer accepts an ordinary target containing an unrelated profile directory`
+- `Environment registration records stable machine identity`
+- `Identical environment rerun recreates a deleted sandbox root`
+- `Identical environment rerun restores the sandbox directory`
+- `Identical environment rerun rejects a log root replaced by a file`
+- `Environment initializer rejects roots inside the whole source repository`
+- `Environment initializer rejects sandbox and log roots nested beneath each other`
+- `Strict validator rejects relative tool paths even when they resolve and hash-match`
+- `Strict validator rejects relative sandbox and log root registrations`
+- `Strict validator rejects an environment registered for another machine`
+- `Build-target schema requires at least one expected artifact`
+- `Validator rejects malformed unselected catalog profiles`
+- `Validator rejects a selected qualification recorded for another PC`
+- `Validator accepts one complete enabled qualification for the registered PC`
+- `Start task safely inserts regex-replacement metacharacters from metadata`
+- `Metacharacter-bearing metadata round-trips exactly in canonical JSON`
+- `Start task rejects an Allowed File that does not exist as a leaf`
+- `Missing Allowed File rejection creates no task directory`
+- `Start task requires the supplied BazaarRoot itself to contain the .bzr root marker`
+- `Nested non-root rejection creates no task directory`
+
+All tests run the real PowerShell entrypoints against GUID-named temp roots and runtime fake tool files. No real Bazaar/MSDEV process or real LOCALAPPDATA registration was used.
+
+### TDD RED
+
+Command:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+```
+
+Exit code: `1`.
+
+Output:
+
+```text
+PASS: 298 package contract assertions succeeded.
+ASSERTION FAILED: Installer rejects its own profile source directory as TargetPath
+```
+
+The failure was the expected first newly exposed behavior: the pre-fix installer accepted its own profile source as a target. The test also fingerprints every source file to prove rejected attempts are non-mutating.
+
+### GREEN and compatibility iteration
+
+Windows PowerShell 5.1 after the fixes:
+
+```text
+PASS: 298 package contract assertions succeeded.
+PASS: 391 total package and tool assertions succeeded.
+```
+
+PowerShell 7 initially exposed that its `ConvertFrom-Json` projects an ISO `recordedAt` JSON string to `[datetime]`, while Windows PowerShell 5.1 retains `[string]`. Validation now accepts only a nonempty string or that engine-produced datetime representation for `recordedAt`; the subsequent `pwsh` run produced:
+
+```text
+PASS: 298 package contract assertions succeeded.
+PASS: 391 total package and tool assertions succeeded.
+```
+
+Fresh final command/output evidence is recorded below after the final pre-commit rerun.
+
+### Fix-round self-review
+
+- Re-read every round-1 finding against the staged behavior, not only test output.
+- Confirmed the initializer source-layout boundary resolves to the parent of `profile`, while an installed layout resolves to the target root.
+- Confirmed missing roots are recreated only after registration conflict handling and file collisions fail before an identical success response.
+- Confirmed all catalog entries are checked even without `-BuildProfileId`; selected profiles additionally require unique selection, enabled state, all qualification booleans true, and matching PC identity.
+- Confirmed exact/no-extra fields are enforced at catalog root, profile, and qualification levels.
+- Confirmed project/artifact paths are relative and traversal-free, timeout is a positive integer, expected artifacts are nonempty, and all five regex fields compile.
+- Confirmed Start Task still contains only `status --short`, `nick`, and `version-info --custom --template={revision_id}` Bazaar invocations.
+- Confirmed the generated packet round-trips replacement metacharacters exactly and missing files/nested Bazaar directories produce no task directory.
+- Confirmed `git diff --check` reports no whitespace error.
+
+### Fix-round concerns
+
+- Task 3 must consume the new required flat `pcId` environment field and compare it to selected qualification metadata.
+- PowerShell 7's ISO-date projection is explicitly normalized at validation time; the on-disk JSON contract remains a string as defined by the schema.
+
+### Final pre-commit verification
+
+Commands:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+pwsh.exe -NoLogo -NoProfile -NonInteractive -File .\tests\Test-Package.ps1
+```
+
+Both commands exited `0` with:
+
+```text
+PASS: 298 package contract assertions succeeded.
+PASS: 391 total package and tool assertions succeeded.
+```

@@ -28,6 +28,20 @@ function Get-CanonicalPacketFixture {
     return ($match.Groups['json'].Value | ConvertFrom-Json)
 }
 
+function Get-TreeFingerprintFixture {
+    param([string]$Root)
+    $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+    return ((Get-ChildItem -LiteralPath $rootFull -File -Force -Recurse | Sort-Object FullName | ForEach-Object {
+        $relative = $_.FullName.Substring($rootFull.Length).TrimStart('\', '/')
+        $relative + ':' + (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash
+    }) -join "`n")
+}
+
+function Write-JsonFixture {
+    param([string]$Path, [object]$Value)
+    Write-Utf8NoBomFixture $Path (($Value | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+}
+
 $toolsRepoRoot = Split-Path -Parent $PSScriptRoot
 $installerPath = Join-Path $toolsRepoRoot 'scripts/Install-TeamBobProfile.ps1'
 $toolsProfileRoot = Join-Path $toolsRepoRoot 'profile'
@@ -53,6 +67,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $installTarget)) 'Installer WhatIf creates no target directory'
 
     New-Item -ItemType Directory -Path $installTarget | Out-Null
+    Write-Utf8NoBomFixture (Join-Path $installTarget 'profile/unrelated.txt') 'unrelated-profile-directory'
     $targetBzr = Join-Path $installTarget '.bzr'
     New-Item -ItemType Directory -Path $targetBzr | Out-Null
     $targetBzrMarker = Join-Path $targetBzr 'branch.conf'
@@ -67,6 +82,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installTarget '.bobignore'))) 'Installer does not merge or create .bobignore'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $installTarget '.bzrignore'))) 'Installer does not merge or create .bzrignore'
     Assert-Equal ([System.IO.File]::ReadAllText($targetBzrMarker)) 'fixture-bzr-metadata' 'Installer leaves target .bzr metadata unchanged'
+    Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $installTarget 'profile/unrelated.txt'))) 'unrelated-profile-directory' 'Installer accepts an ordinary target containing an unrelated profile directory'
 
     $rerunResult = Invoke-TestScript $installerPath @('-TargetPath', $installTarget)
     Assert-Equal $rerunResult.ExitCode 0 'Installer identical rerun is idempotent'
@@ -83,6 +99,20 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $missingBeforeConflict)) 'Installer conflict stops all writes, including otherwise missing files'
     Assert-Equal ([System.IO.File]::ReadAllText($targetBzrMarker)) 'fixture-bzr-metadata' 'Installer conflict leaves target .bzr metadata unchanged'
     Assert-Equal (Test-Path -LiteralPath (Join-Path $toolsProfileRoot '.bzr')) $sourceBzrExisted 'Installer leaves source .bzr state unchanged'
+
+    $sourceFingerprint = Get-TreeFingerprintFixture $toolsProfileRoot
+    $selfInstallResult = Invoke-TestScript $installerPath @('-TargetPath', $toolsProfileRoot, '-WhatIf')
+    Assert-True ($selfInstallResult.ExitCode -ne 0) 'Installer rejects its own profile source directory as TargetPath'
+    Assert-Equal (Get-TreeFingerprintFixture $toolsProfileRoot) $sourceFingerprint 'Rejected source-directory install leaves every source file unchanged'
+    $sourceDescendant = Join-Path $toolsProfileRoot 'team-bob/self-install'
+    $descendantInstallResult = Invoke-TestScript $installerPath @('-TargetPath', $sourceDescendant, '-WhatIf')
+    Assert-True ($descendantInstallResult.ExitCode -ne 0) 'Installer rejects a TargetPath beneath its profile source directory'
+    Assert-True (-not (Test-Path -LiteralPath $sourceDescendant)) 'Rejected source-descendant install creates no directory'
+    Assert-Equal (Get-TreeFingerprintFixture $toolsProfileRoot) $sourceFingerprint 'Rejected source-descendant install leaves the source tree unchanged'
+
+    $catalogProfileRoot = Join-Path $fixtureRoot 'catalog-profile'
+    $catalogInstallResult = Invoke-TestScript $installerPath @('-TargetPath', $catalogProfileRoot)
+    Assert-Equal $catalogInstallResult.ExitCode 0 'Installer still accepts a normal external profile target'
 
     # Fixed local environment: isolated LOCALAPPDATA, real file hashing, force-only replacement.
     $fakeBin = Join-Path $fixtureRoot 'fake-bin'
@@ -119,6 +149,7 @@ exit /b 41
     Assert-Equal $environment.schemaVersion '1.0' 'Environment registration has a stable schema version'
     Assert-Equal $environment.profileId 'team-bob-vc6-bazaar' 'Environment registration records profile identity'
     Assert-Equal $environment.profileVersion '0.1.0-poc' 'Environment registration records profile version'
+    Assert-Equal $environment.pcId ([Environment]::MachineName) 'Environment registration records stable machine identity'
     Assert-Equal $environment.msdevSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $msdevPath).Hash.ToLowerInvariant() 'Environment registration hashes MSDEV'
     Assert-Equal $environment.bazaarSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $bazaarPath).Hash.ToLowerInvariant() 'Environment registration hashes Bazaar'
     Assert-True (Test-Path -LiteralPath $environment.sandboxRoot -PathType Container) 'Environment initializer creates sandbox root'
@@ -128,6 +159,26 @@ exit /b 41
     $identicalEnvironmentResult = Invoke-TestScript $initializePath $initializeArguments
     Assert-Equal $identicalEnvironmentResult.ExitCode 0 'Environment initializer identical rerun is harmless'
     Assert-Equal ([System.IO.File]::ReadAllText($environmentPath)) $environmentText 'Environment initializer preserves identical configuration bytes'
+
+    Remove-Item -LiteralPath $sandboxRoot -Recurse
+    $recreateRootResult = Invoke-TestScript $initializePath $initializeArguments
+    Assert-Equal $recreateRootResult.ExitCode 0 'Identical environment rerun recreates a deleted sandbox root'
+    Assert-True (Test-Path -LiteralPath $sandboxRoot -PathType Container) 'Identical environment rerun restores the sandbox directory'
+    Remove-Item -LiteralPath $logRoot -Recurse
+    Write-Utf8NoBomFixture $logRoot 'not-a-directory'
+    $rootBecameFileResult = Invoke-TestScript $initializePath $initializeArguments
+    Assert-True ($rootBecameFileResult.ExitCode -ne 0) 'Identical environment rerun rejects a log root replaced by a file'
+    Remove-Item -LiteralPath $logRoot
+    New-Item -ItemType Directory -Path $logRoot | Out-Null
+
+    $insideRepositoryResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', (Join-Path $toolsRepoRoot 'tests'), '-LogRoot', $logRoot, '-Force'
+    )
+    Assert-True ($insideRepositoryResult.ExitCode -ne 0) 'Environment initializer rejects roots inside the whole source repository'
+    $nestedRootsResult = Invoke-TestScript $initializePath @(
+        '-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', (Join-Path $sandboxRoot 'nested-logs'), '-Force'
+    )
+    Assert-True ($nestedRootsResult.ExitCode -ne 0) 'Environment initializer rejects sandbox and log roots nested beneath each other'
 
     Write-Utf8NoBomFixture $environmentPath '{"different":true}'
     $noForceResult = Invoke-TestScript $initializePath $initializeArguments
@@ -143,6 +194,31 @@ exit /b 41
     Assert-Equal $strictResult.ExitCode 0 'Strict profile validation succeeds with registered tools and external roots'
     Assert-True ($strictResult.Output -match 'SUMMARY.*Failed=0') 'Strict validator emits a zero-failure summary'
 
+    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment.msdevPath = 'scripts/Install-TeamBobProfile.ps1'
+    $environment.msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $toolsRepoRoot 'scripts/Install-TeamBobProfile.ps1')).Hash.ToLowerInvariant()
+    Write-JsonFixture $environmentPath $environment
+    $relativeToolResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($relativeToolResult.ExitCode -ne 0) 'Strict validator rejects relative tool paths even when they resolve and hash-match'
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-tool validation test'
+
+    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment.sandboxRoot = 'tests'
+    Write-JsonFixture $environmentPath $environment
+    $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($relativeRootResult.ExitCode -ne 0) 'Strict validator rejects relative sandbox and log root registrations'
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-root validation test'
+
+    $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+    $environment.pcId = 'different-machine'
+    Write-JsonFixture $environmentPath $environment
+    $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    Assert-True ($machineIdentityResult.ExitCode -ne 0) 'Strict validator rejects an environment registered for another machine'
+    $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
+    Assert-Equal $forceResult.ExitCode 0 'Environment is restored after machine-identity validation test'
+
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-tampered'
     $hashFailure = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
     Assert-True ($hashFailure.ExitCode -ne 0) 'Strict validator rejects a mismatched tool hash'
@@ -153,6 +229,37 @@ exit /b 41
 
     $missingProfileResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-BuildProfileId', 'missing-profile', '-Strict')
     Assert-True ($missingProfileResult.ExitCode -ne 0) 'Validator rejects a requested build profile absent from the empty catalog'
+
+    $targetSchemaFixture = Get-Content -Raw -LiteralPath (Join-Path $toolsProfileRoot 'team-bob/config/vc6-build-targets.schema.json') | ConvertFrom-Json
+    Assert-Equal $targetSchemaFixture.properties.profiles.items.properties.expectedArtifacts.minItems 1 'Build-target schema requires at least one expected artifact'
+    $catalogPath = Join-Path $catalogProfileRoot 'team-bob/config/vc6-build-targets.json'
+    $malformedCatalog = [pscustomobject]@{ profiles = @([pscustomobject]@{
+        id = 'malformed'; enabled = $true
+        qualification = [pscustomobject]@{
+            msdevHelp = $true; makeSucceeded = $true; rebuildSucceeded = $true; compileFailureObserved = $true; linkFailureObserved = $true
+            pcId = [Environment]::MachineName; recordId = 'fixture-record'; recordedAt = '2026-09-02T00:00:00Z'
+        }
+    }) }
+    Write-JsonFixture $catalogPath $malformedCatalog
+    $malformedCatalogResult = Invoke-TestScript (Join-Path $catalogProfileRoot 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
+    Assert-True ($malformedCatalogResult.ExitCode -ne 0) 'Validator rejects malformed unselected catalog profiles'
+
+    $qualifiedProfile = [pscustomobject]@{
+        id = 'qualified-fixture'; enabled = $true; projectFile = 'project/fixture.dsp'; target = 'Win32 Release'; timeoutSeconds = 30
+        expectedArtifacts = @('bin/fixture.exe'); excludePatterns = @('*.obj'); outputLogPattern = 'build\\.log$'; successPattern = '0 error';
+        compilerErrorPattern = 'error C[0-9]+'; linkerErrorPattern = 'LNK[0-9]+'; environmentErrorPattern = 'MSDEV.*not found'
+        qualification = [pscustomobject]@{
+            msdevHelp = $true; makeSucceeded = $true; rebuildSucceeded = $true; compileFailureObserved = $true; linkFailureObserved = $true
+            pcId = 'different-machine'; recordId = 'fixture-record'; recordedAt = '2026-09-02T00:00:00Z'
+        }
+    }
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($qualifiedProfile) })
+    $wrongPcProfileResult = Invoke-TestScript (Join-Path $catalogProfileRoot 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $catalogProfileRoot, '-BuildProfileId', 'qualified-fixture', '-Strict')
+    Assert-True ($wrongPcProfileResult.ExitCode -ne 0) 'Validator rejects a selected qualification recorded for another PC'
+    $qualifiedProfile.qualification.pcId = [Environment]::MachineName
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($qualifiedProfile) })
+    $qualifiedProfileResult = Invoke-TestScript (Join-Path $catalogProfileRoot 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $catalogProfileRoot, '-BuildProfileId', 'qualified-fixture', '-Strict')
+    Assert-Equal $qualifiedProfileResult.ExitCode 0 'Validator accepts one complete enabled qualification for the registered PC'
 
     # Start task: fake Bazaar observes only the allowed read-only command set.
     $bazaarRoot = Join-Path $fixtureRoot 'working-tree'
@@ -189,6 +296,35 @@ exit /b 41
     Assert-Equal $bazaarCommands[0] 'status --short' 'Start task first checks short status'
     Assert-Equal $bazaarCommands[1] 'nick' 'Start task reads branch nick'
     Assert-Equal $bazaarCommands[2] 'version-info --custom --template={revision_id}' 'Start task reads the full revision id'
+
+    $metacharArguments = @($greenArguments)
+    $metacharArguments[1] = 'GREEN-METACHAR'
+    $customerIndex = [array]::IndexOf($metacharArguments, '-Customer')
+    $metacharCustomer = 'Customer $1 ${2} $&'
+    $metacharArguments[$customerIndex + 1] = $metacharCustomer
+    $metacharResult = Invoke-TestScript $startTaskPath $metacharArguments
+    Assert-Equal $metacharResult.ExitCode 0 'Start task safely inserts regex-replacement metacharacters from metadata'
+    $metacharPacket = Get-CanonicalPacketFixture (Join-Path $bazaarRoot 'team-bob-work/GREEN-METACHAR/work-packet.md')
+    Assert-Equal $metacharPacket.Customer $metacharCustomer 'Metacharacter-bearing metadata round-trips exactly in canonical JSON'
+
+    $missingFileArguments = @($greenArguments)
+    $missingFileArguments[1] = 'GREEN-MISSING-FILE'
+    $allowedIndex = [array]::IndexOf($missingFileArguments, '-AllowedFiles')
+    $missingFileArguments[$allowedIndex + 1] = 'src/missing.cpp'
+    $missingFileResult = Invoke-TestScript $startTaskPath $missingFileArguments
+    Assert-True ($missingFileResult.ExitCode -ne 0) 'Start task rejects an Allowed File that does not exist as a leaf'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-MISSING-FILE'))) 'Missing Allowed File rejection creates no task directory'
+
+    $nestedBazaarRoot = Join-Path $bazaarRoot 'nested-directory'
+    Write-Utf8NoBomFixture (Join-Path $nestedBazaarRoot 'src/nested.cpp') "int nested = 1;`r`n"
+    $nestedRootArguments = @($greenArguments)
+    $nestedRootArguments[1] = 'GREEN-NESTED-ROOT'
+    $bazaarRootIndex = [array]::IndexOf($nestedRootArguments, '-BazaarRoot')
+    $nestedRootArguments[$bazaarRootIndex + 1] = $nestedBazaarRoot
+    $nestedRootArguments[$allowedIndex + 1] = 'src/nested.cpp'
+    $nestedRootResult = Invoke-TestScript $startTaskPath $nestedRootArguments
+    Assert-True ($nestedRootResult.ExitCode -ne 0) 'Start task requires the supplied BazaarRoot itself to contain the .bzr root marker'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $nestedBazaarRoot 'team-bob-work/GREEN-NESTED-ROOT'))) 'Nested non-root rejection creates no task directory'
 
     $duplicateResult = Invoke-TestScript $startTaskPath $greenArguments
     Assert-True ($duplicateResult.ExitCode -ne 0) 'Start task refuses a duplicate task directory'
