@@ -72,3 +72,58 @@ After commit `0d97931`, reviewed the committed diff with `git show --check --sta
 ## Concerns
 
 None. The shipped VC6 target collection is intentionally empty and its sole example target is explicitly disabled, so a human must add and approve a local build profile before Green execution can occur.
+
+---
+
+## Fix Round 1
+
+### Changed Files
+
+- Replaced `profile/.bob/custom_modes.yaml` with the documented mode shape (`slug`, `name`, `description`, `roleDefinition`, `whenToUse`, `customInstructions`, and nested edit groups). Normal modes now accept only task-draft Markdown/CSV artifacts; Green accepts the approved legacy C/C++ extensions anywhere and safe task-result artifacts. Rules and commands retain the dynamic Work Packet Allowed Files gate.
+- Moved all rules to `profile/.bob/rules/` and `profile/.bob/rules-green-implement/`; updated manifest contract paths to resolve from `team-bob` with `../.bob/...`.
+- Replaced comment-only command contracts with slash-command frontmatter and structured Input, Preconditions, Context, Output, Stop Conditions, and Green Workflow sections.
+- Replaced the work-packet Markdown table contract with a clearly delimited canonical JSON object. The schema now represents Green-only Open QA, impact-clear, and clean-working-copy gates while allowing Amber/Red Open QA.
+- Replaced the build target command interface with the approved no-command-injection profile fields and a disabled relative-path example plus qualification record.
+- Reworked `tests/Test-Package.ps1` to parse the documented constrained YAML subset, actual command frontmatter/sections, the canonical packet JSON, schema gates, manifest-relative paths, and the build-profile interface. It no longer trusts `bob-contract` comment metadata.
+
+### TDD RED
+
+Command:
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\tests\Test-Package.ps1'
+```
+
+Output:
+
+```text
+ASSERTION FAILED: Required profile file exists: .bob/rules/00-governance.md
+```
+
+Expected reason: the new consuming test required the approved `.bob/rules` location before the rule migration had been implemented.
+
+### Tests
+
+Commands:
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\tests\Test-Package.ps1'
+& pwsh -NoProfile -File '.\tests\Test-Package.ps1'
+```
+
+Output:
+
+```text
+PASS: 331 package contract assertions succeeded.
+PASS: 331 package contract assertions succeeded.
+```
+
+### Commit and Self-Review
+
+Commit: `8415ff9 fix: harden Team Bob profile contracts`
+
+Reviewed the committed diff with `git show --check --stat --oneline HEAD`. No whitespace errors were reported. Manual review confirmed: Green supports both allowed source/header files and safe result artifacts; manifest paths resolve from the manifest directory; canonical packet JSON is schema-validated with an Amber example and Green mutations; commands use real frontmatter/sections; rules occupy `.bob`; and the build profile no longer contains command strings or absolute workspaces.
+
+### Concerns
+
+None. The runtime’s custom-mode file regex cannot express a dynamic Work Packet Allowed Files array, so that boundary is explicitly enforced again by the Green rule and command, as required.
