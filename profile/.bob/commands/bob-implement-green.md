@@ -12,6 +12,7 @@ argument-hint: <work-packet-path>
 
 - Parse the canonical JSON object in `$1` and validate it with `team-bob/config/work-packet.schema.json`.
 - Require Green risk, empty Open QA, YES impact-clear fields, YES Clean Working Copy, both approvers, and both explicit YES approvals.
+- Select this shipped custom mode only after a human has qualified and enabled the requested PC-matched build profile. The mode is present; the shipped build catalog is empty and disabled.
 
 ## Context
 
@@ -24,13 +25,24 @@ argument-hint: <work-packet-path>
 
 ## Green Workflow
 
-1. Edit only the approved legacy source/header files and preserve CP932, no BOM, and CRLF.
-2. Run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 0`. On `SUCCEEDED`, retain evidence and proceed to final Rebuild. On `CODE_FAILED_RETRYABLE`, inspect only generated evidence; `CODE_FAILED_STOP`, `ENVIRONMENT_FAILED`, `TIMED_OUT`, or `INTEGRITY_FAILED` stops the task.
-3. At most two evidence-based repairs are allowed. If and only if attempt 0 is `CODE_FAILED_RETRYABLE`, make one evidence-based repair, then run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 1`. Apply the same status handling. This is repair cycle 1.
-4. If and only if attempt 1 is `CODE_FAILED_RETRYABLE`, make the second and final evidence-based repair, then run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 2`. `CODE_FAILED_RETRYABLE` is now `CODE_FAILED_STOP`; every other non-success status also stops. This is repair cycle 2: no further edits or Make attempts.
-5. Final Rebuild: after a successful Make (attempt 0, 1, or 2), run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Rebuild -Attempt 2`. Require `SUCCEEDED`; `CODE_FAILED_RETRYABLE`, `CODE_FAILED_STOP`, `ENVIRONMENT_FAILED`, `TIMED_OUT`, and `INTEGRITY_FAILED` all stop the task.
+1. Edit only the approved legacy source/header files and preserve CP932, no BOM, and CRLF. Set the shared repair-budget counter `N = 0`.
+2. Run Make `N` with this installed-tool invocation:
 
-Emit `READY_FOR_HUMAN_REVIEW` only after success and integrity verification. Never run Bazaar mutation commands, commit, merge, tag, attach a debugger, or access actual machines, control networks, mainline, or secrets.
+   ```powershell
+   powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$1" -Action Make -Attempt N
+   ```
+
+   On `SUCCEEDED`, immediately run Rebuild with the same `N`:
+
+   ```powershell
+   powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$1" -Action Rebuild -Attempt N
+   ```
+
+3. Make and Rebuild use one shared repair budget. If either action returns `CODE_FAILED_RETRYABLE` and `N < 2`, inspect its generated evidence, make exactly one evidence-based repair within Allowed Files, increment N, and return to Make N. Do not retry Rebuild directly.
+4. If either action returns `CODE_FAILED_RETRYABLE` when `N = 2`, handle it as `CODE_FAILED_STOP` and stop. `CODE_FAILED_STOP`, `ENVIRONMENT_FAILED`, `TIMED_OUT`, and `INTEGRITY_FAILED` always stop immediately and preserve evidence.
+5. Only a successful final Rebuild plus its integrity verification permits `READY_FOR_HUMAN_REVIEW`. A successful Make alone is not final success.
+
+Never run Bazaar mutation commands, commit, merge, tag, attach a debugger, or access actual machines, control networks, mainline, or secrets.
 
 ## Stop Conditions
 

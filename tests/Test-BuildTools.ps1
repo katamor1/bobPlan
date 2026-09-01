@@ -10,7 +10,7 @@ if ($null -eq (Get-Command Assert-True -ErrorAction SilentlyContinue)) {
         $powerShell = (Get-Process -Id $PID).Path
         $savedPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        try { $output = & $powerShell -NoLogo -NoProfile -NonInteractive -File $Path @Arguments 2>&1 | Out-String } finally { $ErrorActionPreference = $savedPreference }
+        try { $output = & $powerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @Arguments 2>&1 | Out-String } finally { $ErrorActionPreference = $savedPreference }
         return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $output }
     }
     function Write-Utf8NoBomFixture {
@@ -191,7 +191,7 @@ function Invoke-Task3BuildFixture {
         throw "ASSERTION FAILED: Build $Action attempt $Attempt persists exactly one new JSON result (expected '1', got '$($created.Count)'). Invocation output: $($invocation.Output.Trim())"
     }
     $script:Assertions++
-    $json = Get-Content -Raw -LiteralPath $created[0].FullName | ConvertFrom-Json
+    $json = Get-Content -Raw -Encoding UTF8 -LiteralPath $created[0].FullName | ConvertFrom-Json
     return [pscustomobject]@{ ExitCode = $invocation.ExitCode; Output = $invocation.Output; Json = $json; ResultPath = $created[0].FullName }
 }
 
@@ -214,6 +214,11 @@ $task3EnvironmentNames = @(
     'BOB3_BZR_FAIL_CODE', 'BOB3_BZR_FAIL_OCCURRENCE', 'BOB3_BZR_MUTATE_COMMAND', 'BOB3_BZR_MUTATE_OCCURRENCE', 'BOB3_BZR_MUTATE_PATH'
 )
 foreach ($name in $task3EnvironmentNames) { $task3SavedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
+$task3Bob3EnvironmentNames = @($task3EnvironmentNames | Where-Object { $_ -like 'BOB3_*' })
+foreach ($name in $task3Bob3EnvironmentNames) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+foreach ($name in $task3Bob3EnvironmentNames) {
+    Assert-True ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable($name, 'Process'))) "Task 3 fixture neutralizes inherited hostile control '$name' before fixture setup"
+}
 
 try {
     New-Item -ItemType Directory -Path $task3FixtureRoot | Out-Null

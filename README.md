@@ -1,40 +1,108 @@
 # Team Bob VC6/Bazaar Profile v0.1.0-poc
 
-これは IBM Bob IDE 2.1.x 上で、Windows、Visual C++ 6.0、Bazaar 2.5.1 を対象にした、限定運用のチーム・プロファイルです。対象外は Bob Shell 1.0.1、実機・制御ネットワーク・mainline・秘密情報への接続、および Bob による commit/merge/tag です。実機 VC6 の認定はまだ完了していないため、同梱のビルド・カタログは無効です。認定証跡が揃うまで Green は有効化しません。
+これは Windows 上の IBM Bob IDE 2.1.x、Visual C++ 6.0、Bazaar 2.5.1 向けの限定 PoC profile です。Bob Shell 1.0.1 は対象外です。Bob は commit、merge、tag を行わず、実機、制御ネットワーク、mainline、secrets には決して接続しません。
 
-完全なオペレーター手順、例外、判定表は [USAGE.md](profile/team-bob/USAGE.md) を正とします。この README は導入前にチーム全員が共有する安全境界と導線です。
+実 VC6 の qualification は未完了です。そのため同梱の **build catalog** (`vc6-build-targets.json`) は空で disabled です。Green custom mode 自体は技術的には同梱・存在しますが、PC ID が一致する profile を人が qualification して enabled にするまで、選択も auto-approve もしてはいけません。これは mode を無効にした、という意味ではありません。
 
-## 目的と作業原則
+完全な運用手順は [USAGE.md](profile/team-bob/USAGE.md) を正とします。この README は導入、境界、実行可能な入口を示します。
 
-約 8,000 ファイル、約 100 MB を毎タスクで読み込むと Bobcoin とコンテキストを浪費し、根拠のない変更を誘発します。必ず `team-bob-work/<Task ID>/work-packet.md` を入口にし、Bazaar の status/diff/revision 証跡、対象を絞った検索、短く新しいフェーズ専用 Bob タスクだけを使います。要求外の全リポジトリ取り込みはしません。
+## 作業の考え方
 
-Word/Excel の基準資料は不変です。人が安定した ReqID と原典アンカーをもつ要求台帳を承認し、外部仕様レビュー、影響分析、Green の編集/ビルド、独立した人間レビュー、別の新しいテスト仕様タスク、専用 PC/ボードでの手動試験の順に進めます。実機試験中も attach、breakpoint、step 実行はしません。
+約 8,000 ファイル／約 100 MB を毎 task に読ませると Bobcoin と context を浪費し、根拠のない変更を誘発します。必ず `team-bob-work/<Task ID>/work-packet.md`、Bazaar の read-only evidence、対象を絞った検索、短く新しい phase 専用 Bob task を使います。計画のない全 repository 取り込みは行いません。
 
-## 導入手順
+Word/Excel baseline は不変です。人が stable ReqID と source anchor を含む requirement ledger を承認し、external-spec review、impact analysis、Green edit/build、独立した human review、新しい test-spec task、専用 PC/board の手動試験へ進めます。実機試験でも attach、breakpoint、step 実行は行いません。
 
-1. 配布元で試行表示を行います。`powershell.exe -File .\scripts\Install-TeamBobProfile.ps1 -TargetPath <Bob プロファイル配置先> -WhatIf`
-2. 内容と衝突を人が確認してから、同じコマンドから `-WhatIf` を外してインストールします。インストーラーは衝突を上書きせず、Bazaar 操作もしません。
-3. `.bobignore.base` と `.bzrignore.snippet` は自動で結合しません。人がレビューして既存の ignore 設定に統合します。前者は `.bzr`、秘密情報、資格情報、限定された生成物を隠しますが、Word/Excel と work packet/drafts/results は Bob に見せます。後者は `team-bob-work/` 全体を Bazaar の未追跡変更から除外します。
-4. 対象 PC だけで `Initialize-LocalEnvironment.ps1` を実行し、`Test-TeamBobProfile.ps1 -Strict` でローカル登録、ハッシュ、外部 sandbox/log root、無効なビルド・カタログを確認します。
-5. 専用の清浄な Bazaar working copy を用意し、`Start-TeamBobTask.ps1` で task packet を開始します。Bob ではフェーズに合う mode と slash command を選び、承認境界を超える前に人が packet を承認します。
-6. Green 後は Bazaar 証跡を export し、人間レビューと新しいテスト仕様タスク、手動 PC/ボード試験を完了します。
+## パスと作業ディレクトリの約束
 
-## 権限と PoC リスク
+以下の `<Bazaar-root>` は、`.bzr` を直下にもつ専用かつ clean な Bazaar working copy の絶対パスです。インストール後の操作はこの root を current directory にし、**すべて** `<Bazaar-root>\team-bob\tools` の installed tools を呼びます。配布 source の `profile\team-bob\...` はインストール前の参照用であり、日常運用では実行しません。
 
-通常 mode は Read だけを自動承認します。Green は隔離された開発条件で、完全な Green packet を持つ新規・専用 Bob タスクに限り Edit/Execute を自動承認できます。custom mode にはコマンド allowlist がないため、Execute は技術的には任意コマンドを実行できます。これは受容した PoC リスクであり、技術的制御ではありません。実機、制御ネットワーク、mainline、secrets には決して接続しません。
+```powershell
+Set-Location "<Bazaar-root>"
+```
 
-Green は許可済み C/C++ source/header だけを CP932、BOM なし、CRLF のまま編集します。Make、最大 2 回の証跡ベース修正（合計 3 Make 試行）、最終 Rebuild、整合性確認の全てが成功した場合だけ `READY_FOR_HUMAN_REVIEW` です。固定 status/exit code と停止条件は USAGE を参照してください。
+## 導入とローカル登録
 
-## 導入・運用の受入れ
+配布 checkout の root で、まず変更予定だけを確認します。`<Bazaar-root>` は既存の Bazaar working copy の絶対パスに置き換えます。
 
-自動パッケージテストは、インストーラーの source/target/code/`.bzr` 不変性、custom mode、packet gate、CP932/CRLF、匿名利用列、無効カタログ、ビルドと Bazaar 証跡を確認します。`tests/fixtures/` は安全なテスト用の説明だけを追跡し、偽 MSDEV/Bazaar 実行ファイルは検証済みの一時 root で生成します。
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\Install-TeamBobProfile.ps1" -TargetPath "<Bazaar-root>" -WhatIf
+```
 
-Bob IDE では、5 mode/6 slash command、Read-only 通常 mode、Green の限定 Edit/Execute、packet 外編集の拒否、出力先、停止表示を人が確認してください。target-PC qualification は `MSDEV.COM /?`、通常 Make/Rebuild、意図的な compile/link failure の各 PC の switch・exit・log pattern を記録して初めて完了です。すべての証跡が揃うまで profile は disabled のままです。
+人が衝突と内容を確認してから実インストールします。インストーラーは衝突を上書きせず、Bazaar 操作もしません。
 
-## ロールアウトと測定
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ".\scripts\Install-TeamBobProfile.ps1" -TargetPath "<Bazaar-root>"
+```
 
-2 週間は operations owner を含む 2 名で運用し、要求解釈、Green 自動修正、テスト仕様を校正します。重大な誤解、スコープ外編集、実機接続、Bazaar 変更が一つでも起きたら停止します。結果を v0.1.1-poc に反映してから残り 8 名へ展開します。研修は 3 時間、最初の 3 タスクはペア、以後 6 週間は週 30 分の校正です。
+`.bobignore.base` と `.bzrignore.snippet` は自動結合しません。人が既存 ignore 設定へレビューして統合します。前者は `.bzr/`、secrets、credentials、限定した生成物を Bob から隠せますが、Word/Excel baseline と `team-bob-work` の packet/drafts/results を隠してはいけません。後者は `team-bob-work/` 全体を Bazaar ignore にして task artifact が working copy を dirty にしないようにします。
 
-計測は匿名・タスク単位のみです: Task ID、Profile version、phase、difficulty、Bobcoin、human/rework hours、build count、first-pass、critical findings、result。Bob IDE Bobalytics は導入状況/Bobcoin の補助にできますが、品質の根拠はローカル log と人間レビュー結果です。
+target PC で次を実行します。四つの必須引数はすべて絶対パスです。sandbox と log root は Bazaar root の外で、互いを含まない別 directory にします。
 
-問題時は USAGE の status 判定、例外記録、所有者・承認、rollback に従います。v0.1 では人のレビュー後にインストール済み profile ファイルだけを削除する rollback とし、破壊的クリーンアップを自動化しません。
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<Bazaar-root>\team-bob\tools\Initialize-LocalEnvironment.ps1" -MsdevPath "C:\VC6\Common\MSDev98\Bin\MSDEV.COM" -BazaarPath "C:\Program Files\Bazaar\bzr.exe" -SandboxRoot "C:\BobTeam\sandboxes" -LogRoot "C:\BobTeam\logs"
+```
+
+catalog が空の出荷状態では通常の strict validation を実行します。特定 profile を指定する strict validation は、次節の qualification/enablement を人が完了した **後** のみ実行します。
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<Bazaar-root>\team-bob\tools\Test-TeamBobProfile.ps1" -RepositoryRoot "<Bazaar-root>" -Strict
+```
+
+## target-PC qualification と enablement
+
+PC ごとに人が `MSDEV.COM /?`、正常 Make、正常 Rebuild、意図した compile failure、意図した link failure を専用 sandbox で実施し、switch、exit code、output/log pattern、PC ID、日時、record ID を確認します。review 済みの結果だけを `<Bazaar-root>\team-bob\config\vc6-build-targets.json` の profile qualification に転記します。`qualification.pcId` は登録した PC の ID と一致し、`enabled` は全証跡と人の承認が揃うまで `false` のままにします。
+
+human reviewer が config の project/target/timeout/artifact pattern と上記 evidence を確認し、PC ID が一致することを再確認して初めて、対象 profile だけを enabled にします。続けて次を実行します。
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<Bazaar-root>\team-bob\tools\Test-TeamBobProfile.ps1" -RepositoryRoot "<Bazaar-root>" -BuildProfileId "qualified-vc6-profile-id" -Strict
+```
+
+空/disabled catalog を ship するのは、未知の VC6 switch・exit・log pattern や別 PC 上で build を実行させないためです。実機 VC6 qualification は明示的に pending のままであり、この package に実 build profile は含みません。
+
+## Green の開始・ビルド・evidence
+
+通常 modes には draft 用の Edit group が技術的にありますが、auto-approved は Read だけです。Edit は必ず human approval を要します。Green は fresh dedicated Bob task と approved Green packet を使う soft-rule mode であり、qualified/enabled/PC-matched profile がある隔離開発条件でだけ Edit/Execute を auto-approve できます。custom mode に command allowlist はないため Execute は技術的に任意 command を実行できます。これは明示的に受容する PoC risk であり、技術制御ではありません。
+
+Green packet は Open QA が空、全 seven impact-clear が `YES`、両 approver、両 approval、Allowed Files、fixed repair budget を必要とします。次は必須 parameter と全 `YES` gate を含む作成例です（実在する baseline、ReqID、allowed file、enabled profile ID に置換します）。
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<Bazaar-root>\team-bob\tools\Start-TeamBobTask.ps1" -TaskId "GREEN-0001" -BazaarRoot "<Bazaar-root>" -Difficulty "Small" -Classification "Green" -Customer "Customer-A" -ReqIds "REQ-001","REQ-002" -WordBaseline "WORD-BASELINE-42" -QaBaseline "QA-BASELINE-17" -SpecBaseline "SPEC-BASELINE-9" -AllowedFiles "src\module.cpp","include\module.hpp" -BuildProfileId "qualified-vc6-profile-id" -SpecificationApprover "spec-approver" -ImplementationApprover "implementation-approver" -RTImpactClear YES -SafetyImpactClear YES -BoardImpactClear YES -DriverImpactClear YES -ABIImpactClear YES -BuildImpactClear YES -CustomerBranchImpactClear YES -AutonomousEditBuildApproved YES -SoftExecuteRiskAccepted YES -MaxRepairCycles 2
+```
+
+Bob の `/bob-implement-green` は shared repair budget `N=0..2` で Make N を先に呼びます。Make または Rebuild が `CODE_FAILED_RETRYABLE` で `N < 2` のときだけ one evidence-based repair を行い、`N` を増やして **Make N に戻ります**。Rebuild を直接 retry しません。各 invocation は次の正確な形です。
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$Packet" -Action Make -Attempt N
+powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$Packet" -Action Rebuild -Attempt N
+```
+
+operator が single invocation の動作を確認するときは、packet を先に設定し、実数 attempt を指定します。Green state machine を手で省略してはなりません。
+
+```powershell
+$Packet = "<Bazaar-root>\team-bob-work\GREEN-0001\work-packet.md"
+powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$Packet" -Action Make -Attempt 0
+# Make が SUCCEEDED のときだけ、同じ attempt の Rebuild を実行する。
+powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$Packet" -Action Rebuild -Attempt 0
+```
+
+`SUCCEEDED` は要求した Make **または** Rebuild と integrity checks の成功です。Make 成功は同じ `N` の Rebuild に進むだけで、successful final Rebuild と integrity verification のときだけ `READY_FOR_HUMAN_REVIEW` です。`CODE_FAILED_RETRYABLE`（exit 10）は `N < 2` だけ repair、`CODE_FAILED_STOP`（11）、`ENVIRONMENT_FAILED`（20）、`TIMED_OUT`（21）、`INTEGRITY_FAILED`（30）は即停止です。
+
+完了後に read-only Bazaar evidence を export します。
+
+```powershell
+$Packet = "<Bazaar-root>\team-bob-work\GREEN-0001\work-packet.md"
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<Bazaar-root>\team-bob\tools\Export-BazaarEvidence.ps1" -WorkPacket "$Packet"
+```
+
+`build-result.md` は Bob-authored の短い result summary、`build-result-*.json` は build invocation ごとの timestamped machine result、登録済み external `logRoot` は VC6 の外部 log evidence です。三者を混同せず、人間レビューには packet と Bazaar evidence も添えます。
+
+## 受入れ、運用、停止
+
+package test は installer の source/target/code/`.bzr` 不変性、mode contract、packet gate、CP932/no-BOM/CRLF、anonymous usage columns、disabled catalog、build/Bazaar evidence を real VC6/Bazaar なしで検証します。`tests/fixtures/` に実行可能な fake tool は追跡せず、検証済み temporary root にだけ生成します。
+
+Bob IDE では、5 modes/6 slash commands、normal mode の Read-only auto approval、Green の限定 Edit/Execute、packet 外・禁止拡張子 edit の拒否、task output、固定 status 表示を人が確認します。Green 後は independent human review、新しい test-spec task、dedicated PC/board の手動試験の順です。
+
+例外は `team-bob/templates/exception-record.md` に Task ID、ReqID(s)、facts、impact、evidence、Specification/Implementation Approver、risk acceptance、expiry、disposition を記録し、人が判断します。critical misunderstanding、out-of-scope edit、実機/制御 network 接続、Bazaar mutation は即停止です。rollback は human review 後に installed profile files だけを削除し、v0.1 では destructive cleanup を自動化しません。
+
+最初の 2 週間は operations owner を含む 2 人で requirement interpretation、Green auto-repair、test spec を校正します。停止事象を v0.1.1-poc に反映してから残り 8 人へ展開します。training は 3 時間、最初の 3 task は pair、以後 6 週間は週 30 分の calibration です。metrics は匿名 task-only（Task ID、profile version、phase、difficulty、Bobcoin、human/rework hours、build count、first-pass、critical findings、result）です。Bobalytics は adoption/Bobcoin の補助であり、quality の根拠は local log と review outcome です。

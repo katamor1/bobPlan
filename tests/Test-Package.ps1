@@ -130,7 +130,7 @@ $profileRoot = Join-Path $repoRoot 'profile'
 Assert-True (Test-Path -LiteralPath $profileRoot -PathType Container) 'profile directory exists'
 
 # Task 4 integration contracts: operator entry points, installed-ignore behavior,
-# executable Green sequence, clean delivery index, and PS 5.1 grammar.
+# executable Green state machine, clean delivery index, and PS 5.1 grammar.
 foreach ($relativePath in @('README.md', 'profile/team-bob/USAGE.md', 'tests/fixtures/README.md')) {
     Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot $relativePath) -PathType Leaf) "Task 4 deliverable exists: $relativePath"
 }
@@ -170,15 +170,18 @@ Assert-True ($bzrIgnore -match '(?m)^team-bob-work/$') '.bzrignore ignores the e
 $greenCommandText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/commands/bob-implement-green.md')
 $greenRuleText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/rules-green-implement/10-edit-build-loop.md')
 foreach ($greenInstruction in @($greenCommandText, $greenRuleText)) {
-    $make0 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 0')
-    $make1 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 1')
-    $make2 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 2')
-    $rebuild2 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Rebuild -Attempt 2')
-    Assert-True ($make0 -ge 0 -and $make1 -gt $make0 -and $make2 -gt $make1 -and $rebuild2 -gt $make2) 'Green instructions provide executable Make/repair/Rebuild calls in order'
+    $buildPrefix = 'powershell.exe -NoLogo -NoProfile -NonInteractive -File "<Bazaar-root>\team-bob\tools\Invoke-Vc6Build.ps1" -WorkPacket "$1"'
+    Assert-True ($greenInstruction -match ([regex]::Escape($buildPrefix) + ' -Action Make -Attempt N')) 'Green instructions provide the installed executable Make invocation'
+    Assert-True ($greenInstruction -match ([regex]::Escape($buildPrefix) + ' -Action Rebuild -Attempt N')) 'Green instructions provide the installed executable Rebuild invocation'
+    Assert-True ($greenInstruction -match 'shared repair budget' -and $greenInstruction -match 'N = 0' -and $greenInstruction -match 'N < 2' -and $greenInstruction -match 'increment N' -and $greenInstruction -match 'return to Make') 'Green instructions define one shared Make/Rebuild repair-budget state machine'
+    Assert-True ($greenInstruction -match 'Rebuild.*CODE_FAILED_RETRYABLE.*Make N') 'Green Rebuild retryable status returns to the next Make attempt'
+    Assert-True (-not ($greenInstruction -match 'Rebuild -Attempt 2')) 'Green instructions do not incorrectly pin every Rebuild to attempt 2'
     Assert-True ($greenInstruction -match 'CODE_FAILED_RETRYABLE' -and $greenInstruction -match 'CODE_FAILED_STOP' -and $greenInstruction -match 'ENVIRONMENT_FAILED' -and $greenInstruction -match 'TIMED_OUT' -and $greenInstruction -match 'INTEGRITY_FAILED') 'Green instructions handle every stopping build status explicitly'
 }
 
 $trackedScratch = @(git -C $repoRoot ls-files .superpowers)
+$trackedScratchExitCode = $LASTEXITCODE
+Assert-Equal $trackedScratchExitCode 0 'Git lists tracked .superpowers entries successfully before their absence is asserted'
 Assert-Equal $trackedScratch.Count 0 'No .superpowers scratch/report entry is tracked in the deliverable'
 foreach ($scriptPath in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts'), (Join-Path $profileRoot 'team-bob/tools') -Filter '*.ps1' -File)) {
     $tokens = $null; $parseErrors = $null
@@ -294,6 +297,9 @@ Assert-True ($rubric -match '(?m)^\| Traceability \|') 'Review rubric has a trac
 Assert-True ($rubric -match '(?m)^\| Real-time and safety \|') 'Review rubric has a real-time and safety row'
 $exception = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'team-bob/templates/exception-record.md')
 Assert-True ($exception -match '(?m)^\| Soft-Execute-Risk-Accepted \| YES \|') 'Exception record repeats the soft-execute risk acceptance'
+foreach ($field in @('Task ID', 'ReqID\(s\)', 'Facts', 'Impact', 'Evidence', 'Specification Approver', 'Implementation Approver', 'Expiry', 'Disposition')) {
+    Assert-True ($exception -match ('(?m)^\| ' + $field + ' \|')) "Exception record includes the required '$field' field"
+}
 
 $commandOutputs = @{
     'bob-normalize-requirements.md' = 'team-bob-work/<Task>/drafts/requirement-ledger.csv'; 'bob-draft-spec.md' = 'team-bob-work/<Task>/drafts/external-spec.md'
@@ -312,13 +318,13 @@ foreach ($commandName in $commandOutputs.Keys) {
 }
 $greenCommand = Get-MarkdownDocument (Join-Path $profileRoot '.bob/commands/bob-implement-green.md')
 $greenWorkflow = Get-MarkdownSection $greenCommand.Body 'Green Workflow'
-$order = @('Edit only', 'Make', 'At most two', 'Final Rebuild') | ForEach-Object { $greenWorkflow.IndexOf($_) }
-Assert-True ($order[0] -ge 0 -and $order[1] -gt $order[0] -and $order[2] -gt $order[1] -and $order[3] -gt $order[2]) 'Green command has ordered edit, Make, repair, final-Rebuild workflow'
-Assert-True ($greenWorkflow -match 'READY_FOR_HUMAN_REVIEW.*success.*integrity') 'Green command gates human review on success and integrity'
+Assert-True ($greenWorkflow -match 'successful (?:final )?Rebuild' -and $greenWorkflow -match 'integrity verification' -and $greenWorkflow -match 'READY_FOR_HUMAN_REVIEW') 'Green command gates human review on successful final Rebuild and integrity'
 
 $outputRule = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/rules/30-output-contracts.md')
 $statusSection = Get-MarkdownSection $outputRule 'Build Statuses'
 foreach ($status in @('SUCCEEDED', 'CODE_FAILED_RETRYABLE', 'CODE_FAILED_STOP', 'ENVIRONMENT_FAILED', 'TIMED_OUT', 'INTEGRITY_FAILED')) { Assert-True ($statusSection -match "(?m)^\| $status \|") "Output contract includes build status '$status'" }
+Assert-True ($statusSection -match 'requested Make or Rebuild action.*integrity checks') 'SUCCEEDED contracts the requested action plus integrity checks'
+Assert-True ($outputRule -match 'only a successful final Rebuild.*READY_FOR_HUMAN_REVIEW') 'Output contract permits human review only after a successful final Rebuild'
 
 Write-Host "PASS: $script:Assertions package contract assertions succeeded."
 

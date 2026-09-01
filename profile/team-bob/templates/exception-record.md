@@ -3,9 +3,13 @@
 | Field | Value |
 | --- | --- |
 | Task ID | |
+| ReqID(s) | |
 | Exception | |
+| Facts | |
+| Impact | |
 | Evidence | |
-| Human Approver | |
+| Specification Approver | |
+| Implementation Approver | |
 | Soft-Execute-Risk-Accepted | YES |
 | Expiry | |
 | Disposition | |
