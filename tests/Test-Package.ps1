@@ -18,44 +18,11 @@ function Assert-SetEqual {
     Assert-Equal (($Actual | Sort-Object) -join ',') (($Expected | Sort-Object) -join ',') $Message
 }
 
-function Get-YamlScalar {
-    param([string]$Value)
-    $value = $Value.Trim()
-    if (($value.StartsWith("'") -and $value.EndsWith("'")) -or ($value.StartsWith('"') -and $value.EndsWith('"'))) { return $value.Substring(1, $value.Length - 2) }
-    return $value
-}
-
 function Get-ModeDefinitions {
     param([string]$Path)
-    $lines = Get-Content -LiteralPath $Path
-    Assert-Equal $lines[0].Trim() 'customModes:' 'custom_modes.yaml begins with the documented customModes collection'
-    $modes = @(); $current = $null; $inInstructions = $false; $inGroups = $false; $inEdit = $false
-    foreach ($line in $lines[1..($lines.Count - 1)]) {
-        if ($line.Trim() -eq '' -or $line.Trim().StartsWith('#')) { continue }
-        if ($line -match '^  - slug: ([a-z0-9-]+)$') {
-            $current = [ordered]@{ slug = $Matches[1]; groups = @(); edit = $null }
-            $modes += $current; $inInstructions = $false; $inGroups = $false; $inEdit = $false
-            continue
-        }
-        Assert-True ($null -ne $current) 'Each custom-mode entry follows a slug'
-        if ($line -match '^    (name|description|roleDefinition|whenToUse): (.+)$') {
-            $current[$Matches[1]] = Get-YamlScalar $Matches[2]
-            $inInstructions = $false; $inGroups = $false; $inEdit = $false
-            continue
-        }
-        if ($line -eq '    customInstructions: |') {
-            $current['customInstructions'] = ''
-            $inInstructions = $true; $inGroups = $false; $inEdit = $false
-            continue
-        }
-        if ($line -eq '    groups:') { $inInstructions = $false; $inGroups = $true; $inEdit = $false; continue }
-        if ($inInstructions -and $line -match '^      ') { $current['customInstructions'] += $line.Substring(6) + "`n"; continue }
-        if ($inGroups -and $line -match '^      - (read|execute)$') { $current['groups'] += $Matches[1]; $inEdit = $false; continue }
-        if ($inGroups -and $line -eq '      - edit:') { $current['groups'] += 'edit'; $current['edit'] = [ordered]@{}; $inEdit = $true; continue }
-        if ($inGroups -and $inEdit -and $line -match '^          (fileRegex|description): (.+)$') { $current['edit'][$Matches[1]] = Get-YamlScalar $Matches[2]; continue }
-        throw "Unsupported or malformed custom_modes.yaml line: $line"
-    }
-    return @($modes | ForEach-Object { [pscustomobject]$_ })
+    $configuration = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    Assert-True ($null -ne $configuration.customModes) 'custom_modes.yaml is a JSON/YAML customModes document'
+    return @($configuration.customModes)
 }
 
 function Get-MarkdownDocument {
@@ -94,31 +61,65 @@ function Get-PropertyValue {
     if ($property.Value -is [System.Array]) { Write-Output -NoEnumerate $property.Value } else { return $property.Value }
 }
 
-function Test-WorkPacketAgainstSchema {
-    param([object]$Schema, [object]$Packet)
+function Test-JsonSchemaKeywords {
+    param([object]$Schema, [string]$Path = '$')
+    $allowed = @('$schema', '$id', 'title', 'description', 'type', 'additionalProperties', 'required', 'properties', 'const', 'enum', 'minLength', 'minItems', 'maxItems', 'items', 'pattern', 'allOf', 'if', 'then')
     $errors = @()
-    foreach ($field in $Schema.required) { if ($null -eq $Packet.PSObject.Properties[$field]) { $errors += "missing:$field" } }
-    foreach ($property in $Schema.properties.PSObject.Properties) {
-        $name = $property.Name; $rule = $property.Value; $value = Get-PropertyValue $Packet $name
-        if ($null -eq $value) { continue }
-        if ($null -ne $rule.const -and $value -ne $rule.const) { $errors += "const:$name" }
-        if ($null -ne $rule.enum -and -not ($rule.enum -contains $value)) { $errors += "enum:$name" }
-        if ($rule.type -eq 'string' -and -not ($value -is [string])) { $errors += "type:$name" }
-        if ($rule.type -eq 'array') {
-            if (-not ($value -is [System.Array])) { $errors += "type:$name"; continue }
-            if ($null -ne $rule.minItems -and $value.Count -lt $rule.minItems) { $errors += "minItems:$name" }
-            if ($null -ne $rule.maxItems -and $value.Count -gt $rule.maxItems) { $errors += "maxItems:$name" }
+    foreach ($property in $Schema.PSObject.Properties) {
+        if (-not ($allowed -contains $property.Name)) { $errors += "unsupported:$Path.$($property.Name)" }
+    }
+    if ($null -ne $Schema.properties) {
+        foreach ($property in $Schema.properties.PSObject.Properties) { $errors += @(Test-JsonSchemaKeywords $property.Value "$Path.properties.$($property.Name)") }
+    }
+    if ($null -ne $Schema.items) { $errors += @(Test-JsonSchemaKeywords $Schema.items "$Path.items") }
+    foreach ($subschema in @($Schema.allOf)) { if ($null -ne $subschema) { $errors += @(Test-JsonSchemaKeywords $subschema "$Path.allOf") } }
+    if ($null -ne $Schema.if) { $errors += @(Test-JsonSchemaKeywords $Schema.if "$Path.if") }
+    if ($null -ne $Schema.then) { $errors += @(Test-JsonSchemaKeywords $Schema.then "$Path.then") }
+    return @($errors)
+}
+
+function Test-JsonSchemaNode {
+    param([object]$Schema, [object]$Value, [string]$Path = '$')
+    $errors = @()
+    if ($null -ne $Schema.type) {
+        $typeMatches = switch ($Schema.type) {
+            'object' { $Value -is [System.Management.Automation.PSCustomObject] }
+            'array' { $Value -is [System.Array] }
+            'string' { $Value -is [string] }
+            'integer' { $Value -is [sbyte] -or $Value -is [byte] -or $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64] }
+            default { $false }
+        }
+        if (-not $typeMatches) { return @("type:$Path") }
+    }
+    if ($null -ne $Schema.PSObject.Properties['const'] -and $Value -ne $Schema.const) { $errors += "const:$Path" }
+    if ($null -ne $Schema.enum -and -not ($Schema.enum -contains $Value)) { $errors += "enum:$Path" }
+    if ($Value -is [string]) {
+        if ($null -ne $Schema.minLength -and $Value.Length -lt [int]$Schema.minLength) { $errors += "minLength:$Path" }
+        if ($null -ne $Schema.pattern -and -not [regex]::IsMatch($Value, $Schema.pattern)) { $errors += "pattern:$Path" }
+    }
+    if ($Value -is [System.Array]) {
+        if ($null -ne $Schema.minItems -and $Value.Count -lt [int]$Schema.minItems) { $errors += "minItems:$Path" }
+        if ($null -ne $Schema.maxItems -and $Value.Count -gt [int]$Schema.maxItems) { $errors += "maxItems:$Path" }
+        if ($null -ne $Schema.items) {
+            for ($index = 0; $index -lt $Value.Count; $index++) { $errors += @(Test-JsonSchemaNode $Schema.items $Value[$index] "$Path[$index]") }
         }
     }
-    foreach ($conditional in $Schema.allOf) {
-        $risk = Get-PropertyValue $Packet 'Risk'; $expectedRisk = $conditional.if.properties.Risk.const
-        if ($risk -ne $expectedRisk) { continue }
-        foreach ($property in $conditional.then.properties.PSObject.Properties) {
-            $value = Get-PropertyValue $Packet $property.Name; $rule = $property.Value
-            if ($null -ne $rule.const -and $value -ne $rule.const) { $errors += "green-const:$($property.Name)" }
-            if ($null -ne $rule.maxItems -and $value.Count -gt $rule.maxItems) { $errors += "green-maxItems:$($property.Name)" }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        if ($null -ne $Schema.required) {
+            foreach ($field in @($Schema.required)) { if ($null -eq $Value.PSObject.Properties[$field]) { $errors += "required:$Path.$field" } }
+        }
+        if ($Schema.additionalProperties -eq $false) {
+            foreach ($property in $Value.PSObject.Properties) { if ($null -eq $Schema.properties.PSObject.Properties[$property.Name]) { $errors += "additionalProperties:$Path.$($property.Name)" } }
+        }
+        if ($null -ne $Schema.properties) {
+            foreach ($property in $Schema.properties.PSObject.Properties) {
+                $valueProperty = $Value.PSObject.Properties[$property.Name]
+                if ($null -ne $valueProperty) { $errors += @(Test-JsonSchemaNode $property.Value $valueProperty.Value "$Path.$($property.Name)") }
+            }
         }
     }
+    foreach ($subschema in @($Schema.allOf)) { if ($null -ne $subschema) { $errors += @(Test-JsonSchemaNode $subschema $Value $Path) } }
+    if ($null -ne $Schema.if -and @(Test-JsonSchemaNode $Schema.if $Value $Path).Count -eq 0 -and $null -ne $Schema.then) { $errors += @(Test-JsonSchemaNode $Schema.then $Value $Path) }
     return @($errors)
 }
 
@@ -162,25 +163,30 @@ Assert-Equal $modes.Count $expectedSlugs.Count 'Exactly five custom modes are de
 Assert-SetEqual $modes.slug $expectedSlugs 'Mode slugs match the package contract'
 foreach ($mode in $modes) {
     foreach ($field in @('name', 'description', 'roleDefinition', 'whenToUse', 'customInstructions')) { Assert-True (-not [string]::IsNullOrWhiteSpace($mode.$field)) "Mode '$($mode.slug)' has documented '$field'" }
-    Assert-True ($null -ne $mode.edit.fileRegex -and $null -ne $mode.edit.description) "Mode '$($mode.slug)' has a documented nested edit group"
+    $editGroups = @($mode.groups | Where-Object { $_ -is [System.Array] -and $_.Count -eq 2 -and $_[0] -eq 'edit' })
+    Assert-Equal $editGroups.Count 1 "Mode '$($mode.slug)' has one constrained edit group tuple"
+    $editOptions = $editGroups[0][1]
+    Assert-True ($null -ne $editOptions.fileRegex -and $null -ne $editOptions.description) "Mode '$($mode.slug)' edit tuple has fileRegex and description"
     if ($mode.slug -eq 'green-implement') {
-        Assert-SetEqual $mode.groups @('read', 'edit', 'execute') 'Green mode has only read, nested edit, and execute groups'
-        Assert-True (Test-PathRegex $mode.edit.fileRegex 'src/driver.cpp') 'Green edit regex accepts legacy C/C++ sources'
-        Assert-True (Test-PathRegex $mode.edit.fileRegex 'include/driver.hpp') 'Green edit regex accepts legacy C/C++ headers'
-        Assert-True (Test-PathRegex $mode.edit.fileRegex 'team-bob-work/TASK-1/results/build-result.md') 'Green edit regex accepts safe task-result artifacts'
-        Assert-True (-not (Test-PathRegex $mode.edit.fileRegex 'src/resource.rc')) 'Green edit regex rejects forbidden resource files'
-        Assert-True (-not (Test-PathRegex $mode.edit.fileRegex 'project/project.dsp')) 'Green edit regex rejects forbidden VC6 project files'
-        Assert-True (-not (Test-PathRegex $mode.edit.fileRegex 'team-bob-work/TASK-1/results/unsafe.exe')) 'Green edit regex rejects unsafe task-result artifacts'
+        Assert-Equal $mode.groups.Count 3 'Green mode has no extra groups'
+        Assert-SetEqual @($mode.groups | Where-Object { $_ -is [string] }) @('read', 'execute') 'Green mode has only read and execute simple groups'
+        Assert-True (Test-PathRegex $editOptions.fileRegex 'src/driver.cpp') 'Green edit regex accepts legacy C/C++ sources'
+        Assert-True (Test-PathRegex $editOptions.fileRegex 'include/driver.hpp') 'Green edit regex accepts legacy C/C++ headers'
+        Assert-True (Test-PathRegex $editOptions.fileRegex 'team-bob-work/TASK-1/results/build-result.md') 'Green edit regex accepts safe task-result artifacts'
+        foreach ($forbidden in @('src/resource.rc', 'project/project.dsp', 'project/project.dsw', 'src/library.def', 'src/interface.idl', 'src/legacy.mak')) { Assert-True (-not (Test-PathRegex $editOptions.fileRegex $forbidden)) "Green edit regex rejects '$forbidden'" }
+        Assert-True (-not (Test-PathRegex $editOptions.fileRegex 'team-bob-work/TASK-1/results/unsafe.exe')) 'Green edit regex rejects unsafe task-result artifacts'
     } else {
-        Assert-SetEqual $mode.groups @('read', 'edit') "Normal mode '$($mode.slug)' has only read and nested edit groups"
-        Assert-True (Test-PathRegex $mode.edit.fileRegex 'team-bob-work/TASK-1/drafts/external-spec.md') "Normal mode '$($mode.slug)' accepts draft Markdown artifacts"
-        Assert-True (Test-PathRegex $mode.edit.fileRegex 'team-bob-work/TASK-1/drafts/requirement-ledger.csv') "Normal mode '$($mode.slug)' accepts draft CSV artifacts"
-        Assert-True (-not (Test-PathRegex $mode.edit.fileRegex 'team-bob-work/TASK-1/results/build-result.md')) "Normal mode '$($mode.slug)' rejects task results"
-        Assert-True (-not (Test-PathRegex $mode.edit.fileRegex 'src/driver.cpp')) "Normal mode '$($mode.slug)' rejects source edits"
+        Assert-Equal $mode.groups.Count 2 "Normal mode '$($mode.slug)' has no extra groups"
+        Assert-SetEqual @($mode.groups | Where-Object { $_ -is [string] }) @('read') "Normal mode '$($mode.slug)' has only a read simple group"
+        Assert-True (Test-PathRegex $editOptions.fileRegex 'team-bob-work/TASK-1/drafts/external-spec.md') "Normal mode '$($mode.slug)' accepts draft Markdown artifacts"
+        Assert-True (Test-PathRegex $editOptions.fileRegex 'team-bob-work/TASK-1/drafts/requirement-ledger.csv') "Normal mode '$($mode.slug)' accepts draft CSV artifacts"
+        Assert-True (-not (Test-PathRegex $editOptions.fileRegex 'team-bob-work/TASK-1/results/build-result.md')) "Normal mode '$($mode.slug)' rejects task results"
+        Assert-True (-not (Test-PathRegex $editOptions.fileRegex 'src/driver.cpp')) "Normal mode '$($mode.slug)' rejects source edits"
     }
 }
 
 $workPacketSchema = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'team-bob/config/work-packet.schema.json') | ConvertFrom-Json
+Assert-Equal @(Test-JsonSchemaKeywords $workPacketSchema).Count 0 'Work-packet schema uses only validator-supported keywords'
 $requiredPacketFields = @('Profile Version', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Allowed Files', 'Forbidden Areas', 'RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact', 'Customer Branch Impact', 'RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy', 'Open QA', 'Build Profile ID', 'Autonomous-Edit-Build-Approved', 'Soft-Execute-Risk-Accepted', 'Max-Repair-Cycles', 'Specification Approver', 'Implementation Approver')
 foreach ($field in $requiredPacketFields) { Assert-True ($workPacketSchema.required -contains $field) "Work-packet schema requires '$field'" }
 Assert-Equal (($workPacketSchema.properties.Risk.enum) -join ',') 'Green,Amber,Red' 'Work-packet risk enum is fixed'
@@ -191,15 +197,32 @@ Assert-Equal $workPacketSchema.properties.'Max-Repair-Cycles'.const 2 'Repair cy
 $packet = Get-CanonicalWorkPacket (Join-Path $profileRoot 'team-bob/templates/work-packet.md')
 Assert-Equal $packet.Risk 'Amber' 'Representative packet is Amber so open QA can be recorded'
 Assert-True (@($packet.'Open QA').Count -gt 0) 'Representative Amber packet contains open QA'
-Assert-Equal (Test-WorkPacketAgainstSchema $workPacketSchema $packet).Count 0 'Canonical packet validates against the work-packet schema'
+Assert-Equal @(Test-JsonSchemaNode $workPacketSchema $packet).Count 0 'Canonical packet validates against the complete work-packet schema'
+$extraPacket = ($packet | ConvertTo-Json -Depth 20 | ConvertFrom-Json); $extraPacket | Add-Member -NotePropertyName 'Unexpected' -NotePropertyValue 'extra'
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $extraPacket) -contains 'additionalProperties:$.Unexpected') 'Work-packet schema rejects extra properties'
+$emptyPacket = ($packet | ConvertTo-Json -Depth 20 | ConvertFrom-Json); $emptyPacket.PSObject.Properties['Task ID'].Value = ''
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $emptyPacket) -contains 'minLength:$.Task ID') 'Work-packet schema rejects empty required strings'
+$badItemPacket = ($packet | ConvertTo-Json -Depth 20 | ConvertFrom-Json); $badItemPacket.PSObject.Properties['ReqIDs'].Value = @('REQ-OK', 7)
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $badItemPacket) -contains 'type:$.ReqIDs[1]') 'Work-packet schema rejects invalid array item types'
+$badIntegerPacket = ($packet | ConvertTo-Json -Depth 20 | ConvertFrom-Json); $badIntegerPacket.PSObject.Properties['Max-Repair-Cycles'].Value = 2.5
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $badIntegerPacket) -contains 'type:$.Max-Repair-Cycles') 'Work-packet schema rejects non-integer repair cycles'
+$badIntegerPacket.PSObject.Properties['Max-Repair-Cycles'].Value = '2'
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $badIntegerPacket) -contains 'type:$.Max-Repair-Cycles') 'Work-packet schema rejects string repair cycles'
+$patternSchema = '{"type":"string","pattern":"^[A-Z]+$"}' | ConvertFrom-Json
+Assert-True (@(Test-JsonSchemaNode $patternSchema 'lower') -contains 'pattern:$') 'Schema validator enforces string patterns'
 $greenPacket = ($packet | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
 $greenPacket.PSObject.Properties['Risk'].Value = 'Green'; $greenPacket.PSObject.Properties['Open QA'].Value = @()
 foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) { $greenPacket.PSObject.Properties[$field].Value = 'YES' }
-Assert-Equal (Test-WorkPacketAgainstSchema $workPacketSchema $greenPacket).Count 0 'Green packet with clear impacts and clean copy validates'
+Assert-Equal @(Test-JsonSchemaNode $workPacketSchema $greenPacket).Count 0 'Green packet with clear impacts and clean copy validates'
 $greenPacket.PSObject.Properties['Open QA'].Value = @('QA-OPEN')
-Assert-True ((Test-WorkPacketAgainstSchema $workPacketSchema $greenPacket) -contains 'green-maxItems:Open QA') 'Green packet rejects open QA'
-$greenPacket.PSObject.Properties['Open QA'].Value = @(); $greenPacket.PSObject.Properties['Clean Working Copy'].Value = 'NO'
-Assert-True ((Test-WorkPacketAgainstSchema $workPacketSchema $greenPacket) -contains 'green-const:Clean Working Copy') 'Green packet rejects a dirty working copy'
+Assert-True (@(Test-JsonSchemaNode $workPacketSchema $greenPacket) -contains 'maxItems:$.Open QA') 'Green packet rejects open QA'
+$greenPacket.PSObject.Properties['Open QA'].Value = @()
+foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) {
+    $greenPacket.PSObject.Properties[$field].Value = 'NO'
+    $expectedError = 'const:$.' + $field
+    Assert-True (@(Test-JsonSchemaNode $workPacketSchema $greenPacket) -contains $expectedError) "Green packet rejects '$field' when it is not YES"
+    $greenPacket.PSObject.Properties[$field].Value = 'YES'
+}
 
 $targetSchema = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'team-bob/config/vc6-build-targets.schema.json') | ConvertFrom-Json
 $targetFields = @('id', 'enabled', 'projectFile', 'target', 'timeoutSeconds', 'expectedArtifacts', 'excludePatterns', 'outputLogPattern', 'successPattern', 'compilerErrorPattern', 'linkerErrorPattern', 'environmentErrorPattern', 'qualification')
