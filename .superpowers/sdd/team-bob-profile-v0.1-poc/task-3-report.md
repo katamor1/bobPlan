@@ -91,6 +91,136 @@ PASS: 156 total package, tool, build, and evidence assertions succeeded.
 
 Exit code: `0`.
 
+## Fix round 1/5: security and integrity hardening
+
+Implementation commit: `264760f fix: harden VC6 build and Bazaar evidence`.
+
+### Files changed
+
+- `profile/team-bob/tools/TeamBob-BuildCommon.ps1`
+- `profile/team-bob/tools/Invoke-Vc6Build.ps1`
+- `profile/team-bob/tools/Export-BazaarEvidence.ps1`
+- `tests/Test-BuildTools.ps1`
+- This report
+
+### Implementation
+
+- Added handle-based Windows final-path resolution and per-component reparse-point refusal for the existing source, sandbox, and log roots. Pairwise containment is checked on physical paths before the wrapper creates a result, task, attempt, sandbox, or log directory. A runtime junction-alias test covers the boundary when junction creation is permitted by the host policy.
+- Reworked process waiting so normal completion, timeout, tree termination, parent grace, and redirected-output collection are all bounded. Timeout directly invokes the fixed System32 `taskkill.exe /PID <ownedPid> /T /F` path without a shell or name search, records `terminationComplete`, and never performs an unbounded wait or task result read.
+- Takes the protected source, Allowed File, and `.bzr` baseline before the first Bazaar query. Build postflight now executes from `finally`, proves integrity before and after postflight queries, and converts deletion, unreadability, query failure, or any inability to prove non-mutation to `INTEGRITY_FAILED / 30`.
+- Queries and compares `status --short`, `nick`, and `version-info --custom --template={revision_id}` before and after a build. The exact branch nick and full revision ID must match the canonical Work Packet and remain unchanged.
+- Evidence export now has a Bazaar-only environment-validation path, always performs its non-mutation proof even after a native Bazaar failure, and propagates the native failure exit code only when integrity remains proven. `bzr diff` accepts exit `0` or `1`, and the manifest records the actual accepted exit code.
+- Reads the raw VC6 `/OUT` log with strict CP932 decoding, leaves the original bytes untouched as evidence, configures redirected standard output/error for CP932 when supported, and fails undecodable logs safely.
+- Makes retryable compiler/linker attribution require an exact normalized relative source/object path, or a bare source/object name that is globally unique across the protected source inventory. Duplicate-basename and exact-object-path behavior tests prevent ambiguous retry classification.
+- Strictly validates every Forbidden Areas entry as a nonempty relative path/token with no rooted form, `.`/`..` segment, or control character, then enforces it against Allowed Files.
+- Verifies the qualified project file and every Allowed File exists in the new sandbox and has the same SHA-256 as its source before MSDEV starts.
+- Makes result JSON durability part of the success invariant. A result-write failure emits `INTEGRITY_FAILED` and exits `30`; it can no longer claim `SUCCEEDED` without durable evidence.
+- The tracked build-target catalog remains empty and the tracked example remains disabled. No real VC6 or Bazaar executable was invoked, and tests continued to use runtime fakes, temporary installed repository copies, temporary `LOCALAPPDATA`, and CP932/BOM-free/CRLF fixtures.
+
+### TDD RED
+
+The review regressions and enhanced runtime fakes were added before the production hardening. The first focused run failed on the newly required Bazaar identity query sequence:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+Exit code: `1`.
+
+```text
+ASSERTION FAILED: Build proves pre/post status, branch, and full revision using read-only queries (expected 'status --short|nick|version-info --custom --template={revision_id}|status --short|nick|version-info --custom --template={revision_id}', got 'status --short|status --short')
+```
+
+Final self-review exposed a missing control-character variant, so that regression was also added before its validator fix. The same focused command exited `1` with:
+
+```text
+ASSERTION FAILED: Forbidden Areas control-character entry uses the fixed process exit code; result message: Exception calling "IsPathRooted" with "1" argument(s): "Illegal characters in path." (expected '30', got '20')
+```
+
+This demonstrated that the tab control character reached a Windows path API and was incorrectly mapped to an environment failure. Production now rejects all `U+0000..U+001F` and `U+007F` controls before path parsing.
+
+### Focused GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 229 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 229 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### Final full-suite GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 623 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 623 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### Status-case and finding coverage
+
+- `SUCCEEDED / 0`: still requires durable result JSON, exact Bazaar identity/status, strict postflight proof, qualified success evidence, and all expected artifacts.
+- `CODE_FAILED_RETRYABLE / 10`: exact relative source/object path or globally unique bare name, including a CP932 Japanese Allowed File path.
+- `CODE_FAILED_STOP / 11`: duplicate/ambiguous bare basename and unrelated compiler failures.
+- `ENVIRONMENT_FAILED / 20`: undecodable CP932 log and existing qualified environment/build failures; raw log bytes remain intact.
+- `TIMED_OUT / 21`: a fake MSDEV child inherits redirected handles; the owned process tree is terminated and output collection returns within the test bound.
+- `INTEGRITY_FAILED / 30`: physical junction alias, first-query mutation, pre/post Bazaar identity mismatch, postflight query failure, source mutation/deletion, unsafe/control Forbidden Areas, sandbox exclusion of an Allowed File, and result persistence failure.
+- Evidence: works with MSDEV absent, accepts and records diff exit `1`, rejects Work Packet/Bazaar identity mismatch, propagates an intact native exit `47`, and overrides it with `30` when the same failing query mutates protected state.
+
+### Self-review
+
+- Re-read each Critical/Important/Minor finding and controller-confirmed gap against the final diff and its behavior case.
+- Confirmed final physical paths are resolved through directory handles, every existing component is checked for a reparse point, and all pairwise comparisons happen before any wrapper-owned directory creation.
+- Confirmed every process wait is finite; async text tasks are read only after bounded completion; termination targets only the retained owned PID and its tree; no process-name lookup exists.
+- Confirmed protected snapshots precede every wrapper Bazaar query set and finally-style postflight cannot be bypassed by MSDEV failure, Bazaar failure, deletion, or unreadability.
+- Confirmed the only Bazaar commands remain the approved read-only sets and the local evidence path does not validate MSDEV existence/hash.
+- Confirmed the wrapper has no caller-supplied executable, project, target, timeout, root, or log parameter; no `Invoke-Expression`, shell, command-script execution, Bazaar mutation, recursive production deletion, or enabled tracked profile exists.
+- Confirmed all changed PowerShell files parse in both Windows PowerShell 5.1 and PowerShell 7, `git diff --check` is clean, and both final test suites passed after the last production change.
+
+### Concerns
+
+- Actual `MSDEV.COM` switches, output encodings, process-tree behavior, logs, and artifacts remain qualification-gated because this environment has no real VC6/Bazaar installation. No real build profile is enabled.
+- PowerShell 5.1 still requires a safely quoted `ProcessStartInfo.Arguments` representation of the fixed argument array because it lacks `ArgumentList`; executable selection remains separate and `UseShellExecute=false`.
+- Per-attempt sandboxes and logs remain intentionally retained. If fixed `taskkill.exe` cannot complete tree termination within its bound, the result records `terminationComplete=false` and never reports success.
+
 PowerShell 7 initially exposed two engine differences. Its `Add-Type` cannot emit a console EXE, so the test now generates its fake EXEs through a temporary Windows PowerShell 5.1 compiler script. Its `ConvertFrom-Json` projects JSON integers as `Int64` rather than Windows PowerShell 5.1's `Int32`, so the production schema consumer accepts all CLR integer types while still rejecting fractional/string values. Both changes were rechecked in both engines.
 
 ## Status-case and behavior coverage
