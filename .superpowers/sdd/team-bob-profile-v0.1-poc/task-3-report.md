@@ -282,3 +282,123 @@ PASS: 550 total package, tool, build, and evidence assertions succeeded.
 ```
 
 Exit code: `0`.
+
+## Fix round 2: reject UNC and network aliases
+
+### Files
+
+- `profile/team-bob/tools/TeamBob-BuildCommon.ps1`
+- `profile/team-bob/tools/Invoke-Vc6Build.ps1`
+- `tests/Test-BuildTools.ps1`
+- This report
+
+No Task 4 document or implementation file was changed.
+
+### Implementation
+
+- The common canonical-path boundary now rejects lexical UNC, slash-normalized UNC, extended UNC, `\??\UNC`, `\GLOBAL??\UNC`, and resolved NT redirector forms for MUP, Lanman, WebDAV, RDR, DFS, and device UNC paths before filesystem access.
+- Drive-letter paths remain supported, but `GetDriveTypeW` rejects a drive Windows identifies as remote. Local fixed drives and local SUBST mappings remain valid.
+- Handle-based final-path resolution performs the same network-device rejection after resolving an existing path, preserving the prior reparse-component checks and physical overlap comparison.
+- Registered Bazaar and MSDEV executable files now pass through the physical-path boundary as leaves, closing local symlink/junction/redirector routes that lexical validation alone would miss. Bazaar-only evidence still does not require MSDEV existence or hash validation.
+- `LOCALAPPDATA`, the Work Packet path, canonical Bazaar root, local environment tool/root fields, and joined project/artifact/Allowed File paths all flow through the local-only canonical boundary. The build wrapper canonicalizes the Work Packet path before calling `Test-Path`, so a caller-supplied UNC packet path is refused before share access.
+- Tests use only literal `.invalid` hostnames and raw device-form strings; they do not create or contact an SMB share. Integration cases cover Work Packet Bazaar root, registered MSDEV/Bazaar paths, sandbox/log roots, and project/artifact paths.
+
+### TDD RED
+
+The installed-helper regressions were added before production changes.
+
+Command:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+Exit code: `1`.
+
+Observed output:
+
+```text
+ASSERTION FAILED: Common path boundary rejects lexical UNC without accessing a share
+At C:\Users\stell\source\repos\bobPlan\tests\Test-BuildTools.ps1:5 char:116
+```
+
+The failure demonstrated that `Get-TeamBobCanonicalPath` returned the UNC form instead of refusing it.
+
+### Focused GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 277 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-BuildTools.ps1
+```
+
+```text
+PASS: 277 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### Full-suite GREEN
+
+Windows PowerShell 5.1:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 671 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+PowerShell 7:
+
+```powershell
+pwsh -NoLogo -NoProfile -NonInteractive -File .\tests\Test-Package.ps1
+```
+
+```text
+PASS: 301 package contract assertions succeeded.
+PASS: 394 total package and tool assertions succeeded.
+PASS: 671 total package, tool, build, and evidence assertions succeeded.
+```
+
+Exit code: `0`.
+
+### SUBST compatibility check
+
+A temporary local SUBST drive was mapped only to a GUID directory under the system temporary root. The common physical resolver accepted the drive and returned the same NT physical path as the direct local path:
+
+```text
+PASS: local SUBST drive remains accepted and resolves to the same physical NT path.
+```
+
+The mapping and empty temporary directory were removed in `finally`.
+
+### Self-review
+
+- Confirmed all changed behavior is confined to Task 3 common/build code, Task 3 behavior tests, and this report; Task 4 was untouched.
+- Confirmed every externally supplied or derived Task 3 filesystem path reaches either the local canonical boundary, the safe-relative boundary rooted beneath a local canonical path, or both.
+- Confirmed physical source/sandbox/log and registered executable paths reject reparse components and resolved network-device forms. Pairwise physical overlap checks and SUBST resolution remain intact.
+- Confirmed no real VC6/Bazaar executable or SMB share was invoked, no enabled tracked build profile was introduced, and no shell/expression or process-name termination path was added.
+- Confirmed changed PowerShell files parse in Windows PowerShell 5.1 and PowerShell 7, `git diff --check` is clean, and focused/full suites passed in both engines after the production change.
+
+### Concerns
+
+- Actual VC6/Bazaar behavior remains qualification-gated; no real profile is enabled.
+- Network paths are intentionally unsupported for this dedicated-PC PoC, including legitimate UNC shares and mapped remote drives.

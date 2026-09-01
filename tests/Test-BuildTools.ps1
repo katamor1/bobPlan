@@ -256,6 +256,7 @@ try {
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
     $buildPath = Join-Path $workingTree 'team-bob/tools/Invoke-Vc6Build.ps1'
     $evidencePath = Join-Path $workingTree 'team-bob/tools/Export-BazaarEvidence.ps1'
+    $buildCommonPath = Join-Path $workingTree 'team-bob/tools/TeamBob-BuildCommon.ps1'
     $env:BOB3_MSDEV_COMMAND_LOG = Join-Path $task3FixtureRoot 'msdev-commands.log'
     $env:BOB3_BZR_COMMAND_LOG = Join-Path $task3FixtureRoot 'bzr-commands.log'
     $env:BOB3_BZR_STATUS = ' M  src/example.cpp'
@@ -268,6 +269,70 @@ try {
 
     $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     $registeredEnvironment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
+
+    . $buildCommonPath
+    $networkPathCases = @(
+        [pscustomobject]@{ Name = 'lexical UNC'; Path = '\\fixture-server.invalid\fixture-share\root' },
+        [pscustomobject]@{ Name = 'extended UNC'; Path = '\\?\UNC\fixture-server.invalid\fixture-share\root' },
+        [pscustomobject]@{ Name = 'MUP network device'; Path = '\Device\Mup\fixture-server.invalid\fixture-share\root' },
+        [pscustomobject]@{ Name = 'Lanman redirector device'; Path = '\Device\LanmanRedirector\;Z:000000000000\fixture-server.invalid\fixture-share\root' }
+    )
+    foreach ($networkPathCase in $networkPathCases) {
+        $networkPathRejected = $false
+        $networkPathMessage = ''
+        try { [void](Get-TeamBobCanonicalPath $networkPathCase.Path) } catch { $networkPathRejected = $true; $networkPathMessage = $_.Exception.Message }
+        Assert-True $networkPathRejected ("Common path boundary rejects " + $networkPathCase.Name + ' without accessing a share')
+        Assert-True ($networkPathMessage -match 'local non-UNC|network') ("Common path boundary identifies " + $networkPathCase.Name + ' as a network alias')
+    }
+
+    $registeredEnvironment.msdevPath = '\\fixture-server.invalid\fixture-share\MSDEV.EXE'
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    $uncMsdev = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncMsdev 'ENVIRONMENT_FAILED' 20 'Registered UNC MSDEV path'
+    Assert-True ($uncMsdev.Json.message -match 'local non-UNC|network') 'Registered UNC MSDEV rejection identifies the local-only boundary'
+    $registeredEnvironment.msdevPath = $fakeTools.MsdevPath
+
+    $registeredEnvironment.bazaarPath = '\\?\UNC\fixture-server.invalid\fixture-share\BZR.EXE'
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    $uncBazaar = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncBazaar 'ENVIRONMENT_FAILED' 20 'Registered extended UNC Bazaar path'
+    Assert-True ($uncBazaar.Json.message -match 'local non-UNC|network') 'Registered extended UNC Bazaar rejection identifies the local-only boundary'
+    $registeredEnvironment.bazaarPath = $fakeTools.BazaarPath
+
+    $registeredEnvironment.sandboxRoot = '\\fixture-server.invalid\fixture-share\sandbox'
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    $uncSandbox = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncSandbox 'ENVIRONMENT_FAILED' 20 'Registered UNC sandbox root'
+    Assert-True ($uncSandbox.Json.message -match 'local non-UNC|network') 'Registered UNC sandbox rejection identifies the local-only boundary'
+    $registeredEnvironment.sandboxRoot = $sandboxRoot
+
+    $registeredEnvironment.logRoot = '\\?\UNC\fixture-server.invalid\fixture-share\logs'
+    Write-JsonFixture $environmentPath $registeredEnvironment
+    $uncLog = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncLog 'ENVIRONMENT_FAILED' 20 'Registered extended UNC log root'
+    Assert-True ($uncLog.Json.message -match 'local non-UNC|network') 'Registered extended UNC log rejection identifies the local-only boundary'
+    $registeredEnvironment.logRoot = $logRoot
+    Write-JsonFixture $environmentPath $registeredEnvironment
+
+    Write-Task3PacketFixture $workPacketPath '\\fixture-server.invalid\fixture-share\working-tree' $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    $uncBazaarRoot = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncBazaarRoot 'INTEGRITY_FAILED' 30 'Work Packet UNC Bazaar root'
+    Assert-True ($uncBazaarRoot.Json.message -match 'local non-UNC|network') 'Work Packet UNC Bazaar root rejection identifies the local-only boundary'
+    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+
+    $profile.projectFile = '\\fixture-server.invalid\fixture-share\fixture.dsp'
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    $uncProject = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncProject 'ENVIRONMENT_FAILED' 20 'Qualified project UNC path'
+    $profile.projectFile = 'project/fixture.dsp'
+
+    $profile.expectedArtifacts = @('\\?\UNC\fixture-server.invalid\fixture-share\fixture.exe')
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+    $uncArtifact = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    Assert-Task3BuildOutcome $uncArtifact 'ENVIRONMENT_FAILED' 20 'Qualified artifact extended UNC path'
+    $profile.expectedArtifacts = @('bin/fixture.exe')
+    Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
+
     $junctionAlias = Join-Path $task3FixtureRoot 'sandbox-junction-alias'
     $junctionCreated = $false
     try {

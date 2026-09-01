@@ -18,6 +18,9 @@ public static class TeamBobNativePath {
     private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint GetDriveTypeW(string rootPathName);
+    public static bool IsRemoteDrive(string rootPath) { return GetDriveTypeW(rootPath) == 4; }
     public static string GetFinalDirectoryPath(string path) {
         using (SafeFileHandle handle = CreateFileW(path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero)) {
             if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot open path for physical resolution: " + path);
@@ -49,18 +52,45 @@ function Test-TeamBobAbsolutePath {
     return -not [string]::IsNullOrWhiteSpace($Path) -and $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
 }
 
-function Get-TeamBobCanonicalPath {
+function Test-TeamBobNetworkPathForm {
     param([string]$Path)
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $normalized = $Path.Replace('/', '\')
+    if ($normalized.StartsWith('\\', [System.StringComparison]::Ordinal)) { return $true }
+    foreach ($prefix in @('\??\UNC', '\GLOBAL??\UNC', '\Device\UNC', '\Device\Mup', '\Device\LanmanRedirector', '\Device\WebDavRedirector', '\Device\Rdr', '\Device\DfsClient')) {
+        if ($normalized.Equals($prefix, [System.StringComparison]::OrdinalIgnoreCase) -or $normalized.StartsWith($prefix + '\', [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Assert-TeamBobLocalPathForm {
+    param([string]$Path, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    if (Test-TeamBobNetworkPathForm $Path) {
+        throw (New-TeamBobFailure $FailureStatus "$Label must resolve to a local non-UNC path; network paths and redirector aliases are forbidden.")
+    }
+}
+
+function Get-TeamBobCanonicalPath {
+    param([string]$Path, [string]$Label = 'Path', [string]$FailureStatus = 'INTEGRITY_FAILED')
+    Assert-TeamBobLocalPathForm $Path $Label $FailureStatus
+    try { $fullPath = [System.IO.Path]::GetFullPath($Path) } catch { throw (New-TeamBobFailure $FailureStatus "$Label is not a valid local path: $Path") }
+    Assert-TeamBobLocalPathForm $fullPath $Label $FailureStatus
     $volumeRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($volumeRoot) -or $volumeRoot -notmatch '^[A-Za-z]:[\\/]$') { throw (New-TeamBobFailure $FailureStatus "$Label must resolve to a local drive path.") }
+    try {
+        if ([TeamBobNativePath]::IsRemoteDrive($volumeRoot)) { throw (New-TeamBobFailure $FailureStatus "$Label must resolve to a local non-UNC drive; mapped network drives are forbidden.") }
+    } catch {
+        if ($null -ne $_.Exception.Data['TeamBobStatus']) { throw }
+        throw (New-TeamBobFailure $FailureStatus ("$Label drive locality could not be verified: " + $_.Exception.Message))
+    }
     if ($fullPath.Equals($volumeRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $volumeRoot }
     return $fullPath.TrimEnd('\', '/')
 }
 
 function Get-TeamBobPhysicalPath {
-    param([string]$Path, [string]$Label)
-    $fullPath = Get-TeamBobCanonicalPath $Path
-    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must be an existing directory for physical path validation.") }
+    param([string]$Path, [string]$Label, [ValidateSet('Container', 'Leaf')][string]$PathType = 'Container')
+    $fullPath = Get-TeamBobCanonicalPath $Path $Label 'INTEGRITY_FAILED'
+    if (-not (Test-Path -LiteralPath $fullPath -PathType $PathType)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must be an existing $($PathType.ToLowerInvariant()) for physical path validation.") }
     $root = [System.IO.Path]::GetPathRoot($fullPath)
     $current = $root
     $remainder = $fullPath.Substring($root.Length)
@@ -70,6 +100,7 @@ function Get-TeamBobPhysicalPath {
         if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label contains a forbidden reparse/alias component: $current") }
     }
     try { $physical = [TeamBobNativePath]::GetFinalDirectoryPath($fullPath) } catch { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("$Label physical path resolution failed: " + $_.Exception.Message)) }
+    Assert-TeamBobLocalPathForm $physical $Label 'INTEGRITY_FAILED'
     if ($physical.StartsWith('\\?\UNC\', [System.StringComparison]::OrdinalIgnoreCase)) { $physical = '\\' + $physical.Substring(8) }
     elseif ($physical.StartsWith('\\?\', [System.StringComparison]::OrdinalIgnoreCase)) { $physical = $physical.Substring(4) }
     $physical = $physical.Replace('/', '\')
@@ -109,10 +140,10 @@ function Get-TeamBobRelativePath {
 
 function ConvertTo-TeamBobRelativePath {
     param([string]$Root, [string]$RelativePath, [string]$Label, [string]$FailureStatus = 'INTEGRITY_FAILED')
-    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '[\x00-\x1F\x7F]' -or [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|[\\/])\.\.?([\\/]|$)') {
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or $RelativePath -match '[\x00-\x1F\x7F]' -or (Test-TeamBobNetworkPathForm $RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath) -or $RelativePath -match '(^|[\\/])\.\.?([\\/]|$)') {
         throw (New-TeamBobFailure $FailureStatus "$Label must be a safe relative path: $RelativePath")
     }
-    $candidate = Get-TeamBobCanonicalPath (Join-Path $Root $RelativePath)
+    $candidate = Get-TeamBobCanonicalPath (Join-Path $Root $RelativePath) $Label $FailureStatus
     if (-not (Test-TeamBobPathAtOrBelow $candidate $Root) -or $candidate.Equals((Get-TeamBobCanonicalPath $Root), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw (New-TeamBobFailure $FailureStatus "$Label resolves outside its root: $RelativePath")
     }
@@ -345,7 +376,8 @@ function Invoke-TeamBobProcess {
 function Get-TeamBobLocalEnvironment {
     param([string]$ManifestPath, [string]$WorkSchemaPath, [string]$BuildSchemaPath, [switch]$BazaarOnly)
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'LOCALAPPDATA must be an absolute path.') }
-    $path = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $localAppData = Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED'
+    $path = Join-Path $localAppData 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment registration is missing: $path") }
     try { $environment = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ('Local environment registration is invalid JSON: ' + $_.Exception.Message)) }
     $fields = @('schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId', 'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot')
@@ -362,12 +394,14 @@ function Get-TeamBobLocalEnvironment {
     }
     foreach ($field in @('msdevPath', 'bazaarPath', 'sandboxRoot', 'logRoot')) {
         if (-not (Test-TeamBobAbsolutePath ([string]$environment.$field))) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment field '$field' must be absolute.") }
-        $environment.PSObject.Properties[$field].Value = Get-TeamBobCanonicalPath ([string]$environment.$field)
+        $environment.PSObject.Properties[$field].Value = Get-TeamBobCanonicalPath ([string]$environment.$field) ("Local environment field '$field'") 'ENVIRONMENT_FAILED'
     }
     if (-not (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered Bazaar tool is missing: $($environment.bazaarPath)") }
+    [void](Get-TeamBobPhysicalPath $environment.bazaarPath 'Registered Bazaar tool' 'Leaf')
     if ((Get-TeamBobFileHash $environment.bazaarPath) -ne ([string]$environment.bazaarSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered Bazaar hash does not match.') }
     if (-not $BazaarOnly) {
         if (-not (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered MSDEV tool is missing: $($environment.msdevPath)") }
+        [void](Get-TeamBobPhysicalPath $environment.msdevPath 'Registered MSDEV tool' 'Leaf')
         foreach ($field in @('sandboxRoot', 'logRoot')) { if (-not (Test-Path -LiteralPath $environment.$field -PathType Container)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Registered root is missing or not a directory: $($environment.$field)") } }
         if ((Get-TeamBobFileHash $environment.msdevPath) -ne ([string]$environment.msdevSha256).ToLowerInvariant()) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Registered MSDEV hash does not match.') }
     }

@@ -51,8 +51,8 @@ function Get-TeamBobExceptionStatus {
 }
 
 try {
-    if (-not (Test-Path -LiteralPath $WorkPacket -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $WorkPacket") }
-    $workPacketFull = Get-TeamBobCanonicalPath $WorkPacket
+    $workPacketFull = Get-TeamBobCanonicalPath $WorkPacket 'Work packet' 'INTEGRITY_FAILED'
+    if (-not (Test-Path -LiteralPath $workPacketFull -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $workPacketFull") }
     $result.workPacket = $workPacketFull
     $resultDirectory = Join-Path (Split-Path -Parent $workPacketFull) 'results'
     if (Test-Path -LiteralPath $resultDirectory -PathType Leaf) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Task results path is an existing file.') }
