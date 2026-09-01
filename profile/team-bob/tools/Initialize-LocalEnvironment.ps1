@@ -9,6 +9,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-TeamBobSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $stream = [System.IO.File]::OpenRead($Path); try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()) } finally { $stream.Dispose() } } finally { $sha256.Dispose() }
+}
+
 function Test-TeamBobAbsolutePath {
     param([string]$Path)
     return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
@@ -70,9 +76,9 @@ try {
         workPacketSchemaId = [string]$workSchema.'$id'
         buildTargetSchemaId = [string]$buildSchema.'$id'
         msdevPath = Get-TeamBobCanonicalPath $MsdevPath
-        msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $MsdevPath).Hash.ToLowerInvariant()
+        msdevSha256 = Get-TeamBobSha256 $MsdevPath
         bazaarPath = Get-TeamBobCanonicalPath $BazaarPath
-        bazaarSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $BazaarPath).Hash.ToLowerInvariant()
+        bazaarSha256 = Get-TeamBobSha256 $BazaarPath
         sandboxRoot = Get-TeamBobCanonicalPath $SandboxRoot
         logRoot = Get-TeamBobCanonicalPath $LogRoot
     }

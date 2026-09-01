@@ -8,6 +8,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-TeamBobSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '')) } finally { $stream.Dispose() }
+    } finally { $sha256.Dispose() }
+}
+
 function Test-TeamBobAbsolutePath {
     param([string]$Path)
     return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
@@ -55,8 +64,8 @@ try {
             $plans.Add([pscustomobject]@{ Action = 'CONFLICT'; Kind = 'file'; Path = $destination; Source = $file.FullName })
             $hasConflict = $true
         } elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
-            $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
-            $destinationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash
+            $sourceHash = Get-TeamBobSha256 $file.FullName
+            $destinationHash = Get-TeamBobSha256 $destination
             if ($sourceHash -eq $destinationHash) {
                 $plans.Add([pscustomobject]@{ Action = 'IDENTICAL'; Kind = 'file'; Path = $destination; Source = $file.FullName })
             } else {

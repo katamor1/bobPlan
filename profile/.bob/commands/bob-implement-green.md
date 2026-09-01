@@ -25,9 +25,10 @@ argument-hint: <work-packet-path>
 ## Green Workflow
 
 1. Edit only the approved legacy source/header files and preserve CP932, no BOM, and CRLF.
-2. Make with the approved local build profile.
-3. At most two evidence-based repairs may follow a retryable code failure.
-4. Final Rebuild and integrity verification are required.
+2. Run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 0`. On `SUCCEEDED`, retain evidence and proceed to final Rebuild. On `CODE_FAILED_RETRYABLE`, inspect only generated evidence; `CODE_FAILED_STOP`, `ENVIRONMENT_FAILED`, `TIMED_OUT`, or `INTEGRITY_FAILED` stops the task.
+3. At most two evidence-based repairs are allowed. If and only if attempt 0 is `CODE_FAILED_RETRYABLE`, make one evidence-based repair, then run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 1`. Apply the same status handling. This is repair cycle 1.
+4. If and only if attempt 1 is `CODE_FAILED_RETRYABLE`, make the second and final evidence-based repair, then run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 2`. `CODE_FAILED_RETRYABLE` is now `CODE_FAILED_STOP`; every other non-success status also stops. This is repair cycle 2: no further edits or Make attempts.
+5. Final Rebuild: after a successful Make (attempt 0, 1, or 2), run `Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Rebuild -Attempt 2`. Require `SUCCEEDED`; `CODE_FAILED_RETRYABLE`, `CODE_FAILED_STOP`, `ENVIRONMENT_FAILED`, `TIMED_OUT`, and `INTEGRITY_FAILED` all stop the task.
 
 Emit `READY_FOR_HUMAN_REVIEW` only after success and integrity verification. Never run Bazaar mutation commands, commit, merge, tag, attach a debugger, or access actual machines, control networks, mainline, or secrets.
 

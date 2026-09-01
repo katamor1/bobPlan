@@ -36,6 +36,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function Get-TeamBobSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $stream = [System.IO.File]::OpenRead($Path); try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()) } finally { $stream.Dispose() } } finally { $sha256.Dispose() }
+}
+
 function Test-TeamBobAbsolutePath {
     param([string]$Path)
     return $Path -match '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)'
@@ -104,7 +110,7 @@ try {
     $environment = Get-Content -Raw -LiteralPath $environmentPath | ConvertFrom-Json
     if ($environment.profileId -ne 'team-bob-vc6-bazaar' -or $environment.profileVersion -ne '0.1.0-poc') { throw 'Local environment profile identity does not match this profile.' }
     if (-not (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)) { throw 'Registered Bazaar executable is missing.' }
-    $actualBazaarHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $environment.bazaarPath).Hash.ToLowerInvariant()
+    $actualBazaarHash = Get-TeamBobSha256 $environment.bazaarPath
     if ($actualBazaarHash -ne $environment.bazaarSha256) { throw 'Registered Bazaar executable hash does not match.' }
 
     $status = Invoke-TeamBobBazaarRead $environment.bazaarPath $bazaarRootFull @('status', '--short')

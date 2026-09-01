@@ -1,10 +1,11 @@
-# Copy into a repository-local .bobignore when installing this profile.
+# Human-review before merging into the repository .bobignore.
+# Word/Excel baselines and team-bob-work are required Bob inputs/outputs; do not ignore them.
 .bzr/
 .git/
-*.doc
-*.docx
-*.xls
-*.xlsx
 secrets/
 credentials/
-team-bob-work/*/results/
+*.obj
+*.pdb
+*.ilk
+*.ncb
+*.opt

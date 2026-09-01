@@ -1,4 +1,25 @@
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+
+function Get-FileHash {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('SHA256')][string]$Algorithm,
+        [Parameter(Mandatory = $true)][string]$LiteralPath
+    )
+
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        try {
+            $hash = $sha256.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $sha256.Dispose()
+    }
+    return [pscustomobject]@{ Hash = ([BitConverter]::ToString($hash).Replace('-', '')) }
+}
 
 function Invoke-TestScript {
     param([string]$Path, [string[]]$Arguments = @())
@@ -6,7 +27,7 @@ function Invoke-TestScript {
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & $powerShell -NoLogo -NoProfile -NonInteractive -File $Path @Arguments 2>&1 | Out-String
+        $output = & $powerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $Path @Arguments 2>&1 | Out-String
     } finally {
         $ErrorActionPreference = $savedPreference
     }

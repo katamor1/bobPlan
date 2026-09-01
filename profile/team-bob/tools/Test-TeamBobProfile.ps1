@@ -6,6 +6,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-TeamBobSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $stream = [System.IO.File]::OpenRead($Path); try { return ([BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()) } finally { $stream.Dispose() } } finally { $sha256.Dispose() }
+}
 $script:passed = 0
 $script:failed = 0
 $script:skipped = 0
@@ -209,13 +215,13 @@ if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
         $msdevAbsolute = Test-TeamBobAbsolutePath $environment.msdevPath
         $msdevExists = $msdevAbsolute -and (Test-Path -LiteralPath $environment.msdevPath -PathType Leaf)
         Add-TeamBobCheck 'MSDEV file' $msdevExists 'Absolute existing registered tool path'
-        $msdevHashValid = $msdevExists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $environment.msdevPath).Hash.ToLowerInvariant() -eq $environment.msdevSha256
+        $msdevHashValid = $msdevExists -and (Get-TeamBobSha256 $environment.msdevPath) -eq $environment.msdevSha256
         Add-TeamBobCheck 'MSDEV hash' $msdevHashValid 'Registered SHA-256 matches tool bytes'
 
         $bazaarAbsolute = Test-TeamBobAbsolutePath $environment.bazaarPath
         $bazaarExists = $bazaarAbsolute -and (Test-Path -LiteralPath $environment.bazaarPath -PathType Leaf)
         Add-TeamBobCheck 'Bazaar file' $bazaarExists 'Absolute existing registered tool path'
-        $bazaarHashValid = $bazaarExists -and (Get-FileHash -Algorithm SHA256 -LiteralPath $environment.bazaarPath).Hash.ToLowerInvariant() -eq $environment.bazaarSha256
+        $bazaarHashValid = $bazaarExists -and (Get-TeamBobSha256 $environment.bazaarPath) -eq $environment.bazaarSha256
         Add-TeamBobCheck 'Bazaar hash' $bazaarHashValid 'Registered SHA-256 matches tool bytes'
 
         $sandboxAbsolute = Test-TeamBobAbsolutePath $environment.sandboxRoot

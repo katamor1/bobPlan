@@ -129,6 +129,12 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $profileRoot = Join-Path $repoRoot 'profile'
 Assert-True (Test-Path -LiteralPath $profileRoot -PathType Container) 'profile directory exists'
 
+# Task 4 integration contracts: operator entry points, installed-ignore behavior,
+# executable Green sequence, clean delivery index, and PS 5.1 grammar.
+foreach ($relativePath in @('README.md', 'profile/team-bob/USAGE.md', 'tests/fixtures/README.md')) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $repoRoot $relativePath) -PathType Leaf) "Task 4 deliverable exists: $relativePath"
+}
+
 $requiredFiles = @(
     'AGENTS.md', '.bobignore.base', '.bzrignore.snippet', '.bob/custom_modes.yaml',
     '.bob/commands/bob-normalize-requirements.md', '.bob/commands/bob-draft-spec.md', '.bob/commands/bob-analyze-impact.md',
@@ -143,6 +149,42 @@ $requiredFiles = @(
     'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
 )
 foreach ($relativePath in $requiredFiles) { Assert-True (Test-Path -LiteralPath (Join-Path $profileRoot $relativePath) -PathType Leaf) "Required profile file exists: $relativePath" }
+
+$bobIgnore = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bobignore.base')
+foreach ($requiredVisible in @('baseline.doc', 'baseline.docx', 'baseline.xls', 'baseline.xlsx', 'team-bob-work/TASK-1/work-packet.md', 'team-bob-work/TASK-1/drafts/external-spec.md', 'team-bob-work/TASK-1/results/build-result.md')) {
+    $isHidden = switch -Regex ($requiredVisible) {
+        '\.doc$' { $bobIgnore -match '(?m)^\*\.doc$'; break }
+        '\.docx$' { $bobIgnore -match '(?m)^\*\.docx$'; break }
+        '\.xls$' { $bobIgnore -match '(?m)^\*\.xls$'; break }
+        '\.xlsx$' { $bobIgnore -match '(?m)^\*\.xlsx$'; break }
+        'team-bob-work' { $bobIgnore -match '(?m)^team-bob-work/'; break }
+    }
+    Assert-True (-not $isHidden) ".bobignore keeps required Bob input/output visible: $requiredVisible"
+}
+Assert-True ($bobIgnore -match '(?m)^\.bzr/$') '.bobignore hides Bazaar metadata'
+Assert-True ($bobIgnore -match '(?m)^secrets/$') '.bobignore hides secrets'
+Assert-True ($bobIgnore -match '(?m)^credentials/$') '.bobignore hides credentials'
+$bzrIgnore = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bzrignore.snippet')
+Assert-True ($bzrIgnore -match '(?m)^team-bob-work/$') '.bzrignore ignores the entire Team Bob work tree'
+
+$greenCommandText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/commands/bob-implement-green.md')
+$greenRuleText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/rules-green-implement/10-edit-build-loop.md')
+foreach ($greenInstruction in @($greenCommandText, $greenRuleText)) {
+    $make0 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 0')
+    $make1 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 1')
+    $make2 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Make -Attempt 2')
+    $rebuild2 = $greenInstruction.IndexOf('Invoke-Vc6Build.ps1 -WorkPacket $1 -Action Rebuild -Attempt 2')
+    Assert-True ($make0 -ge 0 -and $make1 -gt $make0 -and $make2 -gt $make1 -and $rebuild2 -gt $make2) 'Green instructions provide executable Make/repair/Rebuild calls in order'
+    Assert-True ($greenInstruction -match 'CODE_FAILED_RETRYABLE' -and $greenInstruction -match 'CODE_FAILED_STOP' -and $greenInstruction -match 'ENVIRONMENT_FAILED' -and $greenInstruction -match 'TIMED_OUT' -and $greenInstruction -match 'INTEGRITY_FAILED') 'Green instructions handle every stopping build status explicitly'
+}
+
+$trackedScratch = @(git -C $repoRoot ls-files .superpowers)
+Assert-Equal $trackedScratch.Count 0 'No .superpowers scratch/report entry is tracked in the deliverable'
+foreach ($scriptPath in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scripts'), (Join-Path $profileRoot 'team-bob/tools') -Filter '*.ps1' -File)) {
+    $tokens = $null; $parseErrors = $null
+    [System.Management.Automation.Language.Parser]::ParseFile($scriptPath.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+    Assert-Equal @($parseErrors).Count 0 "PowerShell 5.1 grammar parses: $($scriptPath.FullName)"
+}
 
 $manifestPath = Join-Path $profileRoot 'team-bob/profile-manifest.json'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
@@ -282,3 +324,5 @@ Write-Host "PASS: $script:Assertions package contract assertions succeeded."
 
 . (Join-Path $PSScriptRoot 'Test-Tools.ps1')
 . (Join-Path $PSScriptRoot 'Test-BuildTools.ps1')
+
+exit 0
