@@ -1,0 +1,12 @@
+<!-- bob-contract: {"requiredSections":["ReqIDs","Acceptance Criteria","Test Cases","Build Evidence","Human Approval"]} -->
+# Test Specification
+
+## ReqIDs
+
+## Acceptance Criteria
+
+## Test Cases
+
+## Build Evidence
+
+## Human Approval

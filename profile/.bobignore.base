@@ -1,0 +1,10 @@
+# Copy into a repository-local .bobignore when installing this profile.
+.bzr/
+.git/
+*.doc
+*.docx
+*.xls
+*.xlsx
+secrets/
+credentials/
+team-bob-work/*/results/

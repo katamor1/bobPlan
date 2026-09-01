@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://team-bob.example/schema/vc6-build-targets-0.1.0-poc.json",
+  "title": "Team Bob VC6 Build Targets",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profiles"],
+  "properties": {
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "enabled", "workspace", "makeCommand", "rebuildCommand", "timeoutSeconds"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean"},
+          "workspace": {"type": "string", "minLength": 1},
+          "makeCommand": {"type": "string", "minLength": 1},
+          "rebuildCommand": {"type": "string", "minLength": 1},
+          "timeoutSeconds": {"type": "integer", "minimum": 1}
+        }
+      }
+    }
+  }
+}

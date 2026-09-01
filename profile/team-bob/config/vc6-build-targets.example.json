@@ -1,0 +1,12 @@
+{
+  "profiles": [
+    {
+      "id": "example-local-vc6",
+      "enabled": false,
+      "workspace": "C:\\approved-local-workspace\\project.dsw",
+      "makeCommand": "msdev project.dsw /make \"Project - Win32 Release\"",
+      "rebuildCommand": "msdev project.dsw /rebuild \"Project - Win32 Release\"",
+      "timeoutSeconds": 900
+    }
+  ]
+}

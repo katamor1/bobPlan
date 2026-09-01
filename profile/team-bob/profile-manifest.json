@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0-poc",
+  "profile": {
+    "id": "team-bob-vc6-bazaar",
+    "name": "Team Bob VC6 Bazaar Profile"
+  },
+  "compatibility": {
+    "operatingSystem": "Windows",
+    "ide": "IBM Bob IDE 2.1.x",
+    "toolchain": "Visual C++ 6.0",
+    "vcs": "Bazaar"
+  },
+  "contracts": {
+    "workPacketSchema": "config/work-packet.schema.json",
+    "buildTargetSchema": "config/vc6-build-targets.schema.json",
+    "buildTargets": "config/vc6-build-targets.json",
+    "modes": ".bob/custom_modes.yaml",
+    "rules": "rules/"
+  }
+}

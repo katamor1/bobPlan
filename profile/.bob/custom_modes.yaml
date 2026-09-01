@@ -1,0 +1,83 @@
+# No basic-operation group exception is required for this package.
+customModes:
+  - slug: req-spec-draft
+    groups:
+      - read
+      - edit
+    editScopes:
+      - "team-bob-work/<Task>/drafts/**"
+    excludedGroups:
+      - mcp
+      - skill
+      - workflow
+      - todo
+      - subtask
+      - subagent
+      - mode
+  - slug: impact-review
+    groups:
+      - read
+      - edit
+    editScopes:
+      - "team-bob-work/<Task>/drafts/**"
+    excludedGroups:
+      - mcp
+      - skill
+      - workflow
+      - todo
+      - subtask
+      - subagent
+      - mode
+  - slug: green-implement
+    groups:
+      - read
+      - edit
+      - execute
+    editScopes:
+      - "team-bob-work/<Task>/results/**"
+    allowedExtensions:
+      - .c
+      - .cc
+      - .cpp
+      - .cxx
+      - .h
+      - .hh
+      - .hpp
+      - .hxx
+      - .inl
+    excludedGroups:
+      - mcp
+      - skill
+      - workflow
+      - todo
+      - subtask
+      - subagent
+      - mode
+  - slug: change-review
+    groups:
+      - read
+      - edit
+    editScopes:
+      - "team-bob-work/<Task>/drafts/**"
+    excludedGroups:
+      - mcp
+      - skill
+      - workflow
+      - todo
+      - subtask
+      - subagent
+      - mode
+  - slug: test-draft
+    groups:
+      - read
+      - edit
+    editScopes:
+      - "team-bob-work/<Task>/drafts/**"
+    excludedGroups:
+      - mcp
+      - skill
+      - workflow
+      - todo
+      - subtask
+      - subagent
+      - mode
