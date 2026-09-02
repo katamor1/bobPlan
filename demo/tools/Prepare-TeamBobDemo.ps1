@@ -214,16 +214,40 @@ function Assert-DemoRestrictedAcl {
 function Get-DemoDistributionEntries {
     param([string]$Root)
     $records = @()
-    foreach ($relativeRoot in @('profile', 'demo')) {
+    $relativeRoots = @('profile', 'demo', 'scripts')
+    $bazaarMetadata = Join-Path $Root '.bzr'
+    if (Test-Path -LiteralPath $bazaarMetadata -PathType Container) { $relativeRoots += '.bzr' }
+    elseif (Test-Path -LiteralPath $bazaarMetadata) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Distribution .bzr path has an unsupported type.') }
+    foreach ($relativeRoot in $relativeRoots) {
         $sourceRoot = Join-Path $Root $relativeRoot
-        [void](Get-TeamBobPhysicalPath $sourceRoot "Distribution $relativeRoot root" 'Container' 'INTEGRITY_FAILED')
-        foreach ($item in @(Get-ChildItem -LiteralPath $sourceRoot -File -Force -Recurse | Sort-Object FullName)) {
-            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Distribution contains a reparse file: $($item.FullName)") }
-            [void](Get-TeamBobPhysicalPath $item.FullName 'Distribution file' 'Leaf' 'INTEGRITY_FAILED')
-            $records += [pscustomobject][ordered]@{
-                relativePath = Get-DemoRelativePath $Root $item.FullName
-                length = [int64]$item.Length
-                sha256 = Get-DemoHash $item.FullName
+        $sourcePhysical = Get-TeamBobPhysicalPath $sourceRoot "Distribution $relativeRoot root" 'Container' 'INTEGRITY_FAILED'
+        $pending = New-Object System.Collections.ArrayList
+        [void]$pending.Add($sourceRoot)
+        while ($pending.Count -gt 0) {
+            $directory = [string]$pending[0]
+            $pending.RemoveAt(0)
+            foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force | Sort-Object Name)) {
+                if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Distribution contains a forbidden reparse/alias entry: $($item.FullName)")
+                }
+                if ($item.PSIsContainer) {
+                    $physical = Get-TeamBobPhysicalPath $item.FullName 'Distribution directory' 'Container' 'INTEGRITY_FAILED'
+                    Assert-TeamBobPhysicalChild $physical $sourcePhysical 'Distribution directory' 'INTEGRITY_FAILED'
+                    $records += [pscustomobject][ordered]@{
+                        relativePath = (Get-DemoRelativePath $Root $item.FullName) + '/'
+                        length = [int64]-1
+                        sha256 = ('0' * 64)
+                    }
+                    [void]$pending.Add($item.FullName)
+                } else {
+                    $physical = Get-TeamBobPhysicalPath $item.FullName 'Distribution file' 'Leaf' 'INTEGRITY_FAILED'
+                    Assert-TeamBobPhysicalChild $physical $sourcePhysical 'Distribution file' 'INTEGRITY_FAILED'
+                    $records += [pscustomobject][ordered]@{
+                        relativePath = Get-DemoRelativePath $Root $item.FullName
+                        length = [int64]$item.Length
+                        sha256 = Get-DemoHash $item.FullName
+                    }
+                }
             }
         }
     }
@@ -322,6 +346,7 @@ function New-DemoMarker {
         }
         hashes = [ordered]@{
             catalog = $null
+            catalogTransition = $null
             adapter = $null
             buildManifest = $null
             lifecycleCommon = $null
@@ -353,7 +378,7 @@ function Assert-DemoMarkerContract {
         'distributionInventory', 'usageLog', 'negativePacket', 'environmentRegistration', 'environmentBackupMetadata'
     ) 'Demo marker paths' 'INTEGRITY_FAILED'
     Assert-TeamBobExactProperties $Marker.hashes @(
-        'catalog', 'adapter', 'buildManifest', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'usageLog', 'negativePacket',
+        'catalog', 'catalogTransition', 'adapter', 'buildManifest', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'usageLog', 'negativePacket',
         'environmentBackupMetadata', 'demoEnvironment'
     ) 'Demo marker hashes' 'INTEGRITY_FAILED'
     Assert-TeamBobExactProperties $Marker.approval @('recordId', 'recordedAt', 'approvalRelativePath', 'approvalSha256') 'Demo marker approval' 'INTEGRITY_FAILED'
@@ -374,6 +399,11 @@ function Assert-DemoMarkerContract {
     }
     foreach ($property in $expectedPaths.Keys) {
         if ([string]$Marker.paths.$property -cne [string]$expectedPaths[$property]) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Demo marker path '$property' is invalid.") }
+    }
+    if ($null -ne $Marker.hashes.catalogTransition) {
+        if ([string]$Marker.hashes.catalogTransition -notmatch '^[0-9a-f]{64}$' -or @('APPROVING', 'RESTORING') -notcontains [string]$Marker.state) {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo marker catalog transition hash is invalid for its lifecycle state.')
+        }
     }
 }
 
@@ -636,6 +666,35 @@ function Assert-DemoQualificationRecord {
     return $raw
 }
 
+function Assert-DemoApprovalRecord {
+    param([object]$Marker, [string]$Root, [string]$ExpectedRecordId)
+    $expectedRelativePath = 'evidence/qualification/demo-qualification-approval.json'
+    if ($Marker.approval.recordId -cne $ExpectedRecordId -or $Marker.approval.approvalRelativePath -cne $expectedRelativePath -or
+        [string]$Marker.approval.approvalSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approval marker binding is invalid.')
+    }
+    $approvalPath = Resolve-DemoRelativePath $Root $expectedRelativePath 'Approval record' 'File'
+    Assert-DemoHashField $approvalPath $Marker.approval.approvalSha256 'Approval record'
+    $record = Get-DemoJson $approvalPath 'Approval record'
+    Assert-TeamBobExactProperties $record @(
+        'schemaVersion', 'banner', 'recordType', 'recordId', 'demoProfileId', 'demoInstanceId', 'pcId',
+        'rawQualificationRelativePath', 'rawQualificationSha256', 'acceptedAt', 'acceptNotVc6', 'approved', 'vc6Qualified',
+        'targetPcReviewRole', 'operationsApprovalRole'
+    ) 'Approval record' 'INTEGRITY_FAILED'
+    if ($record.schemaVersion -cne '1.0' -or $record.banner -cne $script:DemoBanner -or $record.recordType -cne 'DEMO_ONLY_QUALIFICATION_APPROVAL' -or
+        $record.recordId -cne $ExpectedRecordId -or $record.demoProfileId -cne $script:DemoProfileId -or $record.demoInstanceId -cne $Marker.demoInstanceId -or
+        $record.pcId -cne [Environment]::MachineName -or $record.rawQualificationRelativePath -cne $Marker.paths.rawQualification -or
+        $record.rawQualificationSha256 -cne $Marker.hashes.rawQualification -or $record.acceptedAt -cne $Marker.approval.recordedAt -or
+        $record.acceptNotVc6 -cne 'YES' -or $record.approved -ne $true -or $record.vc6Qualified -ne $false -or
+        $record.targetPcReviewRole -cne 'DEMO-TARGET-PC-OWNER-ROLE' -or $record.operationsApprovalRole -cne 'DEMO-OPERATIONS-OWNER-ROLE') {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approval record identity, evidence binding, roles, or NOT-VC6 decision is invalid.')
+    }
+    try {
+        [void][DateTimeOffset]::Parse([string]$record.acceptedAt, [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approval record timestamp is invalid.') }
+    return $record
+}
+
 function Assert-DemoStagedArtifacts {
     param([object]$Marker, [string]$Root, [string]$Distribution, [string]$MsBuild, [string]$Bazaar, [switch]$RequireEligible)
     if ($Marker.distributionRoot -cne $Distribution -or $Marker.msBuildPath -cne $MsBuild -or $Marker.bazaarPath -cne $Bazaar -or
@@ -677,6 +736,7 @@ function Invoke-DemoStage {
     if (Test-Path -LiteralPath $Root -PathType Container) {
         [void](Get-TeamBobPhysicalPath $Root 'Existing DemoRoot' 'Container' 'INTEGRITY_FAILED')
         if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Existing DemoRoot has no matching lifecycle marker.') }
+        [void](Get-TeamBobPhysicalPath $markerPath 'Demo root marker' 'Leaf' 'INTEGRITY_FAILED')
         $marker = Get-DemoJson $markerPath 'Demo root marker'
         Assert-DemoMarkerContract $marker $Root
         if ($marker.state -cne 'STAGED') { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Stage cannot reuse marker state $($marker.state).") }
@@ -847,7 +907,11 @@ function Invoke-DemoStage {
         Write-Output "$script:DemoBannerAscii`r`nSTAGED $Root`r`nRAW_PROTOCOL_EVIDENCE $rawPath`r`nDEMO_PROFILE_DISABLED $script:DemoProfileId`r`nOPEN_QA_NEGATIVE_PACKET $negativePath`r`nOPEN_QA_NEGATIVE_PACKET_SHA256 $($marker.hashes.negativePacket)`r`nRUNTIME_USAGE_LOG $usagePath"
     } catch {
         $stageFailure = $_.Exception
-        if ($environmentSwitched -and $null -ne $backupMetadata) {
+        $environmentMatchesDemo = $false
+        if ($null -ne $backupMetadata -and (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
+            try { $environmentMatchesDemo = (Get-DemoHash $environmentPath) -ceq [string]$backupMetadata.demoEnvironmentSha256 } catch { $environmentMatchesDemo = $false }
+        }
+        if (($environmentSwitched -or $environmentMatchesDemo) -and $null -ne $backupMetadata) {
             try { Restore-DemoEnvironmentAfterStageFailure $environmentPath $backupMetadata $backupPath; $environmentSwitched = $false }
             catch { $stageFailure = New-Object System.InvalidOperationException(($stageFailure.Message + ' Automatic environment rollback also failed: ' + $_.Exception.Message)) }
         }
@@ -867,13 +931,13 @@ function Invoke-DemoApproval {
     [void](Get-TeamBobPhysicalPath $Root 'DemoRoot' 'Container' 'INTEGRITY_FAILED')
     $markerPath = Join-Path $Root $script:DemoMarkerName
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'DemoRoot marker is missing.') }
+    [void](Get-TeamBobPhysicalPath $markerPath 'Demo root marker' 'Leaf' 'INTEGRITY_FAILED')
     $marker = Get-DemoJson $markerPath 'Demo root marker'
     Assert-DemoMarkerContract $marker $Root
     if ($marker.state -ceq 'APPROVED') {
         if ($marker.approval.recordId -cne $ApprovedRecordId) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approved DemoRoot cannot be reused with another RecordId.') }
         [void](Assert-DemoStagedArtifacts $marker $Root $Distribution $MsBuild $Bazaar -RequireEligible)
-        $approvalPath = Resolve-DemoRelativePath $Root $marker.approval.approvalRelativePath 'Approval record' 'File'
-        Assert-DemoHashField $approvalPath $marker.approval.approvalSha256 'Approval record'
+        [void](Assert-DemoApprovalRecord $marker $Root $ApprovedRecordId)
         Write-Output "$script:DemoBannerAscii`r`nIDENTICAL APPROVED $ApprovedRecordId"
         return
     }
@@ -894,13 +958,18 @@ function Invoke-DemoApproval {
     $approvalPath = Join-Path $Root ($approvalRelativePath.Replace('/', '\'))
     if (Test-Path -LiteralPath $approvalPath) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approval evidence already exists before transition.') }
     $approvalJournalPath = Join-Path $Root 'evidence\lifecycle\approval-journal.json'
+    $recordedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    $enabledCatalog = New-DemoDisabledCatalog ([Environment]::MachineName) $recordedAt $true $ApprovedRecordId
+    $enabledCatalogHash = Get-DemoBytesHash (ConvertTo-DemoJsonBytes $enabledCatalog)
     $marker.state = 'APPROVING'
     $marker.approval.recordId = $ApprovedRecordId
+    $marker.approval.recordedAt = $recordedAt
+    $marker.approval.approvalRelativePath = $approvalRelativePath
+    $marker.hashes.catalogTransition = $enabledCatalogHash
     $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
     Write-DemoJsonAtomic $markerPath $marker
     Write-DemoJournal $approvalJournalPath $marker.demoInstanceId 'APPROVING' 'evidence-revalidated'
     try {
-        $recordedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
         $approvalRecord = [ordered]@{
             schemaVersion = '1.0'; banner = $script:DemoBanner; recordType = 'DEMO_ONLY_QUALIFICATION_APPROVAL'
             recordId = $ApprovedRecordId; demoProfileId = $script:DemoProfileId; demoInstanceId = $marker.demoInstanceId
@@ -910,28 +979,52 @@ function Invoke-DemoApproval {
             operationsApprovalRole = 'DEMO-OPERATIONS-OWNER-ROLE'
         }
         Write-DemoJsonCreateNew $approvalPath $approvalRecord
-        $enabledCatalog = New-DemoDisabledCatalog ([Environment]::MachineName) $recordedAt $true $ApprovedRecordId
-        Write-DemoJsonAtomic $catalogPath $enabledCatalog
-        $marker.hashes.catalog = Get-DemoHash $catalogPath
-        $marker.approval.recordedAt = $recordedAt
-        $marker.approval.approvalRelativePath = $approvalRelativePath
         $marker.approval.approvalSha256 = Get-DemoHash $approvalPath
+        [void](Assert-DemoApprovalRecord $marker $Root $ApprovedRecordId)
+        Assert-DemoHashField $catalogPath $marker.hashes.catalog 'Demo catalog before approval transition'
+        Write-DemoJsonAtomic $catalogPath $enabledCatalog
+        if ((Get-DemoHash $catalogPath) -cne $enabledCatalogHash) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Enabled demo catalog hash does not match the published transition hash.') }
+        $marker.hashes.catalog = $enabledCatalogHash
+        $marker.hashes.catalogTransition = $null
         $marker.state = 'APPROVED'
         $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
         Write-DemoJsonAtomic $markerPath $marker
         Write-DemoJournal $approvalJournalPath $marker.demoInstanceId 'APPROVED' 'demo-profile-enabled'
         Write-Output "$script:DemoBannerAscii`r`nAPPROVED_DEMO_ONLY $ApprovedRecordId`r`nVC6_QUALIFIED false"
     } catch {
+        $approvalFailure = $_.Exception
         try {
             if (Test-Path -LiteralPath $catalogPath -PathType Leaf) {
+                $currentCatalogHash = Get-DemoHash $catalogPath
                 $currentCatalog = Get-DemoJson $catalogPath 'Demo catalog after failed approval'
-                if (@($currentCatalog.profiles).Count -eq 1 -and $currentCatalog.profiles[0].id -ceq $script:DemoProfileId) {
-                    Write-DemoJsonAtomic $catalogPath (New-DemoDisabledCatalog ([Environment]::MachineName) ([DateTimeOffset]::UtcNow.ToString('o')) $false 'APPROVAL-FAILED')
+                Assert-TeamBobExactProperties $currentCatalog @('profiles') 'Demo catalog after failed approval' 'INTEGRITY_FAILED'
+                if (@($currentCatalog.profiles).Count -ne 1 -or $currentCatalog.profiles[0].id -cne $script:DemoProfileId -or -not ($currentCatalog.profiles[0].enabled -is [bool])) {
+                    throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Failed approval found an unknown demo catalog identity.')
+                }
+                if ($currentCatalogHash -cne [string]$marker.hashes.catalog -and $currentCatalogHash -cne $enabledCatalogHash) {
+                    throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Failed approval refused to mutate an unknown demo catalog hash.')
+                }
+                if ($currentCatalog.profiles[0].enabled) {
+                    $currentCatalog.profiles[0].enabled = $false
+                    $disabledCatalogHash = Get-DemoBytesHash (ConvertTo-DemoJsonBytes $currentCatalog)
+                    $marker.state = 'APPROVING'
+                    $marker.hashes.catalogTransition = $disabledCatalogHash
+                    $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+                    Write-DemoJsonAtomic $markerPath $marker
+                    Write-DemoJsonAtomic $catalogPath $currentCatalog
+                    if ((Get-DemoHash $catalogPath) -cne $disabledCatalogHash) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Failed approval could not verify the disabled catalog hash.') }
+                    $marker.hashes.catalog = $disabledCatalogHash
                 }
             }
+            $marker.state = 'APPROVING'
+            $marker.hashes.catalogTransition = $null
+            $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+            Write-DemoJsonAtomic $markerPath $marker
             Write-DemoJournal $approvalJournalPath $marker.demoInstanceId 'APPROVING' 'approval-failed-profile-disabled'
-        } catch { }
-        throw
+        } catch {
+            throw (New-Object System.InvalidOperationException(($approvalFailure.Message + ' Approval rollback also failed: ' + $_.Exception.Message)))
+        }
+        throw $approvalFailure
     }
 }
 

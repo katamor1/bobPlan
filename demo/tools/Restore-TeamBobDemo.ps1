@@ -92,6 +92,12 @@ function ConvertTo-DemoRestoreJsonBytes {
     return (New-Object System.Text.UTF8Encoding($false)).GetBytes(($Value | ConvertTo-Json -Depth 40) + "`r`n")
 }
 
+function Get-DemoRestoreBytesHash {
+    param([byte[]]$Bytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
+}
+
 function Write-DemoRestoreJsonAtomic {
     param([string]$Path, [object]$Value, [string]$TrustedParentPhysical = '')
     $text = (New-Object System.Text.UTF8Encoding($false)).GetString((ConvertTo-DemoRestoreJsonBytes $Value))
@@ -141,7 +147,7 @@ function Assert-DemoRestoreMarker {
         'distributionInventory', 'usageLog', 'negativePacket', 'environmentRegistration', 'environmentBackupMetadata'
     ) 'Demo marker paths' 'INTEGRITY_FAILED'
     Assert-TeamBobExactProperties $Marker.hashes @(
-        'catalog', 'adapter', 'buildManifest', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'usageLog', 'negativePacket',
+        'catalog', 'catalogTransition', 'adapter', 'buildManifest', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'usageLog', 'negativePacket',
         'environmentBackupMetadata', 'demoEnvironment'
     ) 'Demo marker hashes' 'INTEGRITY_FAILED'
     Assert-TeamBobExactProperties $Marker.approval @('recordId', 'recordedAt', 'approvalRelativePath', 'approvalSha256') 'Demo marker approval' 'INTEGRITY_FAILED'
@@ -162,6 +168,12 @@ function Assert-DemoRestoreMarker {
     }
     foreach ($property in $expectedPaths.Keys) {
         if ([string]$Marker.paths.$property -cne [string]$expectedPaths[$property]) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Demo marker path '$property' is invalid.") }
+    }
+    if ([string]$Marker.hashes.catalog -notmatch '^[0-9a-f]{64}$') { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo marker catalog hash is invalid.') }
+    if ($null -ne $Marker.hashes.catalogTransition) {
+        if ([string]$Marker.hashes.catalogTransition -notmatch '^[0-9a-f]{64}$' -or @('APPROVING', 'RESTORING') -notcontains [string]$Marker.state) {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo marker catalog transition hash is invalid for its lifecycle state.')
+        }
     }
 }
 
@@ -238,15 +250,15 @@ function Get-DemoRestoreBackupContext {
     return [pscustomobject]@{ Metadata = $metadata; MetadataPath = $metadataPath; BackupPath = $backupPath; EnvironmentPath = $environmentPath }
 }
 
-function Set-DemoRestoreCatalogDisabled {
-    param([string]$CatalogPath)
-    $catalog = Get-DemoRestoreJson $CatalogPath 'Demo catalog'
+function Get-DemoRestoreDisabledCatalog {
+    param([object]$Catalog)
+    $catalog = $Catalog
     Assert-TeamBobExactProperties $catalog @('profiles') 'Demo catalog' 'INTEGRITY_FAILED'
     if (@($catalog.profiles).Count -ne 1 -or $catalog.profiles[0].id -cne $script:DemoProfileId -or -not ($catalog.profiles[0].enabled -is [bool])) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Restore found an unexpected demo catalog shape.')
     }
     $catalog.profiles[0].enabled = $false
-    Write-DemoRestoreJsonAtomic $CatalogPath $catalog
+    return $catalog
 }
 
 function Write-DemoRestoreJournal {
@@ -269,8 +281,18 @@ try {
     Assert-DemoRestoreMarker $marker $root
     $backup = Get-DemoRestoreBackupContext $marker $root
     $catalogPath = Resolve-DemoRestoreRelativePath $root $marker.paths.catalog 'Demo catalog' 'File'
+    $currentCatalogHash = Get-DemoRestoreHash $catalogPath
+    $catalogMatchesCurrent = $currentCatalogHash -ceq [string]$marker.hashes.catalog
+    $catalogMatchesTransition = @('APPROVING', 'RESTORING') -contains [string]$marker.state -and
+        $null -ne $marker.hashes.catalogTransition -and $currentCatalogHash -ceq [string]$marker.hashes.catalogTransition
+    if (-not $catalogMatchesCurrent -and -not $catalogMatchesTransition) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo catalog hash matches neither the marker current hash nor its declared partial-transition hash.')
+    }
     $catalog = Get-DemoRestoreJson $catalogPath 'Demo catalog'
-    if (@($catalog.profiles).Count -ne 1 -or $catalog.profiles[0].id -cne $script:DemoProfileId) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo catalog identity is invalid.') }
+    Assert-TeamBobExactProperties $catalog @('profiles') 'Demo catalog' 'INTEGRITY_FAILED'
+    if (@($catalog.profiles).Count -ne 1 -or $catalog.profiles[0].id -cne $script:DemoProfileId -or -not ($catalog.profiles[0].enabled -is [bool])) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo catalog identity is invalid.')
+    }
 
     if ($marker.state -ceq 'RESTORED') {
         if ($catalog.profiles[0].enabled -ne $false) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'RESTORED marker has an enabled demo catalog.') }
@@ -289,13 +311,20 @@ try {
     }
 
     $journalPath = Join-Path $root 'evidence\lifecycle\restore-journal.json'
+    $disabledCatalog = Get-DemoRestoreDisabledCatalog $catalog
+    $disabledCatalogHash = Get-DemoRestoreBytesHash (ConvertTo-DemoRestoreJsonBytes $disabledCatalog)
     $marker.state = 'RESTORING'
+    $marker.hashes.catalog = $currentCatalogHash
+    $marker.hashes.catalogTransition = $disabledCatalogHash
     $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
     Write-DemoRestoreJsonAtomic $markerPath $marker $rootPhysical
     Write-DemoRestoreJournal $journalPath $marker.demoInstanceId 'RESTORING' 'restore-started'
 
-    Set-DemoRestoreCatalogDisabled $catalogPath
-    $marker.hashes.catalog = Get-DemoRestoreHash $catalogPath
+    if ((Get-DemoRestoreHash $catalogPath) -cne $currentCatalogHash) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo catalog changed after restore preflight; mutation refused.') }
+    if ($currentCatalogHash -cne $disabledCatalogHash) { Write-DemoRestoreJsonAtomic $catalogPath $disabledCatalog }
+    if ((Get-DemoRestoreHash $catalogPath) -cne $disabledCatalogHash) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Disabled demo catalog does not match the published restore-transition hash.') }
+    $marker.hashes.catalog = $disabledCatalogHash
+    $marker.hashes.catalogTransition = $null
     Write-DemoRestoreJsonAtomic $markerPath $marker $rootPhysical
     Write-DemoRestoreJournal $journalPath $marker.demoInstanceId 'RESTORING' 'demo-profile-disabled'
 
@@ -324,6 +353,7 @@ try {
     Write-DemoRestoreJournal $journalPath $marker.demoInstanceId 'RESTORING' 'environment-restored'
 
     $marker.state = 'RESTORED'
+    $marker.hashes.catalogTransition = $null
     $marker.updatedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
     Write-DemoRestoreJsonAtomic $markerPath $marker $rootPhysical
     Write-DemoRestoreJournal $journalPath $marker.demoInstanceId 'RESTORED' 'restore-complete-data-retained'

@@ -113,6 +113,13 @@ try {
     }
     $recordPath = Join-Path $EvidenceRoot 'demo-adapter-qualification.json'
     Write-FixtureText $recordPath (($record | ConvertTo-Json -Depth 20) + "`r`n")
+    if ($env:TEAM_BOB_DEMO_TEST_QUALIFICATION_MODE -ceq 'mutate-distribution-bzr') {
+        [System.IO.File]::AppendAllText(
+            (Join-Path $DistributionRoot '.bzr\sentinel'),
+            "INTENTIONAL DISTRIBUTION MUTATION`r`n",
+            (New-Object System.Text.UTF8Encoding($false))
+        )
+    }
     Write-Output 'MSBUILD DEMO ADAPTER - NOT VC6 QUALIFICATION'
     if ($passed) { exit 0 }
     exit 1

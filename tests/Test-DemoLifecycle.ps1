@@ -348,8 +348,18 @@ exit $LASTEXITCODE
     $marker.hashes.environmentBackupMetadata = Get-DemoLifecycleHash $backupMetadataPath
     Write-DemoLifecycleJson $markerPath $marker
 
+    $stagedMarkerTarget = Join-Path $demoRoot 'evidence\staged-marker-target.json'
+    [System.IO.File]::Move($markerPath, $stagedMarkerTarget)
+    New-DemoLifecycleSymbolicLink $markerPath $stagedMarkerTarget
+    $stagedMarkerLinkResult = Invoke-DemoLifecycleScript $preparePath ($stageArgs + @('-Stage'))
+    Assert-True ($stagedMarkerLinkResult.ExitCode -ne 0) 'Prepare Stage rejects an existing lifecycle marker that is a reparse file before reading it'
+    Assert-True ($stagedMarkerLinkResult.Output -match 'reparse|alias') 'Prepare marker reparse rejection identifies the unsafe boundary'
+    [System.IO.File]::Delete($markerPath)
+    [System.IO.File]::Move($stagedMarkerTarget, $markerPath)
+
     $rawHashBeforeApproval = Get-DemoLifecycleHash $rawPath
     $demoEnvironmentHashBeforeApproval = Get-DemoLifecycleHash $environmentPath
+    $disabledCatalogHashBeforeApproval = Get-DemoLifecycleHash $catalogPath
     $approval = Invoke-DemoLifecycleScript $preparePath $approveArgs
     Assert-Equal $approval.ExitCode 0 'Approval succeeds only with complete revalidated qualification evidence and explicit acceptance'
     Assert-True ($approval.Output -match 'NOT VC6 QUALIFICATION') 'Approval output retains the disclaimer'
@@ -376,9 +386,49 @@ exit $LASTEXITCODE
     Assert-Equal $approvalRerun.ExitCode 0 'Approval is idempotent only for the same Record ID'
     Assert-True ($approvalRerun.Output -match 'IDENTICAL') 'Idempotent approval reports IDENTICAL'
     Assert-Equal (Get-DemoLifecycleFingerprint $demoRoot) $approvedFingerprint 'Idempotent approval changes no evidence'
+
+    $approvalMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath)
+    $alternateApprovalPath = Join-Path $demoRoot 'evidence\qualification\alternate-approval.json'
+    Write-DemoLifecycleJson $alternateApprovalPath ([ordered]@{ schemaVersion = 'TAMPERED' })
+    $tamperedApprovalMarker = Get-DemoLifecycleJson $markerPath
+    $tamperedApprovalMarker.approval.approvalRelativePath = 'evidence/qualification/alternate-approval.json'
+    $tamperedApprovalMarker.approval.approvalSha256 = Get-DemoLifecycleHash $alternateApprovalPath
+    Write-DemoLifecycleJson $markerPath $tamperedApprovalMarker
+    $tamperedApprovalRerun = Invoke-DemoLifecycleScript $preparePath $approveArgs
+    Assert-True ($tamperedApprovalRerun.ExitCode -ne 0) 'Approved rerun rejects a tandem-tampered approval path and record even when its marker hash matches'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].enabled $true 'Approval-record tamper rejection leaves the catalog unchanged'
+    Assert-Equal (Get-DemoLifecycleHash $environmentPath) $demoEnvironmentHashBeforeApproval 'Approval-record tamper rejection leaves the environment unchanged'
+    [System.IO.File]::WriteAllBytes($markerPath, $approvalMarkerBytes)
+    [System.IO.File]::Delete($alternateApprovalPath)
+
     $differentApproval = Invoke-DemoLifecycleScript $preparePath ($stageArgs + @('-ApproveQualification', '-RecordId', 'DEMO-QUAL-TEST-OTHER', '-AcceptNotVc6'))
     Assert-True ($differentApproval.ExitCode -ne 0) 'An approved root rejects a different Record ID'
     Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'APPROVED' 'Rejected duplicate approval preserves APPROVED state'
+
+    $approvedCatalogBytes = [System.IO.File]::ReadAllBytes($catalogPath)
+    $tamperedCatalog = Get-DemoLifecycleJson $catalogPath
+    $tamperedCatalog.profiles[0].target = 'TAMPERED TARGET - MUST NOT BE RESTORED'
+    Write-DemoLifecycleJson $catalogPath $tamperedCatalog
+    $catalogTamperRestore = Invoke-DemoLifecycleScript $restorePath @('-DemoRoot', $demoRoot, '-WhatIf')
+    Assert-True ($catalogTamperRestore.ExitCode -ne 0) 'Restore rejects a demo catalog whose hash no longer matches the lifecycle marker'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].target 'TAMPERED TARGET - MUST NOT BE RESTORED' 'Rejected catalog restore performs no mutation'
+    Assert-Equal (Get-DemoLifecycleHash $environmentPath) $demoEnvironmentHashBeforeApproval 'Rejected catalog restore leaves the demo environment registration unchanged'
+    [System.IO.File]::WriteAllBytes($catalogPath, $approvedCatalogBytes)
+
+    $approvedMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath)
+    $partialApprovalMarker = Get-DemoLifecycleJson $markerPath
+    $partialApprovalMarker.state = 'APPROVING'
+    $partialApprovalMarker.hashes.catalog = $disabledCatalogHashBeforeApproval
+    if ($null -eq $partialApprovalMarker.hashes.PSObject.Properties['catalogTransition']) {
+        $partialApprovalMarker.hashes | Add-Member -NotePropertyName catalogTransition -NotePropertyValue (Get-DemoLifecycleHash $catalogPath)
+    } else {
+        $partialApprovalMarker.hashes.catalogTransition = Get-DemoLifecycleHash $catalogPath
+    }
+    Write-DemoLifecycleJson $markerPath $partialApprovalMarker
+    $partialApprovalResume = Invoke-DemoLifecycleScript $restorePath @('-DemoRoot', $demoRoot, '-WhatIf')
+    Assert-Equal $partialApprovalResume.ExitCode 0 'Restore accepts only a marker-declared catalog transition hash when resuming APPROVING'
+    Assert-True ($partialApprovalResume.Output -match 'WHATIF RESTORE') 'Partial approval recovery remains non-mutating under WhatIf'
+    [System.IO.File]::WriteAllBytes($markerPath, $approvedMarkerBytes)
 
     $externalCommonBytes = [System.IO.File]::ReadAllBytes($externalCommonPath)
     $externalCommonSentinel = Join-Path $demoRoot 'external-common-executed.txt'
@@ -403,8 +453,26 @@ exit $LASTEXITCODE
     $workspaceCommonPath = Join-Path $workspace 'team-bob\tools\TeamBob-BuildCommon.ps1'
     $workspaceCommonSentinel = Join-Path $demoRoot 'workspace-common-executed.txt'
     Write-DemoLifecycleText $workspaceCommonPath ("[System.IO.File]::WriteAllText('" + $workspaceCommonSentinel.Replace("'", "''") + "','EXECUTED'); throw 'Bob-editable workspace helper executed'`r`n")
+
+    $partialRecoveryMarker = Get-DemoLifecycleJson $markerPath
+    $partialRecoveryMarker.state = 'APPROVING'
+    $partialRecoveryMarker.hashes.catalog = $disabledCatalogHashBeforeApproval
+    $partialRecoveryMarker.hashes.catalogTransition = Get-DemoLifecycleHash $catalogPath
+    Write-DemoLifecycleJson $markerPath $partialRecoveryMarker
+    $faultRestorePath = Join-Path $fixtureRoot 'Restore-TeamBobDemo-transition-fault.ps1'
+    $faultRestoreText = [System.IO.File]::ReadAllText($restorePath, (New-Object System.Text.UTF8Encoding($false, $true)))
+    $restoreTransitionLine = "    Write-DemoRestoreJournal `$journalPath `$marker.demoInstanceId 'RESTORING' 'restore-started'"
+    Assert-Equal ([regex]::Matches($faultRestoreText, [regex]::Escape($restoreTransitionLine)).Count) 1 'Restore transition fault injection has one exact lifecycle transition point'
+    $faultRestoreText = $faultRestoreText.Replace($restoreTransitionLine, ($restoreTransitionLine + "`r`n    throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Intentional restore transition interruption.')"))
+    Write-DemoLifecycleText $faultRestorePath $faultRestoreText
+    $interruptedRestore = Invoke-DemoLifecycleScript $faultRestorePath @('-DemoRoot', $demoRoot)
+    Assert-True ($interruptedRestore.ExitCode -ne 0) 'Restore reports an interruption after publishing its catalog transition but before catalog mutation'
+    Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'RESTORING' 'Interrupted restore retains a resumable RESTORING marker'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].enabled $true 'Interrupted restore leaves the pre-transition catalog unchanged'
+    Assert-Equal (Get-DemoLifecycleHash $environmentPath) $demoEnvironmentHashBeforeApproval 'Interrupted restore leaves the environment unchanged'
+
     $restore = Invoke-DemoLifecycleScript $restorePath @('-DemoRoot', $demoRoot)
-    Assert-Equal $restore.ExitCode 0 'Restore succeeds from the matching marker and exact backup'
+    Assert-Equal $restore.ExitCode 0 'Restore safely resumes a declared catalog transition and restores the exact backup'
     Assert-True (-not (Test-Path -LiteralPath $workspaceCommonSentinel)) 'Restore never executes lifecycle code from the Bob-editable workspace'
     Assert-True ($restore.Output -match 'NOT VC6 QUALIFICATION') 'Restore output retains the disclaimer'
     Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'RESTORED' 'Restore marker reaches RESTORED'
@@ -479,6 +547,37 @@ exit $LASTEXITCODE
     Assert-Equal (Get-DemoLifecycleHash $failedEnvironmentPath) $failedOriginalHash 'Failed Stage leaves the pre-existing environment bytes unchanged'
     Assert-Equal (Get-DemoLifecycleJson (Join-Path $failedRoot '.team-bob-demo-marker.json')).state 'STAGING' 'Failed Stage remains visibly STAGING for forensic restore'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $failedRoot 'workspace\.bzr'))) 'Failed Stage never invokes Bazaar'
+
+    $env:LOCALAPPDATA = Join-Path $fixtureRoot 'localappdata-post-replacement-failure'
+    [void][System.IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
+    $postReplacementEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    Write-DemoLifecycleText $postReplacementEnvironmentPath "post-replacement-original`r`n"
+    $postReplacementOriginalBytes = [System.IO.File]::ReadAllBytes($postReplacementEnvironmentPath)
+    $faultPreparePath = Join-Path $fixtureRoot 'Prepare-TeamBobDemo-post-replacement-fault.ps1'
+    $faultPrepareText = [System.IO.File]::ReadAllText($preparePath, (New-Object System.Text.UTF8Encoding($false, $true)))
+    $atomicSwitchLine = '        Write-DemoAtomicBytes $environmentPath $demoEnvironmentBytes $originalHash'
+    Assert-Equal ([regex]::Matches($faultPrepareText, [regex]::Escape($atomicSwitchLine)).Count) 1 'Post-replacement fault injection has one exact lifecycle transition point'
+    $faultPrepareText = $faultPrepareText.Replace($atomicSwitchLine, ($atomicSwitchLine + "`r`n        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Intentional post-replacement cleanup-equivalent failure.')"))
+    Write-DemoLifecycleText $faultPreparePath $faultPrepareText
+    $env:TEAM_BOB_DEMO_TEST_QUALIFICATION_MODE = $null
+    $postReplacementRoot = Join-Path $fixtureRoot 'demo-post-replacement-failure'
+    $postReplacementFailure = Invoke-DemoLifecycleScript $faultPreparePath ((Get-DemoLifecycleArgs $distribution $postReplacementRoot $msBuild $bazaar) + @('-Stage'))
+    Assert-True ($postReplacementFailure.ExitCode -ne 0) 'Stage reports a failure injected after the environment replacement completed'
+    Assert-Equal ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($postReplacementEnvironmentPath))) ([Convert]::ToBase64String($postReplacementOriginalBytes)) 'Stage restores exact original environment bytes when failure occurs after replacement but before the switched flag'
+    Assert-Equal (Get-DemoLifecycleJson (Join-Path $postReplacementRoot '.team-bob-demo-marker.json')).state 'STAGING' 'Post-replacement failure leaves a forensic STAGING marker'
+
+    $env:LOCALAPPDATA = Join-Path $fixtureRoot 'localappdata-distribution-mutation'
+    [void][System.IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
+    $distributionSentinelPath = Join-Path $distribution '.bzr\sentinel'
+    $distributionSentinelBytes = [System.IO.File]::ReadAllBytes($distributionSentinelPath)
+    $distributionSentinelHash = Get-DemoLifecycleHash $distributionSentinelPath
+    $env:TEAM_BOB_DEMO_TEST_QUALIFICATION_MODE = 'mutate-distribution-bzr'
+    $mutationRoot = Join-Path $fixtureRoot 'demo-distribution-mutation'
+    $distributionMutation = Invoke-DemoLifecycleScript $preparePath ((Get-DemoLifecycleArgs $distribution $mutationRoot $msBuild $bazaar) + @('-Stage'))
+    Assert-True ($distributionMutation.ExitCode -ne 0) 'Stage rejects a child-process mutation to the protected distribution .bzr tree'
+    Assert-True ((Get-DemoLifecycleHash $distributionSentinelPath) -cne $distributionSentinelHash) 'Distribution-mutation fault injection executed'
+    Assert-Equal (Get-DemoLifecycleJson (Join-Path $mutationRoot '.team-bob-demo-marker.json')).state 'STAGING' 'Distribution mutation leaves the demo marker STAGING'
+    [System.IO.File]::WriteAllBytes($distributionSentinelPath, $distributionSentinelBytes)
 
     Assert-Equal (Get-DemoLifecycleFingerprint $distribution) $distributionFingerprint 'All lifecycle operations preserve the fixture distribution and its .bzr sentinel'
     Assert-Equal (Get-DemoLifecycleFingerprint (Join-Path $repositoryRoot 'profile')) $productionProfileFingerprint 'All lifecycle operations preserve the real production profile'
