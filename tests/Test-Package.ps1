@@ -150,22 +150,22 @@ $requiredFiles = @(
 )
 foreach ($relativePath in $requiredFiles) { Assert-True (Test-Path -LiteralPath (Join-Path $profileRoot $relativePath) -PathType Leaf) "Required profile file exists: $relativePath" }
 
-$bobIgnore = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bobignore.base')
+$bobIgnoreLines = @(Get-Content -LiteralPath (Join-Path $profileRoot '.bobignore.base'))
 foreach ($requiredVisible in @('baseline.doc', 'baseline.docx', 'baseline.xls', 'baseline.xlsx', 'team-bob-work/TASK-1/work-packet.md', 'team-bob-work/TASK-1/drafts/external-spec.md', 'team-bob-work/TASK-1/results/build-result.md')) {
     $isHidden = switch -Regex ($requiredVisible) {
-        '\.doc$' { $bobIgnore -match '(?m)^\*\.doc$'; break }
-        '\.docx$' { $bobIgnore -match '(?m)^\*\.docx$'; break }
-        '\.xls$' { $bobIgnore -match '(?m)^\*\.xls$'; break }
-        '\.xlsx$' { $bobIgnore -match '(?m)^\*\.xlsx$'; break }
-        'team-bob-work' { $bobIgnore -match '(?m)^team-bob-work/'; break }
+        '\.doc$' { $bobIgnoreLines -contains '*.doc'; break }
+        '\.docx$' { $bobIgnoreLines -contains '*.docx'; break }
+        '\.xls$' { $bobIgnoreLines -contains '*.xls'; break }
+        '\.xlsx$' { $bobIgnoreLines -contains '*.xlsx'; break }
+        'team-bob-work' { @($bobIgnoreLines | Where-Object { $_ -match '^team-bob-work/' }).Count -gt 0; break }
     }
     Assert-True (-not $isHidden) ".bobignore keeps required Bob input/output visible: $requiredVisible"
 }
-Assert-True ($bobIgnore -match '(?m)^\.bzr/$') '.bobignore hides Bazaar metadata'
-Assert-True ($bobIgnore -match '(?m)^secrets/$') '.bobignore hides secrets'
-Assert-True ($bobIgnore -match '(?m)^credentials/$') '.bobignore hides credentials'
-$bzrIgnore = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bzrignore.snippet')
-Assert-True ($bzrIgnore -match '(?m)^team-bob-work/$') '.bzrignore ignores the entire Team Bob work tree'
+Assert-True ($bobIgnoreLines -contains '.bzr/') '.bobignore hides Bazaar metadata'
+Assert-True ($bobIgnoreLines -contains 'secrets/') '.bobignore hides secrets'
+Assert-True ($bobIgnoreLines -contains 'credentials/') '.bobignore hides credentials'
+$bzrIgnoreLines = @(Get-Content -LiteralPath (Join-Path $profileRoot '.bzrignore.snippet'))
+Assert-True ($bzrIgnoreLines -contains 'team-bob-work/') '.bzrignore ignores the entire Team Bob work tree'
 
 $greenCommandText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/commands/bob-implement-green.md')
 $greenRuleText = Get-Content -Raw -LiteralPath (Join-Path $profileRoot '.bob/rules-green-implement/10-edit-build-loop.md')
