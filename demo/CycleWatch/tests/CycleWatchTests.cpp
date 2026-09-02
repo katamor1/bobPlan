@@ -33,8 +33,8 @@ void TestThirdConsecutive() {
 void TestImmediateRecovery() {
     // IMMEDIATE_RECOVERY
     team_bob_demo::CycleWatch watch;
-    watch.Observe("Customer-A", false, 8000U);
-    watch.Observe("Customer-A", false, 8000U);
+    ExpectStatus("recovery setup one", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
+    ExpectStatus("recovery setup two", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("warning reached", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Warning);
     ExpectStatus("7999 recovers", watch.Observe("Customer-A", false, 7999U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("counter reset", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
@@ -43,8 +43,8 @@ void TestImmediateRecovery() {
 void TestWarmupReset() {
     // WARMUP_RESET
     team_bob_demo::CycleWatch watch;
-    watch.Observe("Customer-A", false, 8000U);
-    watch.Observe("Customer-A", false, 8000U);
+    ExpectStatus("before warm-up one", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
+    ExpectStatus("before warm-up two", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("warm-up suppresses", watch.Observe("Customer-A", true, 9000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("after reset one", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("after reset two", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
@@ -58,6 +58,8 @@ void TestCustomerScope() {
     ExpectStatus("Customer-B two", watch.Observe("Customer-B", false, 8000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("Customer-B three", watch.Observe("Customer-B", false, 8000U), team_bob_demo::CycleStatus::Normal);
     ExpectStatus("Customer-A one", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
+    ExpectStatus("Customer-A two", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Normal);
+    ExpectStatus("Customer-A three", watch.Observe("Customer-A", false, 8000U), team_bob_demo::CycleStatus::Warning);
 }
 
 }  // namespace

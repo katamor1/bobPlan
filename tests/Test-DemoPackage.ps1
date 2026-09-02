@@ -1,3 +1,8 @@
+[CmdletBinding()]
+param(
+    [string]$CycleWatchTestSourcePath
+)
+
 $ErrorActionPreference = 'Stop'
 
 $demoTestStandalone = $null -eq (Get-Command Assert-True -ErrorAction SilentlyContinue)
@@ -138,6 +143,31 @@ function Get-DemoXmlText {
     return (($Xml.SelectNodes('//*[local-name()="t"]') | ForEach-Object { $_.InnerText }) -join '')
 }
 
+function Assert-CycleWatchCaseSequence {
+    param(
+        [string]$Text,
+        [string]$FunctionName,
+        [string[]]$Expected
+    )
+
+    $functionPattern = '(?ms)^void\s+' + [regex]::Escape($FunctionName) + '\s*\(\s*\)\s*\{(?<body>.*?)(?=^\})'
+    $functionMatch = [regex]::Match($Text, $functionPattern)
+    Assert-True $functionMatch.Success "CycleWatch tests define $FunctionName"
+
+    $observationPattern = 'ExpectStatus\(\s*"[^"]*"\s*,\s*watch\.Observe\(\s*"(?<customer>[^"]+)"\s*,\s*(?<warmingUp>true|false)\s*,\s*(?<cycleTimeUs>[0-9]+)U\s*\)\s*,\s*team_bob_demo::CycleStatus::(?<status>Normal|Warning)\s*\)\s*;'
+    $observations = [regex]::Matches($functionMatch.Groups['body'].Value, $observationPattern)
+    Assert-Equal $observations.Count $Expected.Count "$FunctionName asserts every ordered Observe result"
+    for ($index = 0; $index -lt $Expected.Count; $index++) {
+        $actual = @(
+            $observations[$index].Groups['customer'].Value,
+            $observations[$index].Groups['warmingUp'].Value,
+            $observations[$index].Groups['cycleTimeUs'].Value,
+            $observations[$index].Groups['status'].Value
+        ) -join '|'
+        Assert-Equal $actual $Expected[$index] "$FunctionName ordered observation $($index + 1) matches customer, warm-up, cycle time, and expected status"
+    }
+}
+
 $demoRepoRoot = Split-Path -Parent $PSScriptRoot
 $demoAssertionsBefore = $script:Assertions
 $requiredFiles = @(
@@ -189,7 +219,12 @@ $legacyRelativePaths = @(
 )
 $legacyText = @{}
 foreach ($relativePath in $legacyRelativePaths) {
-    $legacyText[$relativePath] = Get-DemoCp932Text $demoPaths[$relativePath]
+    $legacyPath = $demoPaths[$relativePath]
+    if ($relativePath -eq 'demo/CycleWatch/tests/CycleWatchTests.cpp' -and -not [string]::IsNullOrWhiteSpace($CycleWatchTestSourcePath)) {
+        $legacyPath = [System.IO.Path]::GetFullPath($CycleWatchTestSourcePath)
+        Assert-True (Test-Path -LiteralPath $legacyPath -PathType Leaf) "CycleWatch test-source override exists: $legacyPath"
+    }
+    $legacyText[$relativePath] = Get-DemoCp932Text $legacyPath
     Assert-True ($legacyText[$relativePath] -match [regex]::Escape($legacyBanner)) "$relativePath carries the documented CP932 banner fallback"
 }
 
@@ -220,6 +255,38 @@ foreach ($caseMarker in @('BOUNDARY_7999_8000', 'THIRD_CONSECUTIVE', 'IMMEDIATE_
     Assert-True ($unitText -match $caseMarker) "CycleWatch tests encode intended behavior marker '$caseMarker'"
 }
 Assert-True ($unitText -match 'CycleStatus::Normal' -and $unitText -match 'CycleStatus::Warning') 'CycleWatch tests assert Normal and Warning outcomes'
+Assert-CycleWatchCaseSequence $unitText 'TestBoundary' @(
+    'Customer-A|false|7999|Normal',
+    'Customer-A|false|8000|Normal'
+)
+Assert-CycleWatchCaseSequence $unitText 'TestThirdConsecutive' @(
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|9000|Normal',
+    'Customer-A|false|8000|Warning'
+)
+Assert-CycleWatchCaseSequence $unitText 'TestImmediateRecovery' @(
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Warning',
+    'Customer-A|false|7999|Normal',
+    'Customer-A|false|8000|Normal'
+)
+Assert-CycleWatchCaseSequence $unitText 'TestWarmupReset' @(
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|true|9000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Warning'
+)
+Assert-CycleWatchCaseSequence $unitText 'TestCustomerScope' @(
+    'Customer-B|false|8000|Normal',
+    'Customer-B|false|8000|Normal',
+    'Customer-B|false|8000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Normal',
+    'Customer-A|false|8000|Warning'
+)
 
 $dspText = $legacyText['demo/CycleWatch/CycleWatch.dsp']
 Assert-True ($dspText -match 'TEAM_BOB_MSBUILD_DEMO_PROTOCOL_V1_NOT_VC6') 'DSP token declares the adapter protocol marker'
