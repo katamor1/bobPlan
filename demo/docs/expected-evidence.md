@@ -10,9 +10,11 @@
 | --- | --- | --- |
 | Bob version record | executable path、ProductVersionが`*bob2.1.*`にmatch、記録時刻 | 2.0.x、path/hash不明 |
 | Visual Studio preflight | `isComplete:true`、`isLaunchable:true`、v143、SDK 10.0.22621.0 | false、欠落、未記録 |
+| Endpoint protection preflight | security ownerが組織の承認済み手順でadapterの実行可否とprobe前後のhashを確認 | 削除、隔離、置換、起動拒否、保護無効化、未承認除外 |
+| Sandbox ownership preflight | demo root／sandboxを排他的に使用し、予期しない変更主体や同時書込みprocessがないことをsecurity ownerが確認 | shared writer、sync tool、検査後のpath／内容差替え可能性 |
 | Demo root marker | このStageに固有のmarkerとroot identity | markerなし／不一致／unsafe path |
 | Environment backup | backup path、hash、ACL確認。内容は表示しない | secret値のlog出力、ACL不明 |
-| Raw qualification JSON | Unicode banner、help、MSBuild hash、Build、Rebuild、compiler failure、linker failure、artifact、invalid targetの各probe | probe欠落、expected/observed exit不一致 |
+| Raw qualification JSON | Unicode banner、help、MSBuild hash、Build、Rebuild、compiler failure、linker failure、artifact、invalid targetの各probe、およびcompiler入力6 hash | probe欠落、expected/observed exit不一致、入力hash／variant不一致 |
 | Qualification record | Record ID、role approvals、`AcceptNotVc6=YES` | 個人承認、未署名、VC6合格表現 |
 | Demo-only catalog | `demo-msbuild-protocol-v1-not-vc6`だけがreview後にenabled | Stage直後からenabled、本番catalog変更 |
 | Initial Bazaar baseline | 人の`init`／対象確認／`add`／初期commit、branch-local demo identity、clean status、完全revision-id | Stage／Bob／packet scriptによるmutation、対象外file、dirty status |
@@ -20,7 +22,9 @@
 | Bob permission／trust | `/permissions`の事前／事後記録、Read-only auto-approve、Edit／Executeのmanual approval、workspace単体のtrust／remove | 親trust、Edit／Execute auto-approve、demo folderのtrust残存 |
 | Usage log | versioned template hashとStage copy `C:\BobTeamDemo\evidence\usage-log.csv` | template変更、別path、個人識別列／値 |
 
-raw qualification driverはapprovalを行いません。Visual Studioがincomplete／unlaunchableなら`qualificationEligible:false`でなければなりません。人がraw evidenceをレビューした別invocationだけがdemo profileをenableできます。
+raw qualification driverはapprovalを行いません。また、単独起動せず、`Prepare-TeamBobDemo.ps1 -Stage`が管理する外側のqualification timeout内でだけ実行します。Visual Studioがincomplete／unlaunchable、endpoint protection／EDRがadapterを阻止した場合、またはtimeout／子process残留があった場合は`qualificationEligible:false`でなければなりません。直接実行したMSBuild logやfake adapter試験をraw adapter qualificationの代替にしません。人がraw evidenceをレビューした別invocationだけがdemo profileをenableできます。
+
+固定policy token: `ENDPOINT PROTECTION BYPASS FORBIDDEN`。`DIRECT MSBUILD OR FAKE ADAPTER IS NOT RAW QUALIFICATION`。保護機能を無効化せず、未承認の除外や迂回を追加しません。
 
 ### Phase chain
 
@@ -47,7 +51,7 @@ phaseをまたぐ成果物は、ファイル名だけでなくSHA-256で固定�
 
 CP932 logではem dashを表現できないため、`MSBUILD DEMO ADAPTER - NOT VC6 QUALIFICATION`が正しいfallbackです。JSON sidecarではexact Unicode banner `MSBUILD DEMO ADAPTER — NOT VC6 QUALIFICATION`が必要です。
 
-各sidecarには少なくともschema、Task ID、invocation、action、attempt、faultInjected、adapter hash、MSBuild hash、native exit、started/finished timestamp、statusを含めます。source本文、credential、環境変数全体、個人identityを含めません。
+各sidecarには少なくともschema、Task ID、invocation、action、attempt、faultInjected、adapter hash、MSBuild hash、native exit、started/finished timestamp、statusに加え、観測した`cycleWatchSourceSha256`、`cycleWatchSourceVariant`、`cycleWatchHeaderSha256`、`cycleWatchTestsSha256`を含めます。source variantは`baseline-error`、`threshold3-error`、`threshold3-fixed`の許可済み状態だけです。build manifestとraw qualification JSONはheader baseline、tests baseline、linker-probe tests、source 3 variantの6つのSHA-256を固定し、配布元baselineと一致しなければなりません。source本文、credential、環境変数全体、個人identityを含めません。
 
 Green evidenceには、各Editのdiff previewを人がAllowed Fileと照合した記録、および各Executeの絶対path／全引数を人が完全一致確認した記録を含めます。auto-approveはReadだけです。custom modeにcommand allowlistがないため、過去のapproval、prefix、pattern、永続permissionを安全境界として扱いません。
 
@@ -57,14 +61,16 @@ Task 3のStageはOpen QA付きnegative packetをversioned workspace外の`C:\Bob
 
 ### 期待するsourceとBazaar差分
 
-ライブ後の意図した変更は`demo/CycleWatch/src/CycleWatch.cpp`の次の一行だけです。
+ライブ後の意図した変更は`demo/CycleWatch/src/CycleWatch.cpp`の次の2行だけです。機能変更はMake attempt 0の前、人工fault repairは実`error Cxxxx`のevidenceを確認した後だけ行います。
 
 ```diff
 -    if (consecutiveOverruns_ >= 1U) {
 +    if (consecutiveOverruns_ >= 3U) {
+-#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
++#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
 ```
 
-専用diagnostic block、`.vcxproj`、`.dsp`、header、tests、Office inputs、`.bzr`（人の明示的commit前）、production `profile/`は変更しません。adapterのcompiler failureは人工training faultであり、上記semantic diffがcompiler errorそのものを修正したという因果を主張しません。
+専用diagnostic blockのbegin/end marker、`.vcxproj`、`.dsp`、header、tests、Office inputs、`.bzr`（人の明示的commit前）、production `profile/`は変更しません。`#error`→`#pragma message`は人工training faultだけに対する修復で、`>= 1U`→`>= 3U`は要求に対する機能実装です。この二つの因果を入れ替えず、VC6の修正証拠にもしません。配布元sourceの`#error`は保持し、修復済み`#pragma message`は隔離demo workspaceだけに残します。
 
 Bazaar evidenceは少なくともstatus、diff、branch nick、完全revision-idを含みます。Stage／qualification approval後かつ最初のpacket前に、人がbranch-local demo identityで合成baselineを`init`、対象確認、`add`、初期commitし、clean statusと完全revision-idを固定します。read-only export後、独立reviewに合格した場合だけ、人が同じdemo identityで実装変更を別commitします。Stage、Bob、qualification、packet scriptがBazaarを変更した証跡、またはBobがcommit、merge、tagを実行した証跡があれば即時不合格です。
 

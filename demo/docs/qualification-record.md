@@ -23,6 +23,12 @@
 | Adapter SHA-256 | |
 | DSP token SHA-256 | |
 | VCXPROJ SHA-256 | |
+| CycleWatch header baseline SHA-256 | |
+| CycleWatch tests baseline SHA-256 | |
+| CycleWatch linker-probe tests SHA-256 | |
+| CycleWatch source `baseline-error` SHA-256 | |
+| CycleWatch source `threshold3-error` SHA-256 | |
+| CycleWatch source `threshold3-fixed` SHA-256 | |
 | Raw evidence relative path | |
 | Raw evidence SHA-256 | |
 | `qualificationEligible` | `false` |
@@ -49,7 +55,7 @@
 | Q-ARTIFACT | Artifact integrity | exact relative pathとSHA-256 | | | |
 | Q-INVALID | Invalid target／input | exit 20、MSBuild未起動 | | | |
 
-linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを変更し、配布元／workspaceを変更してはいけません。全probeはローカルfixed drive内で実行し、network、Bazaar、実機、基板、driver、shellを呼び出しません。
+linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを、上表の固定linker-probe hashとなる既知variantへ変更し、配布元／workspaceを変更してはいけません。各probe sidecarの観測source variant／hash、header hash、tests hashは上表の許可済み値と一致させます。全probeは`Prepare-TeamBobDemo.ps1 -Stage`の外側timeout内でローカルfixed drive上だけで実行し、raw driverを単独起動せず、network、Bazaar、実機、基板、driver、shellを呼び出しません。
 
 ## Immutability review
 
@@ -59,8 +65,13 @@ linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを変更し�
 - [ ] production exampleは`enabled:false`である。
 - [ ] `.bzr`はprobeで変更されていない。
 - [ ] source workspaceのAllowed Fileはprobeで変更されていない。
+- [ ] build manifest、raw evidence、上表のcompiler入力6 hashが一致し、配布元のheader／tests／source baselineも一致する。
+- [ ] 各sidecarのsource variant／hash、header hash、tests hashがそのprobeで許可された値だけである。
 - [ ] versioned `demo/docs/usage-log.csv`はStage前後で同一hashである。
 - [ ] runtime usage logとnegative packetはversioned workspace外の現在rootの`evidence`配下にある。
+- [ ] endpoint protection／EDRはadapterを削除、隔離、置換、起動拒否しておらず、probe前後のadapter SHA-256がmanifestと一致する。
+- [ ] qualificationのために保護機能を無効化せず、未承認の除外または迂回を追加していない。
+- [ ] demo root／sandboxはoperator管理下で排他的に使用され、予期しない変更主体、sync tool、同時書込みprocessがないことをsecurity ownerが確認した。
 - [ ] logs／evidenceにsecret、credential、個人identityがない。
 - [ ] 全user-visible evidenceにNOT VC6表示がある。
 

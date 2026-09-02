@@ -42,6 +42,19 @@ function Read-Utf8LinesFixture {
     return @([System.IO.File]::ReadAllLines($Path, $encoding))
 }
 
+function Add-PublicationMutationHookFixture {
+    param([string]$Path, [string]$Anchor, [string]$Hook, [string]$Label)
+    $encoding = New-Object System.Text.UTF8Encoding($false, $true)
+    $text = [System.IO.File]::ReadAllText($Path, $encoding)
+    if ([regex]::Matches($text, [regex]::Escape($Anchor)).Count -ne 1) {
+        throw "Fixture hook anchor is not unique for ${Label}: $Path"
+    }
+    $newline = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $normalizedHook = $Hook.Replace("`r`n", "`n").Replace("`r", "`n")
+    $patched = $text.Replace($Anchor, ($normalizedHook.Replace("`n", $newline) + $newline + $Anchor))
+    Write-Utf8NoBomFixture $Path $patched
+}
+
 function Write-Task3PacketFixture {
     param(
         [string]$Path, [string]$BazaarRoot, [string]$TaskId, [string[]]$AllowedFiles, [string]$BuildProfileId,
@@ -97,35 +110,17 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Diagnostics;
-using System.Reflection;
+
 public static class FakeMsdev {
     public static int Main(string[] args) {
-        if (args.Length == 1 && args[0] == "--child") { Thread.Sleep(12000); return 0; }
-        if (args.Length == 1 && args[0] == "--watch-result") {
-            string directory = Environment.GetEnvironmentVariable("BOB3_MSDEV_RESULT_WATCH_DIRECTORY");
-            string postMutation = Environment.GetEnvironmentVariable("BOB3_MSDEV_POST_RESULT_MUTATE_PATH");
-            string signal = Environment.GetEnvironmentVariable("BOB3_MSDEV_POST_RESULT_SIGNAL_PATH");
-            using (FileSystemWatcher watcher = new FileSystemWatcher(directory, ".team-bob.*.tmp")) {
-                watcher.EnableRaisingEvents = true;
-                WaitForChangedResult changed = watcher.WaitForChanged(WatcherChangeTypes.Created, 10000);
-                if (changed.TimedOut) return 3;
-            }
-            File.WriteAllText(postMutation, "post-result mutation", new UTF8Encoding(false));
-            File.WriteAllText(signal, "mutated", new UTF8Encoding(false));
-            return 0;
-        }
         string commandLog = Environment.GetEnvironmentVariable("BOB3_MSDEV_COMMAND_LOG");
         if (!String.IsNullOrEmpty(commandLog)) File.AppendAllText(commandLog, String.Join("\t", args) + Environment.NewLine, new UTF8Encoding(false));
         string mode = Environment.GetEnvironmentVariable("BOB3_MSDEV_MODE") ?? "success";
-        if (mode == "post-publish-mutation") {
-            ProcessStartInfo watcher = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--watch-result");
-            watcher.UseShellExecute = true;
-            watcher.WindowStyle = ProcessWindowStyle.Hidden;
-            Process.Start(watcher);
-        }
         if (mode == "timeout-child") {
-            ProcessStartInfo child = new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "--child");
+            string pingPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE");
+            ProcessStartInfo child = new ProcessStartInfo(pingPath, "127.0.0.1 -n 13 -w 1000");
             child.UseShellExecute = false;
+            child.CreateNoWindow = true;
             Process.Start(child);
             Thread.Sleep(12000);
         }
@@ -154,7 +149,7 @@ public static class FakeMsdev {
             if (mode == "invalid-log") File.WriteAllBytes(outputLog, new byte[] { 0x81 });
             else File.WriteAllText(outputLog, message + Environment.NewLine, Encoding.GetEncoding(932));
         }
-        if ((mode == "success" || mode == "no-success" || mode == "unicode-success" || mode == "post-publish-mutation") && mode != "artifact-missing") {
+        if ((mode == "success" || mode == "no-success" || mode == "unicode-success") && mode != "artifact-missing") {
             string artifact = Path.Combine(Environment.CurrentDirectory, "bin", "fixture.exe");
             Directory.CreateDirectory(Path.GetDirectoryName(artifact));
             File.WriteAllText(artifact, "fixture artifact", new UTF8Encoding(false));
@@ -178,19 +173,6 @@ using System.Text;
 using System.Diagnostics;
 public static class FakeBazaar {
     public static int Main(string[] args) {
-        if (args.Length == 1 && args[0] == "--watch-evidence-result") {
-            string directory = Environment.GetEnvironmentVariable("BOB3_BZR_RESULT_WATCH_DIRECTORY");
-            string mutation = Environment.GetEnvironmentVariable("BOB3_BZR_POST_RESULT_MUTATE_PATH");
-            string signal = Environment.GetEnvironmentVariable("BOB3_BZR_POST_RESULT_SIGNAL_PATH");
-            using (FileSystemWatcher watcher = new FileSystemWatcher(directory, ".team-bob.*.tmp")) {
-                watcher.EnableRaisingEvents = true;
-                WaitForChangedResult changed = watcher.WaitForChanged(WatcherChangeTypes.Created, 10000);
-                if (changed.TimedOut) return 3;
-            }
-            File.WriteAllText(mutation, "post-evidence mutation", new UTF8Encoding(false));
-            File.WriteAllText(signal, "mutated", new UTF8Encoding(false));
-            return 0;
-        }
         string commandLog = Environment.GetEnvironmentVariable("BOB3_BZR_COMMAND_LOG");
         string command = args.Length == 0 ? "" : args[0];
         int occurrence = 1;
@@ -220,12 +202,6 @@ public static class FakeBazaar {
         else if (command == "nick") value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_NICK_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_NICK") ?? "fixture-branch";
         else if (command == "version-info") {
             value = occurrence > 1 && !String.IsNullOrEmpty(Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND")) ? Environment.GetEnvironmentVariable("BOB3_BZR_REVISION_SECOND") : Environment.GetEnvironmentVariable("BOB3_BZR_REVISION") ?? "fixture-revision-id-full-123";
-            if (String.Equals(Environment.GetEnvironmentVariable("BOB3_BZR_WATCH_RESULT"), "1", StringComparison.Ordinal)) {
-                ProcessStartInfo watcher = new ProcessStartInfo(System.Reflection.Assembly.GetExecutingAssembly().Location, "--watch-evidence-result");
-                watcher.UseShellExecute = true;
-                watcher.WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden;
-                Process.Start(watcher);
-            }
         }
         else { Console.Error.WriteLine("forbidden fixture command: " + command); return 42; }
         if (!String.IsNullOrEmpty(value)) Console.Out.Write(value.EndsWith("\n") ? value : value + Environment.NewLine);
@@ -303,11 +279,12 @@ $task3FixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('team-bob-task3
 $task3SavedEnvironment = @{}
 $task3EnvironmentNames = @(
     'LOCALAPPDATA', 'BOB3_MSDEV_COMMAND_LOG', 'BOB3_MSDEV_MODE', 'BOB3_MSDEV_SLEEP_MS', 'BOB3_MSDEV_MUTATE_PATH', 'BOB3_MSDEV_DELETE_PATH',
-    'BOB3_MSDEV_BLOCK_RESULT_DIRECTORY', 'BOB3_MSDEV_RESULT_WATCH_DIRECTORY', 'BOB3_MSDEV_POST_RESULT_MUTATE_PATH', 'BOB3_MSDEV_POST_RESULT_SIGNAL_PATH',
-    'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_DIFF_EXIT', 'BOB3_BZR_WATCH_RESULT',
-    'BOB3_BZR_RESULT_WATCH_DIRECTORY', 'BOB3_BZR_POST_RESULT_MUTATE_PATH', 'BOB3_BZR_POST_RESULT_SIGNAL_PATH',
+    'BOB3_MSDEV_BLOCK_RESULT_DIRECTORY',
+    'BOB3_BZR_COMMAND_LOG', 'BOB3_BZR_STATUS', 'BOB3_BZR_DIFF', 'BOB3_BZR_DIFF_EXIT',
     'BOB3_BZR_NICK', 'BOB3_BZR_NICK_SECOND', 'BOB3_BZR_REVISION', 'BOB3_BZR_REVISION_SECOND', 'BOB3_BZR_FAIL_COMMAND',
-    'BOB3_BZR_FAIL_CODE', 'BOB3_BZR_FAIL_OCCURRENCE', 'BOB3_BZR_MUTATE_COMMAND', 'BOB3_BZR_MUTATE_OCCURRENCE', 'BOB3_BZR_MUTATE_PATH'
+    'BOB3_BZR_FAIL_CODE', 'BOB3_BZR_FAIL_OCCURRENCE', 'BOB3_BZR_MUTATE_COMMAND', 'BOB3_BZR_MUTATE_OCCURRENCE', 'BOB3_BZR_MUTATE_PATH',
+    'BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH', 'BOB3_TEST_BUILD_PUBLICATION_SIGNAL_PATH',
+    'BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH', 'BOB3_TEST_EVIDENCE_PUBLICATION_SIGNAL_PATH'
 )
 foreach ($name in $task3EnvironmentNames) { $task3SavedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }
 $task3Bob3EnvironmentNames = @($task3EnvironmentNames | Where-Object { $_ -like 'BOB3_*' })
@@ -362,6 +339,40 @@ try {
     $buildPath = Join-Path $workingTree 'team-bob/tools/Invoke-Vc6Build.ps1'
     $evidencePath = Join-Path $workingTree 'team-bob/tools/Export-BazaarEvidence.ps1'
     $buildCommonPath = Join-Path $workingTree 'team-bob/tools/TeamBob-BuildCommon.ps1'
+    $buildHookAnchor = '    if ($null -ne $protectedContext -and $null -ne $protectedBaseline) {'
+    $buildHook = @'
+    if (-not [string]::IsNullOrWhiteSpace($env:BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH)) {
+        [System.IO.File]::WriteAllText($env:BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH, 'post-result mutation', (New-Object System.Text.UTF8Encoding($false)))
+        if (-not [string]::IsNullOrWhiteSpace($env:BOB3_TEST_BUILD_PUBLICATION_SIGNAL_PATH)) {
+            [System.IO.File]::WriteAllText($env:BOB3_TEST_BUILD_PUBLICATION_SIGNAL_PATH, 'mutated', (New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+'@
+    $evidenceHookAnchor = "    Assert-TeamBobProtectedSnapshot `$baseline (Get-TeamBobProtectedSnapshot `$context) 'Bazaar evidence publication'"
+    $evidenceHook = @'
+    if (-not [string]::IsNullOrWhiteSpace($env:BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH)) {
+        [System.IO.File]::WriteAllText($env:BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH, 'post-evidence mutation', (New-Object System.Text.UTF8Encoding($false)))
+        if (-not [string]::IsNullOrWhiteSpace($env:BOB3_TEST_EVIDENCE_PUBLICATION_SIGNAL_PATH)) {
+            [System.IO.File]::WriteAllText($env:BOB3_TEST_EVIDENCE_PUBLICATION_SIGNAL_PATH, 'mutated', (New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+'@
+    Add-PublicationMutationHookFixture $buildPath $buildHookAnchor $buildHook 'build publication'
+    Add-PublicationMutationHookFixture $evidencePath $evidenceHookAnchor $evidenceHook 'evidence publication'
+    $productionBuildText = [System.IO.File]::ReadAllText((Join-Path $task3RepoRoot 'profile/team-bob/tools/Invoke-Vc6Build.ps1'), [System.Text.Encoding]::UTF8)
+    $productionEvidenceText = [System.IO.File]::ReadAllText((Join-Path $task3RepoRoot 'profile/team-bob/tools/Export-BazaarEvidence.ps1'), [System.Text.Encoding]::UTF8)
+    Assert-True (-not ($productionBuildText -match 'BOB3_TEST_')) 'Build publication mutation hook is absent from the production profile'
+    Assert-True (-not ($productionEvidenceText -match 'BOB3_TEST_')) 'Evidence publication mutation hook is absent from the production profile'
+    $installedBuildText = [System.IO.File]::ReadAllText($buildPath, [System.Text.Encoding]::UTF8)
+    $installedEvidenceText = [System.IO.File]::ReadAllText($evidencePath, [System.Text.Encoding]::UTF8)
+    $buildWriteIndex = $installedBuildText.IndexOf('Write-TeamBobUtf8File $resultPath', [System.StringComparison]::Ordinal)
+    $buildHookIndex = $installedBuildText.IndexOf('BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH', [System.StringComparison]::Ordinal)
+    $buildFinalCheckIndex = $installedBuildText.IndexOf($buildHookAnchor, [System.StringComparison]::Ordinal)
+    Assert-True ($buildWriteIndex -ge 0 -and $buildWriteIndex -lt $buildHookIndex -and $buildHookIndex -lt $buildFinalCheckIndex) 'Build fixture hook is strictly after result publication and before the final protected-state check'
+    $evidenceWriteIndex = $installedEvidenceText.IndexOf('Write-TeamBobUtf8File $manifestPath', [System.StringComparison]::Ordinal)
+    $evidenceHookIndex = $installedEvidenceText.IndexOf('BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH', [System.StringComparison]::Ordinal)
+    $evidenceFinalCheckIndex = $installedEvidenceText.IndexOf($evidenceHookAnchor, [System.StringComparison]::Ordinal)
+    Assert-True ($evidenceWriteIndex -ge 0 -and $evidenceWriteIndex -lt $evidenceHookIndex -and $evidenceHookIndex -lt $evidenceFinalCheckIndex) 'Evidence fixture hook is strictly after manifest publication and before the final protected-state check'
     $env:BOB3_MSDEV_COMMAND_LOG = Join-Path $task3FixtureRoot 'msdev-commands.log'
     $env:BOB3_BZR_COMMAND_LOG = Join-Path $task3FixtureRoot 'bzr-commands.log'
     $env:BOB3_BZR_STATUS = ' M  src/example.cpp'
@@ -698,19 +709,17 @@ try {
     Assert-Equal ($makeBazaarCommands -join '|') 'status --short|nick|version-info --custom --template={revision_id}|status --short|nick|version-info --custom --template={revision_id}' 'Build proves pre/post status, branch, and full revision using read-only queries'
 
     $postResultSignal = Join-Path $task3FixtureRoot 'post-result-mutation.signal'
-    $env:BOB3_MSDEV_MODE = 'post-publish-mutation'
-    $env:BOB3_MSDEV_RESULT_WATCH_DIRECTORY = Join-Path $taskDirectory 'results'
-    $env:BOB3_MSDEV_POST_RESULT_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
-    $env:BOB3_MSDEV_POST_RESULT_SIGNAL_PATH = $postResultSignal
-    $postPublicationBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
-    $postResultDeadline = [DateTime]::UtcNow.AddSeconds(3)
-    while (-not (Test-Path -LiteralPath $postResultSignal -PathType Leaf) -and [DateTime]::UtcNow -lt $postResultDeadline) { Start-Sleep -Milliseconds 25 }
+    $env:BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
+    $env:BOB3_TEST_BUILD_PUBLICATION_SIGNAL_PATH = $postResultSignal
+    $env:BOB3_MSDEV_MODE = 'success'
+    try {
+        $postPublicationBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
+    } finally {
+        $env:BOB3_TEST_BUILD_PUBLICATION_MUTATE_PATH = $null
+        $env:BOB3_TEST_BUILD_PUBLICATION_SIGNAL_PATH = $null
+    }
     $postResultMutationObserved = Test-Path -LiteralPath $postResultSignal -PathType Leaf
     Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
-    $env:BOB3_MSDEV_MODE = 'success'
-    $env:BOB3_MSDEV_RESULT_WATCH_DIRECTORY = $null
-    $env:BOB3_MSDEV_POST_RESULT_MUTATE_PATH = $null
-    $env:BOB3_MSDEV_POST_RESULT_SIGNAL_PATH = $null
     Assert-True $postResultMutationObserved 'Build final-check fixture mutates .bzr during result publication'
     Assert-Task3BuildOutcome $postPublicationBuild 'INTEGRITY_FAILED' 30 'Protected-state change during build result publication'
     Assert-True (-not ($postPublicationBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Build publication mutation cannot return false success'
@@ -1026,19 +1035,16 @@ try {
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $evidenceBzrFingerprint 'Evidence export preserves .bzr bytes'
 
     $postEvidenceSignal = Join-Path $task3FixtureRoot 'post-evidence-mutation.signal'
-    $env:BOB3_BZR_WATCH_RESULT = '1'
-    $env:BOB3_BZR_RESULT_WATCH_DIRECTORY = $evidenceResults
-    $env:BOB3_BZR_POST_RESULT_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
-    $env:BOB3_BZR_POST_RESULT_SIGNAL_PATH = $postEvidenceSignal
-    $postPublicationEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
-    $postEvidenceDeadline = [DateTime]::UtcNow.AddSeconds(3)
-    while (-not (Test-Path -LiteralPath $postEvidenceSignal -PathType Leaf) -and [DateTime]::UtcNow -lt $postEvidenceDeadline) { Start-Sleep -Milliseconds 25 }
+    $env:BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'
+    $env:BOB3_TEST_EVIDENCE_PUBLICATION_SIGNAL_PATH = $postEvidenceSignal
+    try {
+        $postPublicationEvidence = Invoke-TestScript $evidencePath @('-WorkPacket', $workPacketPath)
+    } finally {
+        $env:BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH = $null
+        $env:BOB3_TEST_EVIDENCE_PUBLICATION_SIGNAL_PATH = $null
+    }
     $postEvidenceMutationObserved = Test-Path -LiteralPath $postEvidenceSignal -PathType Leaf
     Write-Utf8NoBomFixture (Join-Path $workingTree '.bzr/branch.conf') 'fixture branch metadata'
-    $env:BOB3_BZR_WATCH_RESULT = $null
-    $env:BOB3_BZR_RESULT_WATCH_DIRECTORY = $null
-    $env:BOB3_BZR_POST_RESULT_MUTATE_PATH = $null
-    $env:BOB3_BZR_POST_RESULT_SIGNAL_PATH = $null
     Assert-True $postEvidenceMutationObserved 'Evidence final-check fixture mutates .bzr during evidence publication'
     Assert-Equal $postPublicationEvidence.ExitCode 30 'Evidence publication mutation fails the final protected-state check'
     Assert-True (-not ($postPublicationEvidence.Output -match 'EXPORTED')) 'Evidence publication mutation cannot report false export success'

@@ -177,6 +177,10 @@ $requiredFiles = @(
     'demo/CycleWatch/include/CycleWatch.h',
     'demo/CycleWatch/src/CycleWatch.cpp',
     'demo/CycleWatch/tests/CycleWatchTests.cpp',
+    'demo/docs/90-minute-runbook.md',
+    'demo/docs/expected-evidence.md',
+    'demo/docs/qualification-record.md',
+    'demo/docs/stop-checklist.md',
     'demo/tools/New-DemoOfficeInputs.ps1'
 )
 $demoPaths = @{}
@@ -207,6 +211,32 @@ Assert-True ($readmeText -match [regex]::Escape('Allowed File: `demo/CycleWatch/
 Assert-True ($readmeText -match 'synthetic' -and $readmeText -match 'hardware' -and $readmeText -match 'network' -and $readmeText -match 'customer data') 'Demo README states synthetic-only isolation boundaries'
 Assert-True ($readmeText -match 'word/document\.xml' -and $readmeText -match 'xl/tables/table1\.xml') 'Demo README identifies stable Office source anchors'
 Assert-True ($readmeText -match 'CP932' -and $readmeText -match 'U\+2014' -and $readmeText -match 'ASCII hyphen') 'Demo README documents the CP932 banner fallback and its encoding reason'
+
+$runbookText = Get-DemoUtf8Text $demoPaths['demo/docs/90-minute-runbook.md']
+$expectedEvidenceText = Get-DemoUtf8Text $demoPaths['demo/docs/expected-evidence.md']
+$qualificationRecordText = Get-DemoUtf8Text $demoPaths['demo/docs/qualification-record.md']
+$stopChecklistText = Get-DemoUtf8Text $demoPaths['demo/docs/stop-checklist.md']
+Assert-True ($runbookText -match 'endpoint protection' -and $runbookText -match 'EDR' -and
+    $runbookText -match 'raw qualification' -and $stopChecklistText -match 'adapter executable') 'Runbook and stop checklist fail closed on endpoint-protection interference without bypassing protection'
+Assert-True ($expectedEvidenceText -match 'qualificationEligible:false' -and $expectedEvidenceText -match 'MSBuild log' -and
+    $expectedEvidenceText -match 'fake adapter' -and $qualificationRecordText -match 'adapter SHA-256') 'Evidence and qualification record forbid substituting direct MSBuild or fake tests for uninterrupted raw qualification'
+Assert-True ($expectedEvidenceText.Contains('ENDPOINT PROTECTION BYPASS FORBIDDEN') -and
+    $expectedEvidenceText.Contains('DIRECT MSBUILD OR FAKE ADAPTER IS NOT RAW QUALIFICATION')) 'Expected evidence uses fixed policy tokens that cannot be satisfied by the opposite claim'
+Assert-True ($runbookText -match 'SANDBOX OWNERSHIP GATE' -and $runbookText -match 'EXCLUSIVE WRITER REQUIRED' -and
+    $expectedEvidenceText -match 'Sandbox ownership preflight' -and $stopChecklistText -match 'sync tool') 'Runbook and evidence record the exclusive sandbox-writer gate for adapter TOCTOU risk'
+Assert-True ($runbookText -match 'PACKET_CREATION_REFUSED' -and $runbookText -match 'forensic evidence' -and
+    $runbookText -match 'FRESH DEMO ROOT REQUIRED') 'Runbook retains a partially created fixed task and requires a fresh Stage for recovery'
+foreach ($hashField in @(
+    'CycleWatch header baseline SHA-256', 'CycleWatch tests baseline SHA-256', 'CycleWatch linker-probe tests SHA-256',
+    'CycleWatch source `baseline-error` SHA-256', 'CycleWatch source `threshold3-error` SHA-256', 'CycleWatch source `threshold3-fixed` SHA-256'
+)) {
+    Assert-True ($qualificationRecordText.Contains($hashField)) "Qualification record exposes compiler-input identity: $hashField"
+}
+foreach ($sidecarField in @('cycleWatchSourceSha256', 'cycleWatchSourceVariant', 'cycleWatchHeaderSha256', 'cycleWatchTestsSha256')) {
+    Assert-True ($expectedEvidenceText.Contains($sidecarField)) "Expected evidence requires adapter sidecar field: $sidecarField"
+}
+Assert-True ($runbookText -match 'STAGED OUTER TIMEOUT REQUIRED' -and $runbookText -match 'STANDALONE QUALIFICATION DRIVER FORBIDDEN' -and
+    $expectedEvidenceText -match 'qualification timeout') 'Runbook requires qualification driver execution only under the staged outer timeout'
 
 $legacyRelativePaths = @(
     'demo/CycleWatch/CycleWatch.dsp',

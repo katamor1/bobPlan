@@ -24,7 +24,9 @@
 2. IBM公式installerを人が実行してBob IDEを更新する。実行ファイルの`ProductVersion`が`*bob2.1.*`にmatchすることを記録する。2.0.xのままなら中止する。
 3. Visual Studio Installerを人が操作してC++ workloadをrepairする。`vswhere`の対象instanceが`isComplete:true`かつ`isLaunchable:true`で、v143とWindows SDK 10.0.22621.0が存在することを記録する。いずれかがfalse／欠落なら中止する。
 4. Windows PowerShell 5.1とPowerShell 7のpackage testsが成功したことを記録する。失敗を無視してStageしない。
-5. デモ用の固定driveを選び、初回Stageではrehearsal用`C:\BobTeamDemo-Rehearsal`とlive用`C:\BobTeamDemo`の両方がまだ存在しないことを確認する。markerなしの空directoryを先に作らない。再Stageは同じStage markerを検証できる場合だけとする。UNC、mapped drive、reparse path、配布元と重なるpathは使わない。
+5. 生成したadapter executableをendpoint protection／EDRが削除、隔離、置換、起動拒否しないことを、組織で承認された手順によりsecurity ownerが確認する。発生した場合は中止し、保護機能の無効化、場当たり的な除外追加、迂回、反復再生成をoperatorが行わない。追跡可能な承認済みpolicyまたは署名済み配布方法が整うまでraw qualificationを合格にしない。
+6. demo rootとsandboxをoperatorが排他的に使用し、同時に書き込むsync tool、別operator、別processがないことを確認する。組織の端末policy上、予期しない主体へ変更権限が付与されていないこともsecurity ownerが確認する。adapterのpath／hash／reparse検査後に別主体が内容を差し替え得る環境では資格を開始しない。監査tokenは`SANDBOX OWNERSHIP GATE — EXCLUSIVE WRITER REQUIRED`とする。
+7. デモ用の固定driveを選び、初回Stageではrehearsal用`C:\BobTeamDemo-Rehearsal`とlive用`C:\BobTeamDemo`の両方がまだ存在しないことを確認する。markerなしの空directoryを先に作らない。再Stageは同じStage markerを検証できる場合だけとする。UNC、mapped drive、reparse path、配布元と重なるpathは使わない。
 
 ### Stageとraw qualification evidence
 
@@ -39,6 +41,17 @@ $MsBuildPath = 'C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Cu
 $BazaarPath = (Get-Command bzr.exe -ErrorAction Stop).Source
 $BazaarPath
 
+# 先に変更なしでpathと対象を検査する。
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+  -File "$DistributionRoot\demo\tools\Prepare-TeamBobDemo.ps1" `
+  -DistributionRoot $DistributionRoot `
+  -DemoRoot $ActiveDemoRoot `
+  -MsBuildPath $MsBuildPath `
+  -BazaarPath $BazaarPath `
+  -Stage `
+  -WhatIf
+
+# WhatIfの表示値を人が確認した後だけ実Stageする。
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -File "$DistributionRoot\demo\tools\Prepare-TeamBobDemo.ps1" `
   -DistributionRoot $DistributionRoot `
@@ -48,7 +61,9 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -Stage
 ```
 
-`DEMO-TARGET-PC-OWNER-ROLE`と`DEMO-OPERATIONS-OWNER-ROLE`は、help、MSBuild hash、normal Make、normal Rebuild、実compiler failure、実linker failure、artifact、invalid target rejectionを[qualification-record.md](qualification-record.md)と照合します。Visual Studioがcompleteかつlaunchableでないrecordは`qualificationEligible:false`であり、承認できません。
+`DEMO-TARGET-PC-OWNER-ROLE`と`DEMO-OPERATIONS-OWNER-ROLE`は、help、MSBuild hash、normal Make、normal Rebuild、実compiler failure、実linker failure、artifact、invalid target rejectionを[qualification-record.md](qualification-record.md)と照合します。build manifestとraw evidenceに記録されたheader、tests、linker-probe tests、source 3 variantの6つのSHA-256が一致し、各sidecarの観測source variant／hash、header hash、tests hashが許可済み値であることも確認します。Visual Studioがcompleteかつlaunchableでないrecordは`qualificationEligible:false`であり、承認できません。
+
+raw qualification driverを単独起動しません。`Prepare-TeamBobDemo.ps1 -Stage`が設ける外側のqualification timeout内でだけ実行し、timeout、driver停止、子process残留のいずれかがあれば承認へ進みません。単独実行の結果や直接MSBuild logはraw qualification evidenceの代替ではありません。監査tokenは`STAGED OUTER TIMEOUT REQUIRED — STANDALONE QUALIFICATION DRIVER FORBIDDEN`とする。
 
 レビューが完了した後だけ、別invocationで明示的に承認します。`-AcceptNotVc6`は「VC6資格ではない」ことの受容であり、VC6合格を意味しません。
 
@@ -191,18 +206,24 @@ powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
   -Phase Green
 ```
 
-freshなBob taskで`green-implement`を選びます。Readだけをauto-approveし、Edit／ExecuteはOFFのままにします。Bobが提示する各Editはdiff previewでAllowed Fileと意図した一行を確認し、各Executeはcommandの絶対pathと全引数を確認して、その一回だけmanual approvalします。
+freshなBob taskで`green-implement`を選びます。Readだけをauto-approveし、Edit／ExecuteはOFFのままにします。Bobが提示する各Editはdiff previewでAllowed Fileと後述の2行契約を確認し、各Executeはcommandの絶対pathと全引数を確認して、その一回だけmanual approvalします。
 
 ```text
 /bob-implement-green <Green packetの絶対path>
 ```
 
-期待する最終source差分は、要求上の修正点である`consecutiveOverruns_ >= 1U`から`>= 3U`への変更だけです。diagnostic blockは削除・無効化しません。adapterはattempt 0のMakeだけ`TEAM_BOB_DEMO_FAULT`をcompilerへ渡すため、Allowed Fileの専用blockから実`error Cxxxx`が発生します。これは人工的な修復訓練であり、製品defectの自然な再現でも、BobがVC6 compiler defectを直した証拠でもありません。
+期待する最終source差分は、要求上の機能変更1行と、人工faultを観測した後だけ許す訓練用repair 1行の計2行です。最初に`consecutiveOverruns_ >= 1U`を`>= 3U`へ変更し、Make attempt 0でAllowed File内の`#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT ...`が実`error Cxxxx`になった証跡を確認します。その後に限り、その`#error`行を次の一行に置換します。
+
+```cpp
+#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
+```
+
+diagnostic block自体とbegin/end markerは保持します。evidence取得前の置換、blockの削除、上記以外の抑制は不合格です。これは人工的な修復訓練であり、製品defectの自然な再現でも、BobがVC6 compiler defectを直した証拠でもありません。配布元の合成sourceは変更せず、このrepairは隔離demo workspaceのAllowed Fileだけに残します。
 
 build stateは次の順序以外を認めません。
 
 1. Make attempt 0: 実compiler failure、`CODE_FAILED_RETRYABLE`。
-2. evidenceと人工faultの表示を確認し、Allowed File外を変更しない。repair budgetは1回消費する。
+2. evidenceと人工faultの表示を確認し、上記の`#error`→`#pragma message`のexact replacementだけを1回行う。Allowed File外は変更せず、repair budgetを1回消費する。
 3. Make attempt 1: `SUCCEEDED`。
 4. 同じattempt 1のRebuild: `SUCCEEDED`。
 5. source encoding、BOM、CRLF、Allowed Files、artifactのintegrity検査が成功した後だけ`READY_FOR_HUMAN_REVIEW`。
@@ -233,7 +254,7 @@ Green taskに永続Edit／Execute permissionがないことを`/permissions`で�
 /bob-review-change <Green packetの絶対path>
 ```
 
-`DEMO-INDEPENDENT-REVIEWER-ROLE`は[review-rubric.md](review-rubric.md)を使い、Allowed File以外のdiffがないこと、diagnostic blockが維持されたこと、最終Rebuildとintegrity evidence、人工faultの明記を確認します。Critical不合格が一つでもあればcommitへ進みません。
+`DEMO-INDEPENDENT-REVIEWER-ROLE`は[review-rubric.md](review-rubric.md)を使い、Allowed File以外のdiffがないこと、機能変更1行と人工fault repair 1行のみであること、diagnostic blockのmarkerが維持されたこと、最終Rebuildとintegrity evidence、人工faultの明記を確認します。Critical不合格が一つでもあればcommitへ進みません。
 
 ### 75–85分: 人によるdemo commitとTest task
 
@@ -247,7 +268,7 @@ Set-Location 'C:\BobTeamDemo\workspace'
 & $BazaarPath commit -m 'demo: approved CycleWatch warning threshold change'
 ```
 
-diffが承認済みAllowed Fileの一行以外を含む場合はcommitしません。人のcommit後、前工程成果物とrevisionのSHA-256を検証してTest packetを作ります。
+diffが承認済みAllowed Fileの上記2行以外を含む場合はcommitしません。人のcommit後、前工程成果物とrevisionのSHA-256を検証してTest packetを作ります。
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
@@ -302,7 +323,9 @@ restoreがmatching marker／backupを拒否した場合、回避して上書き�
 | 75分 | review未完了ならcommitしない。 |
 | 85分 | Test draft未完了なら実機合否を推測せず、未完了と記録する。 |
 
-保存済みlogやscreenshotを説明に使う場合は「rehearsal evidence」と明記し、当日のライブ成功と置き換えません。
+保存済みlogやscreenshotを説明に使う場合は「rehearsal evidence」と明記し、当日のライブ成功と置き換えません。endpoint protection／EDRがadapterを阻止した場合、直接実行したMSBuild logやfake adapter試験もraw adapter qualificationの代替にはせず、environment blockerとして記録します。
+
+`PACKET_CREATION_REFUSED`の後に固定Task IDのdirectoryが残った場合は、失敗時点のforensic evidenceとして保持します。そのdirectoryを削除、改名、上書きして同じrootで再試行せず、原因をレビューしてから新しいdemo rootをStageし直します。途中生成物を成功packetとして扱いません。回復時の監査tokenは`FRESH DEMO ROOT REQUIRED`とする。
 
 ## IBM Bob公式資料
 

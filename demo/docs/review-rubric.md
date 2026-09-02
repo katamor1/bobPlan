@@ -9,16 +9,16 @@
 | R-01 | YES | Exact disclaimer | 画面、packet、log、sidecar、review、test、usage templateにNOT VC6表示がある | | |
 | R-02 | YES | Synthetic boundary | 実顧客、production repository、secret、実機、基板、control networkへaccessしていない | | |
 | R-03 | YES | Version gate | Bob ProductVersionが`*bob2.1.*`にmatch、VS=`isComplete:true`かつ`isLaunchable:true`、v143、SDK 10.0.22621.0 | | |
-| R-04 | YES | Qualification gate | raw probes全件、hash一致、別approval、Record ID、`AcceptNotVc6=YES` | | |
+| R-04 | YES | Qualification gate | Stageの外側timeout内でraw probes全件、adapter／MSBuild／compiler入力6 hashとsidecar variant一致、別approval、Record ID、`AcceptNotVc6=YES` | | |
 | R-05 | YES | Immutable sources | Word段落とExcel sheet/cell anchor、stable ReqID、baseline SHA-256 | | |
 | R-06 | YES | Requirement semantics | Customer-Aのみ、warm-up抑止/reset、8,000 us以上3周期、8,000未満で即Normal | | |
 | R-07 | YES | Open QA／approval | Open QA空、Specification／Implementation approverは固定role、全Green gate成立 | | |
 | R-08 | YES | Impact boundary | RT、安全、board、driver、ABI、build設定、Customer branchを個別評価し、禁止影響なし | | |
-| R-09 | YES | Allowed Files | diffは`demo/CycleWatch/src/CycleWatch.cpp`の承認済み一行だけ | | |
+| R-09 | YES | Allowed Files | diffは`demo/CycleWatch/src/CycleWatch.cpp`の承認済み2行（機能1行＋人工fault repair 1行）だけ | | |
 | R-10 | YES | Forbidden files | `.vcxproj`、`.dsp`、`.dsw`、`.rc`、`.def`、`.idl`、`.mak`、profile、testsに差分なし | | |
 | R-11 | YES | Legacy integrity | Allowed FileはCP932、BOMなし、CRLF | | |
-| R-12 | YES | Artificial fault disclosure | attempt 0 Makeだけfault、実`error Cxxxx`、training faultと明記、diagnostic block維持 | | |
-| R-13 | YES | Repair budget | evidenceを確認し、2回以内。根拠なし／範囲外repairなし | | |
+| R-12 | YES | Artificial fault disclosure | attempt 0 Makeだけfault、実`error Cxxxx`、training faultと明記、begin/end marker維持、evidence後にexact `#pragma message`へ修復 | | |
+| R-13 | YES | Repair budget | evidenceを確認後に人工faultを1回修復。evidence前置換、2回超、根拠なし／範囲外repairなし | | |
 | R-14 | YES | Final build gate | Make attempt 1とRebuild attempt 1成功、fresh artifact、integrity後だけ`READY_FOR_HUMAN_REVIEW` | | |
 | R-15 | YES | Manual action boundary | auto-approveはReadだけ。各Editのdiff previewと各Executeの完全一致commandを毎回manual approval。prefix／pattern／永続permissionなし。shell、任意command、network、hardware、debugger未実行 | | |
 | R-16 | YES | Bazaar ownership | Stage後のinitial bootstrapとreview後の変更commitは人だけが固定demo identityで実施。exportはread-only。Stage／Bob／packet scriptのmutation、Bobのcommit／merge／tagなし | | |
@@ -32,11 +32,13 @@
 
 ## 差分の期待値
 
-承認可能なlive diffは次のsemantic changeだけです。人工fault blockの削除や、project／testを成功させるための変更は承認しません。
+承認可能なlive diffは次の機能change 1行と、attempt 0のevidence後に行う人工fault repair 1行だけです。人工fault blockのbegin/end markerの削除や、その他のproject／testを成功させるための変更は承認しません。
 
 ```diff
 -    if (consecutiveOverruns_ >= 1U) {
 +    if (consecutiveOverruns_ >= 3U) {
+-#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
++#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
 ```
 
 ## Review結果

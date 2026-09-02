@@ -10,6 +10,8 @@
 - [ ] Visual Studio instanceが`isComplete:true`かつ`isLaunchable:true`ではない。
 - [ ] v143またはWindows SDK 10.0.22621.0が存在しない。
 - [ ] Windows PowerShell 5.1／PowerShell 7のpackage testsが失敗している。
+- [ ] endpoint protection／EDRがadapter executableを削除、隔離、置換、または起動拒否した。保護機能の無効化や未承認の除外追加で継続してはならない。
+- [ ] demo root／sandboxへ予期しない主体、sync tool、別processが同時書込みでき、adapterの検査後にpathや内容を差し替え得る。
 - [ ] Stage／raw qualification evidence／役割による承認のいずれかが未完了である。
 - [ ] `-AcceptNotVc6`なしでdemo profileがenabledになっている。
 - [ ] 本番catalogが空でない、またはproduction exampleが`enabled:false`ではない。
@@ -38,10 +40,11 @@
 - [ ] `.vcxproj`、`.dsp`、`.dsw`、`.rc`、`.def`、`.idl`、`.mak`、またはAllowed Files外を編集した／編集しようとした。
 - [ ] CP932、BOMなし、CRLFのいずれかが崩れた。
 - [ ] approval画面のExecuteが完全一致する`Invoke-Vc6Build.ps1` commandではない。
+- [ ] adapter開始前からsandbox project配下に`bin`または`obj`が存在する、またはadapter作成後にreparse／別主体の変更が見つかった。
 - [ ] shell、任意command、Bazaar、network、実機、専用基板、driver、debuggerをBobが呼び出した／呼び出そうとした。
 - [ ] attempt 0 Make以外で`TEAM_BOB_DEMO_FAULT`がinjectされた。
 - [ ] 人工faultを実製品defectまたはVC6 qualificationの証拠として扱った。
-- [ ] repairが2回を超えた、またはevidenceに根拠のないrepairを行った。
+- [ ] repairが2回を超えた、evidenceに根拠のないrepairを行った、またはattempt 0の実compiler evidence取得前に訓練用`#error`を変更した。
 - [ ] `CODE_FAILED_STOP`、`ENVIRONMENT_FAILED`、`TIMED_OUT`、`INTEGRITY_FAILED`の後も継続した。
 - [ ] final Rebuildとintegrity検査の前に`READY_FOR_HUMAN_REVIEW`を出した。
 - [ ] 元working copyにbuild生成物またはAllowed Files外の変更が残った。

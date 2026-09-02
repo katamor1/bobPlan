@@ -435,6 +435,21 @@ exit $LASTEXITCODE
     Assert-Equal (Get-DemoLifecycleFingerprint $demoRoot) $approvedFingerprint 'Idempotent approval changes no evidence'
 
     $approvalMarkerBytes = [System.IO.File]::ReadAllBytes($markerPath)
+    $approvalRecordBytes = [System.IO.File]::ReadAllBytes($approvalRecordPath)
+    $stringBooleanApproval = Get-DemoLifecycleJson $approvalRecordPath
+    $stringBooleanApproval.approved = 'true'
+    $stringBooleanApproval.vc6Qualified = 'false'
+    Write-DemoLifecycleJson $approvalRecordPath $stringBooleanApproval
+    $stringBooleanMarker = Get-DemoLifecycleJson $markerPath
+    $stringBooleanMarker.approval.approvalSha256 = Get-DemoLifecycleHash $approvalRecordPath
+    Write-DemoLifecycleJson $markerPath $stringBooleanMarker
+    $stringBooleanRerun = Invoke-DemoLifecycleScript $preparePath $approveArgs
+    Assert-True ($stringBooleanRerun.ExitCode -ne 0) 'Approved rerun rejects string-valued approval booleans even when the marker hash matches'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].enabled $true 'String-boolean rejection leaves the approved catalog unchanged'
+    Assert-Equal (Get-DemoLifecycleHash $environmentPath) $demoEnvironmentHashBeforeApproval 'String-boolean rejection leaves the environment unchanged'
+    [System.IO.File]::WriteAllBytes($approvalRecordPath, $approvalRecordBytes)
+    [System.IO.File]::WriteAllBytes($markerPath, $approvalMarkerBytes)
+
     $alternateApprovalPath = Join-Path $demoRoot 'evidence\qualification\alternate-approval.json'
     Write-DemoLifecycleJson $alternateApprovalPath ([ordered]@{ schemaVersion = 'TAMPERED' })
     $tamperedApprovalMarker = Get-DemoLifecycleJson $markerPath

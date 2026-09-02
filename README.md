@@ -6,6 +6,8 @@
 
 完全な運用手順は [USAGE.md](profile/team-bob/USAGE.md) を正とします。この README は導入、境界、実行可能な入口を示します。
 
+IBM Bob IDE 2.1.xの90分技術評価は、完全合成データと実MSBuildを使う [demo package](demo/README.md) と [runbook](demo/docs/90-minute-runbook.md) を使います。demo adapterは既存wrapperの呼出し契約だけを評価するtest doubleであり、VC6のemulation、互換性試験、qualificationではありません。生成する画面表示と証跡は常に`MSBUILD DEMO ADAPTER — NOT VC6 QUALIFICATION`と明記します。
+
 ## 作業の考え方
 
 約 8,000 ファイル／約 100 MB を毎 task に読ませると Bobcoin と context を浪費し、根拠のない変更を誘発します。必ず `team-bob-work/<Task ID>/work-packet.md`、Bazaar の read-only evidence、対象を絞った検索、短く新しい phase 専用 Bob task を使います。計画のない全 repository 取り込みは行いません。

@@ -708,7 +708,8 @@ function Assert-DemoApprovalRecord {
         $record.recordId -cne $ExpectedRecordId -or $record.demoProfileId -cne $script:DemoProfileId -or $record.demoInstanceId -cne $Marker.demoInstanceId -or
         $record.pcId -cne [Environment]::MachineName -or $record.rawQualificationRelativePath -cne $Marker.paths.rawQualification -or
         $record.rawQualificationSha256 -cne $Marker.hashes.rawQualification -or $record.acceptedAt -cne $Marker.approval.recordedAt -or
-        $record.acceptNotVc6 -cne 'YES' -or $record.approved -ne $true -or $record.vc6Qualified -ne $false -or
+        $record.acceptNotVc6 -cne 'YES' -or -not ($record.approved -is [bool]) -or -not ($record.vc6Qualified -is [bool]) -or
+        $record.approved -ne $true -or $record.vc6Qualified -ne $false -or
         $record.targetPcReviewRole -cne 'DEMO-TARGET-PC-OWNER-ROLE' -or $record.operationsApprovalRole -cne 'DEMO-OPERATIONS-OWNER-ROLE') {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Approval record identity, evidence binding, roles, or NOT-VC6 decision is invalid.')
     }
