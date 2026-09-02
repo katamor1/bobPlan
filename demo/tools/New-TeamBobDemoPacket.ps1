@@ -150,14 +150,60 @@ function Assert-DemoApprovalRecord {
     }
 }
 
+function Get-DemoApprovedExecutionHelpers {
+    param([object]$Marker, [string]$Workspace, [string]$WorkspacePhysical)
+    if ($Marker.paths.distributionInventory -cne 'evidence/distribution-inventory.json' -or
+        -not ($Marker.hashes.distributionInventory -is [string]) -or [string]$Marker.hashes.distributionInventory -notmatch '^[0-9a-f]{64}$') {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Demo marker does not bind the fixed distribution inventory.')
+    }
+    $inventoryPath = Resolve-DemoRootPath ([string]$Marker.paths.distributionInventory) 'Distribution inventory evidence' 'Leaf'
+    Assert-DemoHash $inventoryPath $Marker.hashes.distributionInventory 'Distribution inventory evidence'
+    $inventory = Read-TeamBobJsonFile $inventoryPath 'Distribution inventory evidence' 'INTEGRITY_FAILED'
+    Assert-TeamBobExactProperties $inventory @('schemaVersion', 'banner', 'distributionRoot', 'recordedAt', 'entries') 'Distribution inventory evidence' 'INTEGRITY_FAILED'
+    if ($inventory.schemaVersion -cne '1.0' -or $inventory.banner -cne $script:DemoBanner -or
+        [string]::IsNullOrWhiteSpace([string]$Marker.distributionRoot) -or $inventory.distributionRoot -cne $Marker.distributionRoot) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Distribution inventory identity does not match the approved marker.')
+    }
+    $distributionRoot = Get-TeamBobCanonicalPath ([string]$Marker.distributionRoot) 'Distribution root' 'INTEGRITY_FAILED'
+    $distributionPhysical = Get-TeamBobPhysicalPath $distributionRoot 'Distribution root' 'Container' 'INTEGRITY_FAILED'
+    $definitions = @(
+        [pscustomobject]@{ RelativePath = 'profile/team-bob/tools/Start-TeamBobTask.ps1'; WorkspaceRelativePath = 'team-bob/tools/Start-TeamBobTask.ps1'; Label = 'Staged Start-TeamBobTask.ps1' },
+        [pscustomobject]@{ RelativePath = 'profile/team-bob/tools/TeamBob-BuildCommon.ps1'; WorkspaceRelativePath = 'team-bob/tools/TeamBob-BuildCommon.ps1'; Label = 'Staged task lifecycle helper' }
+    )
+    $approved = @()
+    foreach ($definition in $definitions) {
+        $matches = @($inventory.entries | Where-Object { $_.relativePath -ceq $definition.RelativePath })
+        if ($matches.Count -ne 1) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$($definition.Label) must have exactly one distribution inventory entry.") }
+        $entry = $matches[0]
+        Assert-TeamBobExactProperties $entry @('relativePath', 'length', 'sha256') "$($definition.Label) inventory entry" 'INTEGRITY_FAILED'
+        if (-not (Test-TeamBobInteger $entry.length) -or [int64]$entry.length -lt 0 -or
+            -not ($entry.sha256 -is [string]) -or [string]$entry.sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$($definition.Label) inventory entry is invalid.")
+        }
+        $distributionFile = ConvertTo-TeamBobRelativePath $distributionRoot $definition.RelativePath "$($definition.Label) distribution source" 'INTEGRITY_FAILED'
+        $distributionFilePhysical = Get-TeamBobPhysicalPath $distributionFile.FullPath "$($definition.Label) distribution source" 'Leaf' 'INTEGRITY_FAILED'
+        Assert-TeamBobPhysicalChild $distributionFilePhysical $distributionPhysical "$($definition.Label) distribution source" 'INTEGRITY_FAILED'
+        Assert-DemoHash $distributionFile.FullPath $entry.sha256 "$($definition.Label) distribution source"
+        if ((Get-Item -LiteralPath $distributionFile.FullPath).Length -ne [int64]$entry.length) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$($definition.Label) distribution length is invalid.") }
+
+        $workspaceFile = ConvertTo-TeamBobRelativePath $Workspace $definition.WorkspaceRelativePath $definition.Label 'INTEGRITY_FAILED'
+        $workspaceFilePhysical = Get-TeamBobPhysicalPath $workspaceFile.FullPath $definition.Label 'Leaf' 'INTEGRITY_FAILED'
+        Assert-TeamBobPhysicalChild $workspaceFilePhysical $WorkspacePhysical $definition.Label 'INTEGRITY_FAILED'
+        Assert-DemoHash $workspaceFile.FullPath $entry.sha256 $definition.Label
+        if ((Get-Item -LiteralPath $workspaceFile.FullPath).Length -ne [int64]$entry.length) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$($definition.Label) length differs from the approved inventory.") }
+        $approved += [pscustomobject]@{ Path = $workspaceFile.FullPath; Sha256 = [string]$entry.sha256 }
+    }
+    return [pscustomobject]@{ InventoryPath = $inventoryPath; Helpers = @($approved) }
+}
+
 function Get-DemoApprovedContext {
     $marker = Read-TeamBobJsonFile $markerPath 'Demo root marker' 'INTEGRITY_FAILED'
     Assert-DemoRequiredProperties $marker @(
-        'schemaVersion', 'banner', 'demoProfileId', 'demoInstanceId', 'demoRoot', 'pcId', 'userSid', 'state',
+        'schemaVersion', 'banner', 'demoProfileId', 'demoInstanceId', 'distributionRoot', 'demoRoot', 'pcId', 'userSid', 'state',
         'bazaarPath', 'bazaarSha256', 'paths', 'hashes', 'approval'
     ) 'Demo root marker'
-    Assert-DemoRequiredProperties $marker.paths @('workspace', 'catalog', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'environmentRegistration') 'Demo marker paths'
-    Assert-DemoRequiredProperties $marker.hashes @('catalog', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'demoEnvironment') 'Demo marker hashes'
+    Assert-DemoRequiredProperties $marker.paths @('workspace', 'catalog', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'environmentRegistration') 'Demo marker paths'
+    Assert-DemoRequiredProperties $marker.hashes @('catalog', 'lifecycleCommon', 'initialAllowedFile', 'rawQualification', 'distributionInventory', 'demoEnvironment') 'Demo marker hashes'
     $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     if ($marker.schemaVersion -cne '1.0' -or $marker.banner -cne $script:DemoBanner -or $marker.demoProfileId -cne $script:DemoProfileId -or
         [string]$marker.demoInstanceId -notmatch '^[0-9a-f]{32}$' -or $marker.demoRoot -cne $demoRoot -or
@@ -179,6 +225,8 @@ function Get-DemoApprovedContext {
     $workspacePhysical = Get-TeamBobPhysicalPath $workspace 'Staged workspace' 'Container' 'INTEGRITY_FAILED'
     $bzrPhysical = Get-TeamBobPhysicalPath (Join-Path $workspace '.bzr') 'Bazaar metadata root' 'Container' 'INTEGRITY_FAILED'
     Assert-TeamBobPhysicalChild $bzrPhysical $workspacePhysical 'Bazaar metadata root' 'INTEGRITY_FAILED'
+
+    $approvedExecution = Get-DemoApprovedExecutionHelpers $marker $workspace $workspacePhysical
 
     Assert-DemoApprovalRecord $marker
     $initialAllowedFilePath = Resolve-DemoRootPath $marker.paths.initialAllowedFile 'Initial Allowed File' 'Leaf'
@@ -204,6 +252,7 @@ function Get-DemoApprovedContext {
     return [pscustomobject]@{
         Marker = $marker; Workspace = $workspace; WorkspacePhysical = $workspacePhysical; Environment = $environment
         ProfileRoot = $profileRoot; CatalogPath = $catalogPath; EnvironmentPath = $environmentPath
+        DistributionInventoryPath = $approvedExecution.InventoryPath; ApprovedExecutionHelpers = @($approvedExecution.Helpers)
         MarkerSha256 = Get-TeamBobFileHash $markerPath; InitialAllowedFilePath = $initialAllowedFilePath
         InitialAllowedFileSha256 = [string]$marker.hashes.initialAllowedFile
     }
@@ -214,9 +263,24 @@ function Assert-DemoApprovedContextUnchanged {
     if ((Get-TeamBobFileHash $markerPath) -cne $Context.MarkerSha256 -or
         (Get-TeamBobFileHash $Context.CatalogPath) -cne [string]$Context.Marker.hashes.catalog -or
         (Get-TeamBobFileHash $Context.EnvironmentPath) -cne [string]$Context.Marker.hashes.demoEnvironment -or
-        (Get-TeamBobFileHash $commonPath) -cne [string]$Context.Marker.hashes.lifecycleCommon) {
+        (Get-TeamBobFileHash $commonPath) -cne [string]$Context.Marker.hashes.lifecycleCommon -or
+        (Get-TeamBobFileHash $Context.DistributionInventoryPath) -cne [string]$Context.Marker.hashes.distributionInventory) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Approved marker, catalog, environment, or helper changed during $Stage.")
     }
+    foreach ($helper in @($Context.ApprovedExecutionHelpers)) {
+        Assert-DemoHash $helper.Path $helper.Sha256 'Approved execution helper'
+    }
+}
+
+function Invoke-DemoBazaarProcess {
+    param([object]$Context, [string[]]$Arguments, [int[]]$AllowedExitCodes = @(0))
+    Push-Location -LiteralPath $Context.Workspace
+    try {
+        $lines = @(& $Context.Environment.bazaarPath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($AllowedExitCodes -notcontains [int]$exitCode) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Bazaar read failed with exit code $exitCode.") }
+    return (($lines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).TrimEnd()
 }
 
 function Invoke-DemoBazaarRead {
@@ -227,13 +291,25 @@ function Invoke-DemoBazaarRead {
         'version-info --custom --template={revision_id}'
     )
     if ($allowed -notcontains ($Arguments -join ' ')) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Unsupported Bazaar command requested by packet tool.') }
-    Push-Location -LiteralPath $Context.Workspace
-    try {
-        $lines = @(& $Context.Environment.bazaarPath @Arguments 2>&1)
-        $exitCode = $LASTEXITCODE
-    } finally { Pop-Location }
-    if ($exitCode -ne 0) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Bazaar read failed with exit code $exitCode.") }
-    return (($lines | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine).Trim()
+    $output = Invoke-DemoBazaarProcess $Context $Arguments
+    if (($Arguments -join ' ') -eq 'status --short') { return $output }
+    return $output.Trim()
+}
+
+function ConvertTo-DemoBazaarRevisionSpec {
+    param([string]$RevisionId, [string]$Label)
+    if ([string]::IsNullOrWhiteSpace($RevisionId) -or $RevisionId.Length -gt 255 -or
+        $RevisionId -notmatch '^[A-Za-z0-9][A-Za-z0-9@._+:/=-]*$' -or $RevisionId.Contains('..')) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label is not a safe full Bazaar revision ID.")
+    }
+    return 'revid:' + $RevisionId
+}
+
+function Invoke-DemoBazaarRangeRead {
+    param([object]$Context, [ValidateSet('status', 'diff')][string]$Action, [string]$FromRevision, [string]$ToRevision)
+    $range = (ConvertTo-DemoBazaarRevisionSpec $FromRevision 'Green baseline revision') + '..' + (ConvertTo-DemoBazaarRevisionSpec $ToRevision 'Current revision')
+    if ($Action -ceq 'status') { return Invoke-DemoBazaarProcess $Context @('status', '--short', '--revision', $range) }
+    return Invoke-DemoBazaarProcess $Context @('diff', '--revision', $range) @(0, 1)
 }
 
 function Get-DemoBazaarPreflight {
@@ -246,6 +322,35 @@ function Get-DemoBazaarPreflight {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar branch nick and full revision ID must both be non-empty.')
     }
     return [pscustomobject]@{ Branch = $branch; Revision = $revision }
+}
+
+function New-DemoTaskExecutionSnapshot {
+    param([object]$Context, [object]$Preflight)
+    return [pscustomobject]@{
+        AllowedFileSha256 = Get-TeamBobFileHash $Context.InitialAllowedFilePath
+        BazaarInventory = @(Get-TeamBobInventory (Join-Path $Context.Workspace '.bzr'))
+        Branch = [string]$Preflight.Branch
+        Revision = [string]$Preflight.Revision
+    }
+}
+
+function Assert-DemoTaskExecutionSnapshot {
+    param([object]$Context, [object]$Baseline)
+    $currentAllowedHash = Get-TeamBobFileHash $Context.InitialAllowedFilePath
+    $currentBazaarInventory = @(Get-TeamBobInventory (Join-Path $Context.Workspace '.bzr'))
+    if ($currentAllowedHash -cne $Baseline.AllowedFileSha256 -or
+        ($currentBazaarInventory -join "`n") -cne (@($Baseline.BazaarInventory) -join "`n")) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Allowed source or Bazaar metadata changed during Start-TeamBobTask execution.')
+    }
+    $postflight = Get-DemoBazaarPreflight $Context
+    if ($postflight.Branch -cne $Baseline.Branch -or $postflight.Revision -cne $Baseline.Revision) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar branch or full revision changed during Start-TeamBobTask execution.')
+    }
+    $afterReadInventory = @(Get-TeamBobInventory (Join-Path $Context.Workspace '.bzr'))
+    if ((Get-TeamBobFileHash $Context.InitialAllowedFilePath) -cne $Baseline.AllowedFileSha256 -or
+        ($afterReadInventory -join "`n") -cne (@($Baseline.BazaarInventory) -join "`n")) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Allowed source or Bazaar metadata changed during Start-TeamBobTask postflight reads.')
+    }
 }
 
 function Get-DemoPhaseIndex {
@@ -441,6 +546,14 @@ function New-DemoInputRecord {
     return [ordered]@{ role = $Role; path = $full; sha256 = Get-TeamBobFileHash $full }
 }
 
+function Assert-DemoNoOpenQa {
+    param([string]$Text, [string]$Label)
+    $matches = [regex]::Matches($Text, '(?im)^\s*Open QA:\s*(?<value>[^\r\n]*?)\s*$')
+    if ($matches.Count -ne 1 -or $matches[0].Groups['value'].Value.Trim() -cne 'NONE') {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must contain exactly one Open QA line whose value is NONE.")
+    }
+}
+
 function Assert-DemoRequirementsArtifacts {
     param([object]$Context)
     $inputs = Get-DemoExpectedInputMap $Context.Workspace 'Impact'
@@ -461,10 +574,11 @@ function Assert-DemoRequirementsArtifacts {
     }
     if (-not $hasRequirement -or -not $hasWord -or -not $hasQa) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Requirement ledger lacks the fixed ReqID or immutable Word/Excel source anchors.') }
     $spec = Read-TeamBobUtf8File $specPath 'External specification' 'INTEGRITY_FAILED'
+    Assert-DemoNoOpenQa $spec 'External specification'
     foreach ($pattern in @(
         [regex]::Escape($script:DemoBanner), [regex]::Escape($script:RequirementId), '(?i)Customer-A', '(?i)warm-up', '(?i)8000', '(?i)3\s+consecutive',
         '(?i)7999', '(?i)Normal', '(?i)board', '(?i)driver', '(?i)ABI', '(?i)control period',
-        '(?i)Open\s+QA\s*:\s*NONE', ('(?i)' + [regex]::Escape($script:SpecificationRole) + '.*APPROVED')
+        ('(?i)' + [regex]::Escape($script:SpecificationRole) + '.*APPROVED')
     )) {
         if ($spec -notmatch $pattern) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "External specification is missing required approved demo evidence: $pattern") }
     }
@@ -478,7 +592,8 @@ function Assert-DemoImpactArtifact {
     param([object]$Context)
     $path = Join-Path (Get-DemoTaskDirectory $Context.Workspace 'Impact') 'drafts\impact-analysis.md'
     $text = Read-TeamBobUtf8File $path 'Impact analysis' 'INTEGRITY_FAILED'
-    if ($text -notmatch [regex]::Escape($script:DemoBanner) -or $text -notmatch '(?i)Open\s+QA\s*:\s*NONE' -or
+    Assert-DemoNoOpenQa $text 'Impact analysis'
+    if ($text -notmatch [regex]::Escape($script:DemoBanner) -or
         $text -notmatch ('(?i)' + [regex]::Escape($script:ImplementationRole) + '.*APPROVED')) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Impact analysis lacks the NOT-VC6 banner, empty Open QA, or implementation-role approval.')
     }
@@ -498,6 +613,21 @@ function Assert-DemoImpactArtifact {
         }
     }
     return @((New-DemoInputRecord $Context 'impact-analysis' $path))
+}
+
+function Assert-DemoExactRepairDiff {
+    param([string]$Diff, [string]$Label)
+    $diffPaths = @([regex]::Matches($Diff, "(?m)^=== modified file '(?<path>[^']+)'\s*$") | ForEach-Object { $_.Groups['path'].Value.Replace('\\', '/') })
+    if ($diffPaths.Count -ne 1 -or $diffPaths[0] -cne $script:AllowedFile) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must modify only the approved Allowed File.")
+    }
+    $removedLines = @($Diff -split "`r?`n" | Where-Object { $_.StartsWith('-') -and -not $_.StartsWith('---') } | ForEach-Object { $_.Substring(1) } | Sort-Object)
+    $addedLines = @($Diff -split "`r?`n" | Where-Object { $_.StartsWith('+') -and -not $_.StartsWith('+++') } | ForEach-Object { $_.Substring(1) } | Sort-Object)
+    $expectedRemoved = @($script:InitialFaultLine, '    if (consecutiveOverruns_ >= 1U) {') | Sort-Object
+    $expectedAdded = @($script:RepairedFaultLine, '    if (consecutiveOverruns_ >= 3U) {') | Sort-Object
+    if (($removedLines -join "`n") -cne ($expectedRemoved -join "`n") -or ($addedLines -join "`n") -cne ($expectedAdded -join "`n")) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$Label must contain only the exact threshold repair and exact #error-to-pragma training-fault repair.")
+    }
 }
 
 function Assert-DemoGreenEvidence {
@@ -526,6 +656,14 @@ function Assert-DemoGreenEvidence {
         $initialFaultCount -ne 0 -or $repairedFaultCount -ne 1 -or $faultBeginCount -ne 1 -or $faultEndCount -ne 1) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Test requires the approved three-cycle behavior and exact one-line pragma repair inside the preserved fault-training markers.')
     }
+    $rangeStatus = Invoke-DemoBazaarRangeRead $Context 'status' ([string]$greenEntry.bazaarFullRevisionId) ([string]$Preflight.Revision)
+    $rangeStatusLines = @($rangeStatus -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($rangeStatusLines.Count -ne 1 -or $rangeStatusLines[0] -cnotmatch ('^ M\s+' + [regex]::Escape($script:AllowedFile) + '$')) {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Committed revision range must modify exactly one Allowed File.')
+    }
+    Assert-TeamBobBazaarStatus $rangeStatus @([pscustomobject]@{ RelativePath = $script:AllowedFile })
+    $rangeDiff = Invoke-DemoBazaarRangeRead $Context 'diff' ([string]$greenEntry.bazaarFullRevisionId) ([string]$Preflight.Revision)
+    Assert-DemoExactRepairDiff $rangeDiff 'Committed Bazaar revision range'
     $summaryPath = Join-Path $greenTask 'results\build-result.md'
     $reviewPath = Join-Path $greenTask 'drafts\code-review.md'
     $summary = Read-TeamBobUtf8File $summaryPath 'Build result summary' 'INTEGRITY_FAILED'
@@ -583,15 +721,7 @@ function Assert-DemoGreenEvidence {
     Assert-TeamBobBazaarStatus $status @([pscustomobject]@{ RelativePath = $script:AllowedFile })
     if ([string]::IsNullOrWhiteSpace($status)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar status evidence must contain the approved Allowed File modification.') }
     $diff = Read-TeamBobUtf8File $diffPath 'Bazaar diff evidence' 'INTEGRITY_FAILED'
-    $diffPaths = @([regex]::Matches($diff, "(?m)^=== modified file '(?<path>[^']+)'\s*$") | ForEach-Object { $_.Groups['path'].Value.Replace('\\', '/') })
-    if ($diffPaths.Count -ne 1 -or $diffPaths[0] -cne $script:AllowedFile) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar diff evidence must modify only the approved Allowed File.') }
-    $removedLines = @($diff -split "`r?`n" | Where-Object { $_.StartsWith('-') -and -not $_.StartsWith('---') } | ForEach-Object { $_.Substring(1) } | Sort-Object)
-    $addedLines = @($diff -split "`r?`n" | Where-Object { $_.StartsWith('+') -and -not $_.StartsWith('+++') } | ForEach-Object { $_.Substring(1) } | Sort-Object)
-    $expectedRemoved = @($script:InitialFaultLine, '    if (consecutiveOverruns_ >= 1U) {') | Sort-Object
-    $expectedAdded = @($script:RepairedFaultLine, '    if (consecutiveOverruns_ >= 3U) {') | Sort-Object
-    if (($removedLines -join "`n") -cne ($expectedRemoved -join "`n") -or ($addedLines -join "`n") -cne ($expectedAdded -join "`n")) {
-        throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar diff must contain only the exact threshold repair and exact #error-to-pragma training-fault repair.')
-    }
+    Assert-DemoExactRepairDiff $diff 'Bazaar diff evidence'
     $nick = (Read-TeamBobUtf8File $nickPath 'Bazaar nick evidence' 'INTEGRITY_FAILED').Trim()
     $revision = (Read-TeamBobUtf8File $revisionPath 'Bazaar revision evidence' 'INTEGRITY_FAILED').Trim()
     if ($nick -cne $greenEntry.bazaarBranch -or $revision -cne $greenEntry.bazaarFullRevisionId) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Bazaar evidence branch/revision does not match the Green baseline.') }
@@ -644,7 +774,7 @@ function Invoke-DemoStartTask {
         [object]$Context, [string]$TaskId, [string]$Classification, [string]$WordBaseline, [string]$QaBaseline,
         [string]$SpecBaseline, [string]$SpecificationApprover, [string]$ImplementationApprover, [bool]$ImpactsClear
     )
-    $startScript = Join-Path $Context.ProfileRoot 'tools\Start-TeamBobTask.ps1'
+    $startScript = [string]@($Context.ApprovedExecutionHelpers)[0].Path
     [void](Get-TeamBobPhysicalPath $startScript 'Installed Start-TeamBobTask.ps1' 'Leaf' 'INTEGRITY_FAILED')
     $parameters = [ordered]@{
         TaskId = $TaskId; BazaarRoot = $Context.Workspace; Difficulty = 'Small'; Classification = $Classification
@@ -805,7 +935,9 @@ try {
     $specApprover = $script:SpecificationRole
     $implementationApprover = if ($Phase -ceq 'Test') { $script:IndependentReviewRole } else { $script:ImplementationRole }
     $impactsClear = ($Phase -ceq 'Green' -or $Phase -ceq 'Test')
+    $executionSnapshot = New-DemoTaskExecutionSnapshot $context $preflight
     [void](Invoke-DemoStartTask $context $script:TaskIds[$Phase] $classification $wordBaseline $qaBaseline $specBaseline $specApprover $implementationApprover $impactsClear)
+    Assert-DemoTaskExecutionSnapshot $context $executionSnapshot
     Assert-DemoApprovedContextUnchanged $context 'Start-TeamBobTask execution'
     $packetInfo = Assert-DemoCreatedPacket $context $Phase $classification $preflight $wordBaseline $qaBaseline $specBaseline $specApprover $implementationApprover $impactsClear
     $chainPath = Write-DemoChainCreateOnly $context $Phase $packetInfo $inputs $previousChain

@@ -119,8 +119,19 @@ function New-DemoPacketFixture {
 @echo off
 if not "%TEAM_BOB_PACKET_BZR_LOG%"=="" echo %*>>"%TEAM_BOB_PACKET_BZR_LOG%"
 if /I "%1"=="status" (
+  if /I "%3"=="--revision" (
+    type "%TEAM_BOB_PACKET_BZR_RANGE_STATUS_FILE%"
+    exit /b 0
+  )
   if not "%TEAM_BOB_PACKET_BZR_STATUS%"=="" echo %TEAM_BOB_PACKET_BZR_STATUS%
   exit /b 0
+)
+if /I "%1"=="diff" (
+  if /I "%2"=="--revision" (
+    type "%TEAM_BOB_PACKET_BZR_RANGE_DIFF_FILE%"
+    exit /b 0
+  )
+  exit /b 91
 )
 if /I "%1"=="nick" (
   echo %TEAM_BOB_PACKET_BZR_NICK%
@@ -134,6 +145,10 @@ exit /b 91
 '@
     $fakeAdapter = Join-Path $demoRoot 'tools\DemoMsdevAdapter.exe'
     Write-DemoPacketText $fakeAdapter "fixture adapter`r`n"
+    $rangeStatusPath = Join-Path $FixtureRoot 'bazaar-range-status.txt'
+    $rangeDiffPath = Join-Path $FixtureRoot 'bazaar-range-diff.patch'
+    Write-DemoPacketText $rangeStatusPath ''
+    Write-DemoPacketText $rangeDiffPath ''
 
     $profile = [ordered]@{
         id = 'demo-msbuild-protocol-v1-not-vc6'; enabled = $true
@@ -182,10 +197,29 @@ exit /b 91
 
     $initialAllowedFile = Join-Path $workspace 'demo\CycleWatch\src\CycleWatch.cpp'
 
+    $distributionRoot = Join-Path $FixtureRoot 'distribution-root'
+    foreach ($relativePath in @('profile\team-bob\tools\Start-TeamBobTask.ps1', 'profile\team-bob\tools\TeamBob-BuildCommon.ps1')) {
+        $destination = Join-Path $distributionRoot $relativePath
+        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $destination))
+        [System.IO.File]::Copy((Join-Path $RepositoryRoot $relativePath), $destination, $false)
+    }
+    $inventoryPath = Join-Path $demoRoot 'evidence\distribution-inventory.json'
+    $inventoryEntries = @(
+        'profile/team-bob/tools/Start-TeamBobTask.ps1',
+        'profile/team-bob/tools/TeamBob-BuildCommon.ps1'
+    ) | ForEach-Object {
+        $sourcePath = Join-Path $distributionRoot ($_.Replace('/', '\'))
+        [ordered]@{ relativePath = $_; length = [int64](Get-Item -LiteralPath $sourcePath).Length; sha256 = Get-DemoPacketHash $sourcePath }
+    }
+    Write-DemoPacketJson $inventoryPath ([ordered]@{
+        schemaVersion = '1.0'; banner = $script:DemoPacketBanner; distributionRoot = $distributionRoot
+        recordedAt = '2026-09-03T00:00:00.0000000+00:00'; entries = @($inventoryEntries)
+    })
+
     $markerPath = Join-Path $demoRoot '.team-bob-demo-marker.json'
     Write-DemoPacketJson $markerPath ([ordered]@{
         schemaVersion = '1.0'; banner = $script:DemoPacketBanner; demoProfileId = 'demo-msbuild-protocol-v1-not-vc6'; demoInstanceId = $instanceId
-        distributionRoot = $RepositoryRoot; demoRoot = $demoRoot; pcId = [Environment]::MachineName
+        distributionRoot = $distributionRoot; demoRoot = $demoRoot; pcId = [Environment]::MachineName
         userSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; state = 'APPROVED'
         createdAt = '2026-09-03T00:00:00.0000000+00:00'; updatedAt = '2026-09-03T00:00:01.0000000+00:00'
         msBuildPath = $fakeAdapter; msBuildSha256 = Get-DemoPacketHash $fakeAdapter; bazaarPath = $fakeBazaar; bazaarSha256 = Get-DemoPacketHash $fakeBazaar
@@ -200,7 +234,7 @@ exit /b 91
         }
         hashes = [ordered]@{
             catalog = Get-DemoPacketHash $catalogPath; adapter = Get-DemoPacketHash $fakeAdapter; buildManifest = ('b' * 64); lifecycleCommon = Get-DemoPacketHash $lifecycleCommon
-            rawQualification = $rawQualificationHash; distributionInventory = ('d' * 64); usageLog = ('e' * 64); negativePacket = ('f' * 64)
+            rawQualification = $rawQualificationHash; distributionInventory = Get-DemoPacketHash $inventoryPath; usageLog = ('e' * 64); negativePacket = ('f' * 64)
             initialAllowedFile = Get-DemoPacketHash $initialAllowedFile
             environmentBackupMetadata = ('1' * 64); demoEnvironment = Get-DemoPacketHash $environmentPath
         }
@@ -212,7 +246,8 @@ exit /b 91
     return [pscustomobject]@{
         DemoRoot = $demoRoot; Workspace = $workspace; ToolPath = $toolPath; LocalAppData = $localAppData
         BazaarPath = $fakeBazaar; BazaarLog = (Join-Path $FixtureRoot 'bazaar-commands.log'); MarkerPath = $markerPath
-        RawQualificationPath = $rawQualificationPath; ApprovalPath = $approvalPath
+        RawQualificationPath = $rawQualificationPath; ApprovalPath = $approvalPath; DistributionRoot = $distributionRoot; InventoryPath = $inventoryPath
+        RangeStatusPath = $rangeStatusPath; RangeDiffPath = $rangeDiffPath
     }
 }
 
@@ -264,12 +299,14 @@ function Write-DemoGreenEvidence {
     })
     Write-DemoPacketText (Join-Path $task 'drafts\code-review.md') "$($script:DemoPacketBanner)`r`n# Code Review`r`nAllowed Files: demo/CycleWatch/src/CycleWatch.cpp only`r`nArtificial training fault replacement and three-cycle semantic repair disclosed.`r`nHuman Disposition: DEMO-INDEPENDENT-REVIEWER-ROLE APPROVED`r`n"
     Write-DemoPacketText (Join-Path $task 'results\bazaar-status.txt') " M  demo/CycleWatch/src/CycleWatch.cpp`r`n"
+    Write-DemoPacketText $Fixture.RangeStatusPath " M  demo/CycleWatch/src/CycleWatch.cpp`r`n"
     $diff = @(
         "=== modified file 'demo/CycleWatch/src/CycleWatch.cpp'", '--- old/demo/CycleWatch/src/CycleWatch.cpp', '+++ new/demo/CycleWatch/src/CycleWatch.cpp',
         ('-' + $script:DemoPacketInitialFaultLine), ('+' + $script:DemoPacketRepairedFaultLine),
         '-    if (consecutiveOverruns_ >= 1U) {', '+    if (consecutiveOverruns_ >= 3U) {'
     ) -join "`r`n"
     Write-DemoPacketText (Join-Path $task 'results\bazaar-diff.patch') ($diff + "`r`n")
+    Write-DemoPacketText $Fixture.RangeDiffPath ($diff + "`r`n")
     Write-DemoPacketText (Join-Path $task 'results\bazaar-nick.txt') "demo-fixture-branch`r`n"
     Write-DemoPacketText (Join-Path $task 'results\bazaar-revision-id.txt') "demo-fixture-revision-001`r`n"
     Write-DemoPacketJson (Join-Path $task 'results\bazaar-evidence-manifest.json') ([ordered]@{
@@ -296,6 +333,8 @@ $savedLog = $env:TEAM_BOB_PACKET_BZR_LOG
 $savedStatus = $env:TEAM_BOB_PACKET_BZR_STATUS
 $savedNick = $env:TEAM_BOB_PACKET_BZR_NICK
 $savedRevision = $env:TEAM_BOB_PACKET_BZR_REVISION
+$savedRangeStatusFile = $env:TEAM_BOB_PACKET_BZR_RANGE_STATUS_FILE
+$savedRangeDiffFile = $env:TEAM_BOB_PACKET_BZR_RANGE_DIFF_FILE
 try {
     $fixture = New-DemoPacketFixture $repositoryRoot $fixtureRoot $packetToolSource
     $env:LOCALAPPDATA = $fixture.LocalAppData
@@ -303,12 +342,67 @@ try {
     $env:TEAM_BOB_PACKET_BZR_STATUS = ''
     $env:TEAM_BOB_PACKET_BZR_NICK = 'demo-fixture-branch'
     $env:TEAM_BOB_PACKET_BZR_REVISION = 'demo-fixture-revision-001'
+    $env:TEAM_BOB_PACKET_BZR_RANGE_STATUS_FILE = $fixture.RangeStatusPath
+    $env:TEAM_BOB_PACKET_BZR_RANGE_DIFF_FILE = $fixture.RangeDiffPath
     Write-DemoPacketText $fixture.BazaarLog ''
     $bzrBefore = Get-DemoTreeFingerprint (Join-Path $fixture.Workspace '.bzr')
 
     $allowedPath = Join-Path $fixture.Workspace 'demo\CycleWatch\src\CycleWatch.cpp'
     $initialAllowedBytes = [System.IO.File]::ReadAllBytes($allowedPath)
     $cp932 = [System.Text.Encoding]::GetEncoding(932)
+
+    $workspaceCommonPath = Join-Path $fixture.Workspace 'team-bob\tools\TeamBob-BuildCommon.ps1'
+    $workspaceCommonBytes = [System.IO.File]::ReadAllBytes($workspaceCommonPath)
+    Write-DemoPacketBytes $workspaceCommonPath ($workspaceCommonBytes + $script:DemoPacketUtf8NoBom.GetBytes("`r`n# unapproved helper tamper`r`n"))
+    $tamperedHelper = Invoke-DemoPacketTool $fixture.ToolPath 'Requirements' $fixture.Workspace
+    Assert-True ($tamperedHelper.ExitCode -ne 0) 'Requirements rejects a staged execution helper whose hash differs from the marker-bound distribution inventory'
+    Assert-True ($tamperedHelper.Output -match 'SHA-256 does not match') 'Execution-helper tamper is rejected by the marker-bound helper hash'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-REQUIREMENTS-001'))) 'Execution-helper tamper creates no Requirements task'
+    [System.IO.File]::WriteAllBytes($workspaceCommonPath, $workspaceCommonBytes)
+
+    $workspaceStartPath = Join-Path $fixture.Workspace 'team-bob\tools\Start-TeamBobTask.ps1'
+    $distributionStartPath = Join-Path $fixture.DistributionRoot 'profile\team-bob\tools\Start-TeamBobTask.ps1'
+    $workspaceStartBytes = [System.IO.File]::ReadAllBytes($workspaceStartPath)
+    $distributionStartBytes = [System.IO.File]::ReadAllBytes($distributionStartPath)
+    $inventoryBytes = [System.IO.File]::ReadAllBytes($fixture.InventoryPath)
+    $approvedInventoryHash = Get-DemoPacketHash $fixture.InventoryPath
+    $approvedMarkerBytes = [System.IO.File]::ReadAllBytes($fixture.MarkerPath)
+    $bzrMetadataPath = Join-Path $fixture.Workspace '.bzr\branch.conf'
+    $bzrMetadataBytes = [System.IO.File]::ReadAllBytes($bzrMetadataPath)
+    $startText = $script:DemoPacketUtf8NoBom.GetString($workspaceStartBytes)
+    $dotSourceLine = ". (Join-Path `$PSScriptRoot 'TeamBob-BuildCommon.ps1')"
+    $mutation = @"
+$dotSourceLine
+[System.IO.File]::AppendAllText((Join-Path `$BazaarRoot '.bzr\branch.conf'), 'trusted-helper-mutation')
+[System.IO.File]::AppendAllText((Join-Path `$BazaarRoot 'demo\CycleWatch\src\CycleWatch.cpp'), '// trusted-helper-mutation')
+"@
+    $mutatingStartBytes = $script:DemoPacketUtf8NoBom.GetBytes($startText.Replace($dotSourceLine, ($mutation.TrimEnd() -replace "(?<!`r)`n", "`r`n")))
+    [System.IO.File]::WriteAllBytes($workspaceStartPath, $mutatingStartBytes)
+    [System.IO.File]::WriteAllBytes($distributionStartPath, $mutatingStartBytes)
+    $mutatingInventory = Get-DemoPacketJson $fixture.InventoryPath
+    $startEntry = @($mutatingInventory.entries | Where-Object { $_.relativePath -ceq 'profile/team-bob/tools/Start-TeamBobTask.ps1' })[0]
+    $startEntry.length = [int64]$mutatingStartBytes.Length
+    $startEntry.sha256 = Get-DemoPacketHash $distributionStartPath
+    Write-DemoPacketJson $fixture.InventoryPath $mutatingInventory
+    $mutatingInventoryHash = Get-DemoPacketHash $fixture.InventoryPath
+    $approvedMarkerText = $script:DemoPacketUtf8NoBom.GetString($approvedMarkerBytes)
+    $mutatingMarkerText = $approvedMarkerText.Replace($approvedInventoryHash, $mutatingInventoryHash)
+    Assert-True ($mutatingMarkerText -cne $approvedMarkerText) 'Fixture rebinds the mutating helper inventory without reserializing marker timestamps'
+    Write-DemoPacketText $fixture.MarkerPath $mutatingMarkerText
+    try {
+        $mutatingHelper = Invoke-DemoPacketTool $fixture.ToolPath 'Requirements' $fixture.Workspace
+        Assert-True ($mutatingHelper.ExitCode -ne 0) 'Requirements rejects an inventory-approved helper that mutates Allowed source or Bazaar metadata during task creation'
+        Assert-True ($mutatingHelper.Output -match 'Allowed source or Bazaar metadata changed during Start-TeamBobTask execution') ('Inventory-approved mutation is rejected by the execution snapshot: ' + $mutatingHelper.Output)
+    } finally {
+        [System.IO.File]::WriteAllBytes($workspaceStartPath, $workspaceStartBytes)
+        [System.IO.File]::WriteAllBytes($distributionStartPath, $distributionStartBytes)
+        [System.IO.File]::WriteAllBytes($fixture.InventoryPath, $inventoryBytes)
+        [System.IO.File]::WriteAllBytes($fixture.MarkerPath, $approvedMarkerBytes)
+        [System.IO.File]::WriteAllBytes($bzrMetadataPath, $bzrMetadataBytes)
+        [System.IO.File]::WriteAllBytes($allowedPath, $initialAllowedBytes)
+        $mutatingTaskPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-REQUIREMENTS-001'
+        if (Test-Path -LiteralPath $mutatingTaskPath -PathType Container) { [System.IO.Directory]::Delete($mutatingTaskPath, $true) }
+    }
 
     $approvalBytes = [System.IO.File]::ReadAllBytes($fixture.ApprovalPath)
     $markerBytes = [System.IO.File]::ReadAllBytes($fixture.MarkerPath)
@@ -364,6 +458,12 @@ try {
     Assert-True ($openQaImpact.ExitCode -ne 0) 'Impact rejects a requirement ledger with Open QA'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-IMPACT-001'))) 'Open QA rejection creates no Impact task'
     Write-DemoRequirementsArtifacts $fixture.Workspace 'CLOSED'
+    $requirementsSpecPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-REQUIREMENTS-001\drafts\external-spec.md'
+    [System.IO.File]::AppendAllText($requirementsSpecPath, "`r`nOpen QA: BLOCKED`r`n", $script:DemoPacketUtf8NoBom)
+    $contradictorySpecQa = Invoke-DemoPacketTool $fixture.ToolPath 'Impact' $fixture.Workspace
+    Assert-True ($contradictorySpecQa.ExitCode -ne 0) ('Impact rejects an external specification that contradicts Open QA NONE with another Open QA line: ' + $contradictorySpecQa.Output)
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-IMPACT-001'))) 'Contradictory specification Open QA creates no Impact task'
+    Write-DemoRequirementsArtifacts $fixture.Workspace 'CLOSED'
     $impact = Invoke-DemoPacketTool $fixture.ToolPath 'Impact' $fixture.Workspace
     Assert-Equal $impact.ExitCode 0 ("Impact packet succeeds: " + $impact.Output)
     $impactChainPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-IMPACT-001\results\demo-phase-chain.json'
@@ -384,6 +484,12 @@ try {
     $nonGreen = Invoke-DemoPacketTool $fixture.ToolPath 'Green' $fixture.Workspace
     Assert-True ($nonGreen.ExitCode -ne 0) 'Green rejects an impact disposition that is not CLEAR'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-GREEN-001'))) 'Non-Green impact rejection creates no Green task'
+    Write-DemoImpactArtifact $fixture.Workspace 'CLEAR'
+    $impactArtifactPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-IMPACT-001\drafts\impact-analysis.md'
+    [System.IO.File]::AppendAllText($impactArtifactPath, "Open QA: BLOCKED`r`n", $script:DemoPacketUtf8NoBom)
+    $contradictoryImpactQa = Invoke-DemoPacketTool $fixture.ToolPath 'Green' $fixture.Workspace
+    Assert-True ($contradictoryImpactQa.ExitCode -ne 0) 'Green rejects an impact analysis that contradicts Open QA NONE with another Open QA line'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-GREEN-001'))) 'Contradictory impact Open QA creates no Green task'
     Write-DemoImpactArtifact $fixture.Workspace 'CLEAR'
 
     $env:TEAM_BOB_PACKET_BZR_STATUS = ' M  demo/CycleWatch/src/CycleWatch.cpp'
@@ -428,6 +534,25 @@ try {
     Assert-True ($allowedText -notmatch '(?m)^#error\s+MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT') 'Fixture removes the exact initial compiler fault line'
     Assert-Equal ([regex]::Matches($allowedText, [regex]::Escape($script:DemoPacketRepairedFaultLine))).Count 1 'Fixture installs exactly one approved pragma repair marker'
     [System.IO.File]::WriteAllBytes($allowedPath, $cp932.GetBytes($allowedText))
+
+    $rangeDiffBytes = [System.IO.File]::ReadAllBytes($fixture.RangeDiffPath)
+    [System.IO.File]::AppendAllText($fixture.RangeDiffPath, "+// unauthorized third revision delta`r`n", $script:DemoPacketUtf8NoBom)
+    $thirdRevisionDelta = Invoke-DemoPacketTool $fixture.ToolPath 'Test' $fixture.Workspace
+    Assert-True ($thirdRevisionDelta.ExitCode -ne 0) 'Test rejects a committed revision range with a third changed line in the Allowed File'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-TEST-001'))) 'Third revision delta creates no Test task'
+    [System.IO.File]::WriteAllBytes($fixture.RangeDiffPath, $rangeDiffBytes)
+
+    [System.IO.File]::AppendAllText($fixture.RangeDiffPath, "=== modified file 'README.md'`r`n", $script:DemoPacketUtf8NoBom)
+    $extraFileRevisionDelta = Invoke-DemoPacketTool $fixture.ToolPath 'Test' $fixture.Workspace
+    Assert-True ($extraFileRevisionDelta.ExitCode -ne 0) 'Test rejects a committed revision range that includes an extra file'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-TEST-001'))) 'Extra-file revision delta creates no Test task'
+    [System.IO.File]::WriteAllBytes($fixture.RangeDiffPath, $rangeDiffBytes)
+
+    $env:TEAM_BOB_PACKET_BZR_REVISION = 'unsafe..revision'
+    $unsafeRevision = Invoke-DemoPacketTool $fixture.ToolPath 'Test' $fixture.Workspace
+    Assert-True ($unsafeRevision.ExitCode -ne 0) 'Test rejects an unsafe Bazaar revision ID before composing a revision range'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Workspace 'team-bob-work\DEMO-TEST-001'))) 'Unsafe Bazaar revision ID creates no Test task'
+    $env:TEAM_BOB_PACKET_BZR_REVISION = 'demo-fixture-revision-002-after-human-commit'
 
     $failedBuildPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-GREEN-001\results\build-result-20260903T0000000000000Z-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json'
     $failedBuildBytes = [System.IO.File]::ReadAllBytes($failedBuildPath)
@@ -492,9 +617,9 @@ try {
     $commands = @(Get-Content -LiteralPath $fixture.BazaarLog | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     Assert-True ($commands.Count -gt 0) 'Packet progression performs Bazaar preflight reads'
     foreach ($command in $commands) {
-        Assert-True ($command -match '^(status --short|nick|version-info --custom --template=\{revision_id\})$') "Packet tool invokes only an approved Bazaar read: $command"
+        Assert-True ($command -match '^(status --short|nick|version-info --custom --template=\{revision_id\}|status --short --revision revid:[A-Za-z0-9@._+:/=-]+\.\.revid:[A-Za-z0-9@._+:/=-]+|diff --revision revid:[A-Za-z0-9@._+:/=-]+\.\.revid:[A-Za-z0-9@._+:/=-]+)$') "Packet tool invokes only an approved Bazaar read: $command"
     }
-    Assert-True (-not (($commands -join "`n") -match '(?i)\b(init|add|commit|merge|tag|whoami|push|pull|remove|delete)\b')) 'Packet tool invokes zero Bazaar mutation or identity commands'
+    Assert-True (-not (($commands -join "`n") -match '(?im)^(init|add|commit|merge|tag|whoami|push|pull|remove|delete)(?:\s|$)')) 'Packet tool invokes zero Bazaar mutation or identity commands'
     Assert-Equal (Get-DemoTreeFingerprint (Join-Path $fixture.Workspace '.bzr')) $bzrBefore 'All packet phases preserve .bzr bytes'
     $allChainText = [System.IO.File]::ReadAllText((Join-Path $fixture.Workspace 'team-bob-work\DEMO-TEST-001\results\demo-phase-chain.json'), [System.Text.Encoding]::UTF8)
     Assert-True ($allChainText -notmatch '(?i)"(person|operator|member|name|email|account|user)"\s*:') 'Phase chain has no personal-identity field'
@@ -504,6 +629,8 @@ try {
     if ($null -eq $savedStatus) { Remove-Item Env:TEAM_BOB_PACKET_BZR_STATUS -ErrorAction SilentlyContinue } else { $env:TEAM_BOB_PACKET_BZR_STATUS = $savedStatus }
     if ($null -eq $savedNick) { Remove-Item Env:TEAM_BOB_PACKET_BZR_NICK -ErrorAction SilentlyContinue } else { $env:TEAM_BOB_PACKET_BZR_NICK = $savedNick }
     if ($null -eq $savedRevision) { Remove-Item Env:TEAM_BOB_PACKET_BZR_REVISION -ErrorAction SilentlyContinue } else { $env:TEAM_BOB_PACKET_BZR_REVISION = $savedRevision }
+    if ($null -eq $savedRangeStatusFile) { Remove-Item Env:TEAM_BOB_PACKET_BZR_RANGE_STATUS_FILE -ErrorAction SilentlyContinue } else { $env:TEAM_BOB_PACKET_BZR_RANGE_STATUS_FILE = $savedRangeStatusFile }
+    if ($null -eq $savedRangeDiffFile) { Remove-Item Env:TEAM_BOB_PACKET_BZR_RANGE_DIFF_FILE -ErrorAction SilentlyContinue } else { $env:TEAM_BOB_PACKET_BZR_RANGE_DIFF_FILE = $savedRangeDiffFile }
     $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\')
     $fixtureFull = [System.IO.Path]::GetFullPath($fixtureRoot).TrimEnd('\')
     if ($fixtureFull.StartsWith($tempRoot + '\', [System.StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $fixtureFull) -match '^team-bob-demo-packets-[0-9a-f]{32}$') {
