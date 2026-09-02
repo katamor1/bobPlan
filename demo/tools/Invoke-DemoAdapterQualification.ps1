@@ -64,6 +64,14 @@ function Get-DemoQualificationHash {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-DemoQualificationSourceVariant {
+    param([string]$Hash, [object]$Manifest)
+    if ($Hash -ceq [string]$Manifest.cycleWatchSourceBaselineSha256) { return 'baseline-error' }
+    if ($Hash -ceq [string]$Manifest.cycleWatchSourceThreshold3ErrorSha256) { return 'threshold3-error' }
+    if ($Hash -ceq [string]$Manifest.cycleWatchSourceThreshold3FixedSha256) { return 'threshold3-fixed' }
+    return $null
+}
+
 function Assert-DemoQualificationProperties {
     param([object]$Value, [string[]]$Expected, [string]$Label)
     $actual = @($Value.PSObject.Properties.Name | Sort-Object)
@@ -152,6 +160,7 @@ function Get-DemoQualificationValidatedEvidence {
             'schemaVersion', 'banner', 'taskId', 'invocationId', 'action', 'attempt', 'faultInjected',
             'adapterSha256', 'msBuildPath', 'msBuildSha256', 'sandboxRoot', 'logRoot', 'projectRelativePath',
             'projectSha256', 'vcxProjectSha256', 'target', 'expectedArtifactRelativePath', 'expectedArtifactSha256',
+            'cycleWatchSourceSha256', 'cycleWatchSourceVariant', 'cycleWatchHeaderSha256', 'cycleWatchTestsSha256',
             'nativeExitCode', 'startedAt', 'finishedAt', 'status', 'environmentError'
         )
         Assert-DemoQualificationProperties $evidence $fields 'Adapter evidence sidecar'
@@ -166,6 +175,15 @@ function Get-DemoQualificationValidatedEvidence {
             $evidence.vcxProjectSha256 -cne [string]$Manifest.vcxProjectSha256 -or $evidence.target -cne [string]$Manifest.target -or
             $evidence.expectedArtifactRelativePath -cne [string]$Manifest.expectedArtifactRelativePath -or
             [int]$evidence.nativeExitCode -ne $NativeExitCode -or $evidence.status -cne $Status -or $null -ne $evidence.environmentError) { return $null }
+        $sourceHash = Get-DemoQualificationHash (Join-Path $Invocation.ProjectDirectory 'src\CycleWatch.cpp')
+        $headerHash = Get-DemoQualificationHash (Join-Path $Invocation.ProjectDirectory 'include\CycleWatch.h')
+        $testsHash = Get-DemoQualificationHash (Join-Path $Invocation.ProjectDirectory 'tests\CycleWatchTests.cpp')
+        $sourceVariant = Get-DemoQualificationSourceVariant $sourceHash $Manifest
+        if ($null -eq $sourceVariant -or $evidence.cycleWatchSourceSha256 -cne $sourceHash -or
+            $evidence.cycleWatchSourceVariant -cne $sourceVariant -or
+            $evidence.cycleWatchHeaderSha256 -cne $headerHash -or $headerHash -cne [string]$Manifest.cycleWatchHeaderSha256 -or
+            $evidence.cycleWatchTestsSha256 -cne $testsHash -or
+            ($testsHash -cne [string]$Manifest.cycleWatchTestsSha256 -and $testsHash -cne [string]$Manifest.cycleWatchTestsLinkerProbeSha256)) { return $null }
         $started = [DateTimeOffset]::Parse([string]$evidence.startedAt, [System.Globalization.CultureInfo]::InvariantCulture)
         $finished = [DateTimeOffset]::Parse([string]$evidence.finishedAt, [System.Globalization.CultureInfo]::InvariantCulture)
         if ($finished -lt $started) { return $null }
@@ -287,6 +305,8 @@ try {
         'schemaVersion', 'banner', 'adapterSourceRelativePath', 'adapterSourceSha256', 'generatedConfigurationSha256',
         'msBuildPath', 'msBuildSha256', 'cscPath', 'cscSha256', 'distributionRoot', 'sandboxRoot', 'logRoot',
         'projectRelativePath', 'projectSha256', 'vcxProjectSha256', 'target', 'expectedArtifactRelativePath',
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256',
+        'cycleWatchSourceBaselineSha256', 'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256',
         'outputFileName', 'outputSha256'
     )
     Assert-DemoQualificationProperties $manifest $manifestFields 'Build manifest'
@@ -305,6 +325,17 @@ try {
     Assert-DemoQualificationFile $projectSource 'Distribution DSP'
     Assert-DemoQualificationFile $vcxSource 'Distribution VCX project'
     if ((Get-DemoQualificationHash $projectSource) -cne [string]$manifest.projectSha256 -or (Get-DemoQualificationHash $vcxSource) -cne [string]$manifest.vcxProjectSha256) { throw 'Distribution project hashes do not match build manifest.' }
+    $sourceBaseline = Join-Path $script:QualificationDistributionRoot 'demo\CycleWatch\src\CycleWatch.cpp'
+    $headerBaseline = Join-Path $script:QualificationDistributionRoot 'demo\CycleWatch\include\CycleWatch.h'
+    $testsBaseline = Join-Path $script:QualificationDistributionRoot 'demo\CycleWatch\tests\CycleWatchTests.cpp'
+    foreach ($entry in @(
+        @{ Path = $sourceBaseline; Label = 'Distribution CycleWatch source' },
+        @{ Path = $headerBaseline; Label = 'Distribution CycleWatch header' },
+        @{ Path = $testsBaseline; Label = 'Distribution CycleWatch tests' }
+    )) { Assert-DemoQualificationFile $entry.Path $entry.Label }
+    if ((Get-DemoQualificationHash $sourceBaseline) -cne [string]$manifest.cycleWatchSourceBaselineSha256 -or
+        (Get-DemoQualificationHash $headerBaseline) -cne [string]$manifest.cycleWatchHeaderSha256 -or
+        (Get-DemoQualificationHash $testsBaseline) -cne [string]$manifest.cycleWatchTestsSha256) { throw 'Distribution compiler-input hashes do not match build manifest.' }
 
     $recordPath = Join-Path $evidenceFull 'demo-adapter-qualification.json'
     if (Test-Path -LiteralPath $recordPath) { throw "Qualification record already exists: $recordPath" }
@@ -346,6 +377,7 @@ try {
 
     $linkerInvocation = New-DemoQualificationInvocation 'linker-failure' 1 'make' '40000000000000000000000000000004'
     Set-DemoQualificationLinkFault (Join-Path $linkerInvocation.ProjectDirectory 'tests\CycleWatchTests.cpp')
+    if ((Get-DemoQualificationHash (Join-Path $linkerInvocation.ProjectDirectory 'tests\CycleWatchTests.cpp')) -cne [string]$manifest.cycleWatchTestsLinkerProbeSha256) { throw 'Linker probe did not produce the single known tests variant.' }
     $linker = Invoke-DemoQualificationAdapter @($linkerInvocation.ProjectPath, '/MAKE', [string]$manifest.target, '/OUT', $linkerInvocation.LogPath)
     $linkerEvidence = Get-DemoQualificationValidatedEvidence $linkerInvocation 'Make' 1 $false 'FAILED' 1 $manifest $adapterHash
     $linkerLaunch = $null -ne $linkerEvidence -and $null -ne $linkerEvidence.nativeExitCode
@@ -376,6 +408,12 @@ try {
         adapterSha256 = $adapterHash
         msBuildPath = $msBuildFull; msBuildSha256 = Get-DemoQualificationHash $msBuildFull
         projectSha256 = [string]$manifest.projectSha256; vcxProjectSha256 = [string]$manifest.vcxProjectSha256
+        cycleWatchHeaderSha256 = [string]$manifest.cycleWatchHeaderSha256
+        cycleWatchTestsSha256 = [string]$manifest.cycleWatchTestsSha256
+        cycleWatchTestsLinkerProbeSha256 = [string]$manifest.cycleWatchTestsLinkerProbeSha256
+        cycleWatchSourceBaselineSha256 = [string]$manifest.cycleWatchSourceBaselineSha256
+        cycleWatchSourceThreshold3ErrorSha256 = [string]$manifest.cycleWatchSourceThreshold3ErrorSha256
+        cycleWatchSourceThreshold3FixedSha256 = [string]$manifest.cycleWatchSourceThreshold3FixedSha256
         sandboxRoot = $script:QualificationSandboxRoot; logRoot = $script:QualificationLogRoot; evidenceRoot = $evidenceFull
         startedAt = $startedAt; finishedAt = [DateTimeOffset]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
         passed = $passed; probes = @($probes.ToArray())

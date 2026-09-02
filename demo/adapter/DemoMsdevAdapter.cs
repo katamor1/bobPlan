@@ -23,12 +23,23 @@ internal sealed class DemoAdapterContext
     internal bool FaultInjected;
     internal string ProjectPath;
     internal string VcxProjectPath;
+    internal string CycleWatchSourcePath;
+    internal string CycleWatchHeaderPath;
+    internal string CycleWatchTestsPath;
     internal string LogPath;
     internal string ArtifactPath;
+    internal string BinDirectory;
+    internal string BinReleaseDirectory;
+    internal string ObjDirectory;
+    internal string ObjReleaseDirectory;
     internal string AdapterSha256;
     internal string MsBuildSha256;
     internal string ProjectSha256;
     internal string VcxProjectSha256;
+    internal string CycleWatchSourceSha256;
+    internal string CycleWatchSourceVariant;
+    internal string CycleWatchHeaderSha256;
+    internal string CycleWatchTestsSha256;
     internal int? NativeExitCode;
     internal string NativeOutput = String.Empty;
     internal string StartedAt;
@@ -157,6 +168,12 @@ internal static class DemoMsdevAdapter
         context.ProjectSha256 = projectHash;
         context.VcxProjectSha256 = vcxHash;
 
+        string projectDirectory = Path.GetDirectoryName(projectPath);
+        context.CycleWatchSourcePath = Path.Combine(projectDirectory, "src", "CycleWatch.cpp");
+        context.CycleWatchHeaderPath = Path.Combine(projectDirectory, "include", "CycleWatch.h");
+        context.CycleWatchTestsPath = Path.Combine(projectDirectory, "tests", "CycleWatchTests.cpp");
+        ValidateCompilerInputs(context);
+
         string msBuildPath = GetFullLocalPath(DemoAdapterConfiguration.MsBuildPath, "MSBUILD_PATH");
         if (!File.Exists(msBuildPath)) Fail("MSBUILD_MISSING");
         ValidateNoReparse(msBuildPath, "MSBUILD_REPARSE");
@@ -164,16 +181,13 @@ internal static class DemoMsdevAdapter
         if (!String.Equals(msBuildHash, DemoAdapterConfiguration.MsBuildSha256, StringComparison.Ordinal)) Fail("MSBUILD_HASH");
         context.MsBuildSha256 = msBuildHash;
 
-        string projectDirectory = Path.GetDirectoryName(projectPath);
         string safeUserRoot = Path.Combine(projectDirectory, ".team-bob-empty-user");
         if (File.Exists(safeUserRoot) || Directory.Exists(safeUserRoot)) Fail("UNSAFE_USER_PROPS");
-        string artifactPath = Path.Combine(projectDirectory, "bin", "Release", "CycleWatchTests.exe");
-        if (File.Exists(artifactPath) || Directory.Exists(artifactPath)) Fail("STALE_ARTIFACT");
-        context.ArtifactPath = artifactPath;
 
         string adapterPath = typeof(DemoMsdevAdapter).Assembly.Location;
         ValidateNoReparse(adapterPath, "ADAPTER_REPARSE");
         context.AdapterSha256 = ComputeSha256(adapterPath);
+        PrepareOwnedOutputDirectories(context, projectDirectory);
     }
 
     private static int ExecuteBuild(DemoAdapterContext context)
@@ -186,6 +200,8 @@ internal static class DemoMsdevAdapter
         ValidateNoReparse(invocationRoot, "NATIVE_TEMP_REPARSE");
         Directory.CreateDirectory(safeNativeTemp);
         ValidateNoReparse(safeNativeTemp, "NATIVE_TEMP_REPARSE");
+        ValidateCompilerInputs(context);
+        ValidateOwnedOutputDirectories(context);
         List<string> nativeArguments = new List<string>();
         nativeArguments.Add(context.VcxProjectPath);
         nativeArguments.Add(String.Equals(context.Action, "Make", StringComparison.Ordinal) ? "/t:Build" : "/t:Rebuild");
@@ -234,6 +250,9 @@ internal static class DemoMsdevAdapter
         {
             process.Dispose();
         }
+
+        ValidateCompilerInputs(context);
+        ValidateOwnedOutputDirectories(context);
 
         if (context.NativeExitCode.GetValueOrDefault() != 0)
         {
@@ -387,6 +406,10 @@ internal static class DemoMsdevAdapter
         AppendJsonString(builder, "projectRelativePath", DemoAdapterConfiguration.ProjectRelativePath, true);
         AppendJsonString(builder, "projectSha256", context.ProjectSha256, true);
         AppendJsonString(builder, "vcxProjectSha256", context.VcxProjectSha256, true);
+        AppendJsonString(builder, "cycleWatchSourceSha256", context.CycleWatchSourceSha256, true);
+        AppendJsonString(builder, "cycleWatchSourceVariant", context.CycleWatchSourceVariant, true);
+        AppendJsonString(builder, "cycleWatchHeaderSha256", context.CycleWatchHeaderSha256, true);
+        AppendJsonString(builder, "cycleWatchTestsSha256", context.CycleWatchTestsSha256, true);
         AppendJsonString(builder, "target", DemoAdapterConfiguration.Target, true);
         AppendJsonString(builder, "expectedArtifactRelativePath", DemoAdapterConfiguration.ExpectedArtifactRelativePath, true);
         AppendJsonString(builder, "expectedArtifactSha256", artifactHash, true);
@@ -422,6 +445,87 @@ internal static class DemoMsdevAdapter
         startInfo.EnvironmentVariables["TEMP"] = safeNativeTemp;
         startInfo.EnvironmentVariables["TMP"] = safeNativeTemp;
         if (injectFault) startInfo.EnvironmentVariables["CL"] = "/DTEAM_BOB_DEMO_FAULT";
+    }
+
+    private static void ValidateCompilerInputs(DemoAdapterContext context)
+    {
+        ValidateFixedInput(context.CycleWatchSourcePath, "SOURCE_MISSING", "SOURCE_REPARSE");
+        ValidateFixedInput(context.CycleWatchHeaderPath, "HEADER_MISSING", "HEADER_REPARSE");
+        ValidateFixedInput(context.CycleWatchTestsPath, "TESTS_MISSING", "TESTS_REPARSE");
+
+        string sourceHash = ComputeSha256(context.CycleWatchSourcePath);
+        string sourceVariant;
+        if (String.Equals(sourceHash, DemoAdapterConfiguration.CycleWatchSourceBaselineSha256, StringComparison.Ordinal)) sourceVariant = "baseline-error";
+        else if (String.Equals(sourceHash, DemoAdapterConfiguration.CycleWatchSourceThreshold3ErrorSha256, StringComparison.Ordinal)) sourceVariant = "threshold3-error";
+        else if (String.Equals(sourceHash, DemoAdapterConfiguration.CycleWatchSourceThreshold3FixedSha256, StringComparison.Ordinal)) sourceVariant = "threshold3-fixed";
+        else { Fail("SOURCE_HASH"); return; }
+
+        string headerHash = ComputeSha256(context.CycleWatchHeaderPath);
+        if (!String.Equals(headerHash, DemoAdapterConfiguration.CycleWatchHeaderSha256, StringComparison.Ordinal)) Fail("HEADER_HASH");
+
+        string testsHash = ComputeSha256(context.CycleWatchTestsPath);
+        bool baselineTests = String.Equals(testsHash, DemoAdapterConfiguration.CycleWatchTestsSha256, StringComparison.Ordinal);
+        bool qualificationLinkerTests = IsQualificationLinkerProbe(context) &&
+            String.Equals(testsHash, DemoAdapterConfiguration.CycleWatchTestsLinkerProbeSha256, StringComparison.Ordinal);
+        if (!baselineTests && !qualificationLinkerTests) Fail("TESTS_HASH");
+
+        if (!String.IsNullOrEmpty(context.CycleWatchSourceSha256) &&
+            (!String.Equals(context.CycleWatchSourceSha256, sourceHash, StringComparison.Ordinal) ||
+             !String.Equals(context.CycleWatchHeaderSha256, headerHash, StringComparison.Ordinal) ||
+             !String.Equals(context.CycleWatchTestsSha256, testsHash, StringComparison.Ordinal))) Fail("INPUT_CHANGED");
+
+        context.CycleWatchSourceSha256 = sourceHash;
+        context.CycleWatchSourceVariant = sourceVariant;
+        context.CycleWatchHeaderSha256 = headerHash;
+        context.CycleWatchTestsSha256 = testsHash;
+    }
+
+    private static void ValidateFixedInput(string path, string missingReason, string reparseReason)
+    {
+        if (!File.Exists(path)) Fail(missingReason);
+        ValidateNoReparse(path, reparseReason);
+    }
+
+    private static bool IsQualificationLinkerProbe(DemoAdapterContext context)
+    {
+        return String.Equals(context.TaskId, "ADAPTER-QUALIFY", StringComparison.Ordinal) &&
+            String.Equals(context.InvocationId, "attempt-1-make-40000000000000000000000000000004", StringComparison.Ordinal) &&
+            String.Equals(context.Action, "Make", StringComparison.Ordinal);
+    }
+
+    private static void PrepareOwnedOutputDirectories(DemoAdapterContext context, string projectDirectory)
+    {
+        context.BinDirectory = Path.Combine(projectDirectory, "bin");
+        context.BinReleaseDirectory = Path.Combine(context.BinDirectory, "Release");
+        context.ObjDirectory = Path.Combine(projectDirectory, "obj");
+        context.ObjReleaseDirectory = Path.Combine(context.ObjDirectory, "Release");
+        context.ArtifactPath = Path.Combine(context.BinReleaseDirectory, "CycleWatchTests.exe");
+
+        if (File.Exists(context.BinDirectory) || Directory.Exists(context.BinDirectory)) Fail("OUTPUT_BIN_EXISTS");
+        if (File.Exists(context.ObjDirectory) || Directory.Exists(context.ObjDirectory)) Fail("OUTPUT_OBJ_EXISTS");
+        try
+        {
+            Directory.CreateDirectory(context.BinDirectory);
+            ValidateNoReparse(context.BinDirectory, "OUTPUT_REPARSE");
+            Directory.CreateDirectory(context.BinReleaseDirectory);
+            ValidateNoReparse(context.BinReleaseDirectory, "OUTPUT_REPARSE");
+            Directory.CreateDirectory(context.ObjDirectory);
+            ValidateNoReparse(context.ObjDirectory, "OUTPUT_REPARSE");
+            Directory.CreateDirectory(context.ObjReleaseDirectory);
+            ValidateNoReparse(context.ObjReleaseDirectory, "OUTPUT_REPARSE");
+        }
+        catch (DemoAdapterFailureException) { throw; }
+        catch (Exception) { Fail("OUTPUT_DIRECTORY"); }
+    }
+
+    private static void ValidateOwnedOutputDirectories(DemoAdapterContext context)
+    {
+        string[] paths = new string[] { context.BinDirectory, context.BinReleaseDirectory, context.ObjDirectory, context.ObjReleaseDirectory };
+        foreach (string path in paths)
+        {
+            if (!Directory.Exists(path) || File.Exists(path)) Fail("OUTPUT_DIRECTORY");
+            ValidateNoReparse(path, "OUTPUT_REPARSE");
+        }
     }
 
     private static string GetFullLocalPath(string value, string reason)

@@ -245,6 +245,14 @@ try {
     Assert-Equal $make.Json.invokedArguments[1] '/MAKE' 'Attempt 1 wrapper selects exact /MAKE adapter action'
     $localizedNativeMarker = 'FAKE_MSBUILD_LOCALIZED_SUCCESS_' + [char]0x65e5 + [char]0x672c + [char]0x8a9e
     Assert-True (([System.IO.File]::ReadAllText([string]$make.Json.outputLogPath, [System.Text.Encoding]::GetEncoding(932))).Contains($localizedNativeMarker)) 'Unchanged wrapper accepts localized native output after adapter CP932 transcoding'
+    $makeProjectDirectory = Join-Path ([string]$make.Json.sandboxPath) 'demo\CycleWatch'
+    Assert-True (Test-Path -LiteralPath (Join-Path $makeProjectDirectory 'bin\Release') -PathType Container) 'Adapter E2E creates its owned bin/Release directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $makeProjectDirectory 'obj\Release') -PathType Container) 'Adapter E2E creates its owned obj/Release directory'
+    $makeAdapterEvidence = [System.IO.File]::ReadAllText(([string]$make.Json.outputLogPath + '.evidence.json'), (New-Object System.Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
+    Assert-Equal $makeAdapterEvidence.cycleWatchSourceSha256 (Get-DemoE2EHash (Join-Path $makeProjectDirectory 'src\CycleWatch.cpp')) 'Adapter E2E evidence binds the compiled source hash'
+    Assert-Equal $makeAdapterEvidence.cycleWatchSourceVariant 'baseline-error' 'Adapter E2E evidence identifies the baseline source variant'
+    Assert-Equal $makeAdapterEvidence.cycleWatchHeaderSha256 (Get-DemoE2EHash (Join-Path $makeProjectDirectory 'include\CycleWatch.h')) 'Adapter E2E evidence binds the compiled header hash'
+    Assert-Equal $makeAdapterEvidence.cycleWatchTestsSha256 (Get-DemoE2EHash (Join-Path $makeProjectDirectory 'tests\CycleWatchTests.cpp')) 'Adapter E2E evidence binds the compiled tests hash'
 
     $rebuild = Invoke-DemoE2EBuild $installedWrapper $workPacket 'Rebuild' 1
     Assert-DemoE2EOutcome $rebuild 'SUCCEEDED' 0 'Rebuild through unchanged wrapper'

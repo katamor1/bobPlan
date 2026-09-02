@@ -69,6 +69,19 @@ function Get-DemoBuildSha256 {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-DemoBuildBytesSha256 {
+    param([byte[]]$Bytes)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha256.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha256.Dispose() }
+}
+
+function Replace-DemoBuildExactOnce {
+    param([string]$Text, [string]$Needle, [string]$Replacement, [string]$Label)
+    if ([regex]::Matches($Text, [regex]::Escape($Needle)).Count -ne 1) { throw "$Label must occur exactly once in the checked-in baseline." }
+    return $Text.Replace($Needle, $Replacement)
+}
+
 function ConvertTo-DemoBuildCSharpLiteral {
     param([string]$Value)
     return '@"' + $Value.Replace('"', '""') + '"'
@@ -173,6 +186,31 @@ try {
     if (-not $projectText.Contains('TEAM_BOB_MSBUILD_DEMO_PROTOCOL_V1_NOT_VC6')) { throw 'Synthetic DSP is missing the required adapter protocol marker.' }
     if ($projectText -match '(?i)Microsoft Developer Studio (?:Project|Workspace) File') { throw 'A real VC6 project/workspace signature is forbidden.' }
 
+    $cycleWatchSourcePath = Join-Path $distributionFull 'demo\CycleWatch\src\CycleWatch.cpp'
+    $headerPath = Join-Path $distributionFull 'demo\CycleWatch\include\CycleWatch.h'
+    $testsPath = Join-Path $distributionFull 'demo\CycleWatch\tests\CycleWatchTests.cpp'
+    Assert-DemoBuildFile $cycleWatchSourcePath 'CycleWatch source baseline'
+    Assert-DemoBuildFile $headerPath 'CycleWatch header baseline'
+    Assert-DemoBuildFile $testsPath 'CycleWatch tests baseline'
+    $sourceText = $cp932.GetString([System.IO.File]::ReadAllBytes($cycleWatchSourcePath))
+    $thresholdOne = 'if (consecutiveOverruns_ >= 1U) {'
+    $thresholdThree = 'if (consecutiveOverruns_ >= 3U) {'
+    $faultLine = '#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
+    $fixedLine = '#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
+    $thresholdThreeErrorText = Replace-DemoBuildExactOnce $sourceText $thresholdOne $thresholdThree 'CycleWatch threshold-one baseline'
+    $thresholdThreeFixedText = Replace-DemoBuildExactOnce $thresholdThreeErrorText $faultLine $fixedLine 'CycleWatch artificial fault baseline'
+    $testsText = $cp932.GetString([System.IO.File]::ReadAllBytes($testsPath))
+    $linkNeedle = 'int main() {'
+    $linkReplacement = 'extern "C" void TEAM_BOB_DEMO_MISSING_LINK_SYMBOL();' + "`r`n`r`n" + $linkNeedle + "`r`n    TEAM_BOB_DEMO_MISSING_LINK_SYMBOL();"
+    $linkerProbeTestsText = Replace-DemoBuildExactOnce $testsText $linkNeedle $linkReplacement 'CycleWatch linker-probe main function'
+    $sourceBaselineHash = Get-DemoBuildBytesSha256 ($cp932.GetBytes($sourceText))
+    if ($sourceBaselineHash -cne (Get-DemoBuildSha256 $cycleWatchSourcePath)) { throw 'CycleWatch source baseline encoding round-trip changed bytes.' }
+    $sourceThresholdThreeErrorHash = Get-DemoBuildBytesSha256 ($cp932.GetBytes($thresholdThreeErrorText))
+    $sourceThresholdThreeFixedHash = Get-DemoBuildBytesSha256 ($cp932.GetBytes($thresholdThreeFixedText))
+    $headerHash = Get-DemoBuildSha256 $headerPath
+    $testsHash = Get-DemoBuildSha256 $testsPath
+    $testsLinkerProbeHash = Get-DemoBuildBytesSha256 ($cp932.GetBytes($linkerProbeTestsText))
+
     $outputPath = Join-Path $outputFull 'DemoMsdevAdapter.exe'
     $manifestPath = Join-Path $outputFull 'DemoMsdevAdapter.build-manifest.json'
     if (Test-Path -LiteralPath $outputPath) { throw "Adapter output already exists: $outputPath" }
@@ -188,6 +226,12 @@ try {
         '    internal const string ProjectRelativePath = "demo/CycleWatch/CycleWatch.dsp";',
         ('    internal const string ProjectSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral (Get-DemoBuildSha256 $projectPath)) + ';'),
         ('    internal const string VcxProjectSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral (Get-DemoBuildSha256 $vcxProjectPath)) + ';'),
+        ('    internal const string CycleWatchHeaderSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $headerHash) + ';'),
+        ('    internal const string CycleWatchTestsSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $testsHash) + ';'),
+        ('    internal const string CycleWatchTestsLinkerProbeSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $testsLinkerProbeHash) + ';'),
+        ('    internal const string CycleWatchSourceBaselineSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $sourceBaselineHash) + ';'),
+        ('    internal const string CycleWatchSourceThreshold3ErrorSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $sourceThresholdThreeErrorHash) + ';'),
+        ('    internal const string CycleWatchSourceThreshold3FixedSha256 = ' + (ConvertTo-DemoBuildCSharpLiteral $sourceThresholdThreeFixedHash) + ';'),
         '    internal const string Target = "CycleWatch - Win32 Release";',
         '    internal const string ExpectedArtifactRelativePath = "demo/CycleWatch/bin/Release/CycleWatchTests.exe";',
         '}',
@@ -242,6 +286,12 @@ try {
         projectRelativePath = 'demo/CycleWatch/CycleWatch.dsp'
         projectSha256 = Get-DemoBuildSha256 $projectPath
         vcxProjectSha256 = Get-DemoBuildSha256 $vcxProjectPath
+        cycleWatchHeaderSha256 = $headerHash
+        cycleWatchTestsSha256 = $testsHash
+        cycleWatchTestsLinkerProbeSha256 = $testsLinkerProbeHash
+        cycleWatchSourceBaselineSha256 = $sourceBaselineHash
+        cycleWatchSourceThreshold3ErrorSha256 = $sourceThresholdThreeErrorHash
+        cycleWatchSourceThreshold3FixedSha256 = $sourceThresholdThreeFixedHash
         target = 'CycleWatch - Win32 Release'
         expectedArtifactRelativePath = 'demo/CycleWatch/bin/Release/CycleWatchTests.exe'
         outputFileName = 'DemoMsdevAdapter.exe'
