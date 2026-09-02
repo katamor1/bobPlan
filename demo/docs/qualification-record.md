@@ -8,7 +8,8 @@
 | --- | --- |
 | Record ID | |
 | Recorded at (timezone付き) | |
-| Demo root | `C:\BobTeamDemo` |
+| Root purpose (`REHEARSAL` / `LIVE`) | |
+| Demo root | `C:\BobTeamDemo-Rehearsal` または `C:\BobTeamDemo` |
 | Distribution revision | |
 | Bob executable ProductVersion | |
 | Bob executable SHA-256 | |
@@ -28,8 +29,12 @@
 | Demo profile ID | `demo-msbuild-protocol-v1-not-vc6` |
 | Initial Bazaar full revision-id (人のbootstrap後) | |
 | Initial Bazaar clean status evidence SHA-256 | |
+| `/permissions` pre-state evidence SHA-256 | |
+| Versioned usage template SHA-256 | |
+| External runtime usage copy relative path／SHA-256 | `evidence/usage-log.csv` / |
+| External Open QA negative packet relative path／SHA-256 | `evidence/negative-packets/...` / |
 
-`qualificationEligible`は、全probe合格に加えてVisual Studioがcompleteかつlaunchableの場合だけ`true`へ変更できます。templateの初期値`false`を証拠なしで変更しません。
+`qualificationEligible`は、全probe合格に加えてVisual Studioがcompleteかつlaunchableの場合だけ`true`へ変更できます。templateの初期値`false`を証拠なしで変更しません。rehearsalとliveは別Record ID、別root、別marker、別revision、別evidenceを持ち、一方のrecordを他方へコピーしません。
 
 ## Required probe review
 
@@ -54,6 +59,8 @@ linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを変更し�
 - [ ] production exampleは`enabled:false`である。
 - [ ] `.bzr`はprobeで変更されていない。
 - [ ] source workspaceのAllowed Fileはprobeで変更されていない。
+- [ ] versioned `demo/docs/usage-log.csv`はStage前後で同一hashである。
+- [ ] runtime usage logとnegative packetはversioned workspace外の現在rootの`evidence`配下にある。
 - [ ] logs／evidenceにsecret、credential、個人identityがない。
 - [ ] 全user-visible evidenceにNOT VC6表示がある。
 
@@ -69,6 +76,18 @@ linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを変更し�
 - [ ] 完全なrevision-idとevidence SHA-256を上表へ記録した。
 - [ ] Bobとpacket scriptにはBazaar writeを許可していない。
 
+## Permission、trust、root isolation follow-up
+
+- [ ] Stage前に`/permissions`でauto-approveとtrustの事前状態を記録した。
+- [ ] auto-approveはReadだけで、Edit／Executeは各actionを毎回manual approvalした。
+- [ ] rehearsalは`C:\BobTeamDemo-Rehearsal`だけ、liveは`C:\BobTeamDemo`だけを使用した。
+- [ ] rehearsal workspaceをclose／untrust／removeし、restoreを完了してからliveをStageした。
+- [ ] 親demo root、drive root、配布元をtrustしていない。
+- [ ] rehearsal／liveのcatalog、packet、revision、Record ID、evidenceを相互再利用していない。
+- [ ] 終了時に`/permissions`で両demo folderをuntrust／removeし、事前設定へ復元した。
+- [ ] rehearsal／live両rootのworkspace、logs、evidenceを技術reviewまで保持した。
+- [ ] negative拒否試験はfresh `green-implement` taskとexternal Open QA packet絶対pathで行い、Bob自身が全禁止caseをtool request前に拒否した。manual rejectやTest mode拒否をGreen境界の合格根拠にしていない。
+
 ## Human gate
 
 次のすべてが`YES`の場合だけ、別の`-ApproveQualification -RecordId <ID> -AcceptNotVc6` invocationを許可します。
@@ -80,6 +99,8 @@ linker probeはretained sandbox copyの`CycleWatchTests.cpp`だけを変更し�
 | VS complete and launchable | `NO` |
 | Source／profile／Bazaar immutability confirmed | `NO` |
 | Evidence contains no restricted data | `NO` |
+| Root-specific Record ID／marker／evidence confirmed | `NO` |
+| Read-only auto-approve／manual Edit and Execute confirmed | `NO` |
 | `AcceptNotVc6` | `NO` |
 | Target PC review role | `DEMO-TARGET-PC-OWNER-ROLE` |
 | Operations approval role | `DEMO-OPERATIONS-OWNER-ROLE` |

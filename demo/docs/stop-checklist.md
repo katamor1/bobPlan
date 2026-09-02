@@ -14,7 +14,10 @@
 - [ ] `-AcceptNotVc6`なしでdemo profileがenabledになっている。
 - [ ] 本番catalogが空でない、またはproduction exampleが`enabled:false`ではない。
 - [ ] workspaceがUNC、mapped drive、reparse path、配布元との重複、marker不一致の場所にある。
-- [ ] Bob設定backup、permission reset、workspace trust、復元手順のいずれかを確認できない。
+- [ ] rehearsalとliveが同じroot、またはrehearsal restore／untrust完了前にliveをStageした。
+- [ ] rehearsalのcatalog、packet、revision、Record ID、evidenceをliveへ再利用した。
+- [ ] Bob設定backup、`/permissions`事前記録、permission reset、workspace trust、復元手順のいずれかを確認できない。
+- [ ] demo rootの親、drive root、配布元がtrustedである。
 - [ ] Stageまたはqualification scriptが`.bzr`を作成・変更した。
 - [ ] 人によるinitial Bazaar bootstrapが未完了、full revision-id不明、またはbaseline直後の`status --short`が空でない。
 - [ ] initial `bzr add`対象にlogs、evidence、backup、secret、実顧客dataが含まれる。
@@ -30,6 +33,8 @@
 ### Green／build
 
 - [ ] Green以外、cleanでないworking copy、承認欠落、role以外のapproverで実装を開始した。
+- [ ] Read以外がauto-approvedである、またはGreenの各Edit／各Executeを毎回manual reviewしていない。
+- [ ] Editのdiff previewでAllowed Fileと意図した内容を確認せず承認した。
 - [ ] `.vcxproj`、`.dsp`、`.dsw`、`.rc`、`.def`、`.idl`、`.mak`、またはAllowed Files外を編集した／編集しようとした。
 - [ ] CP932、BOMなし、CRLFのいずれかが崩れた。
 - [ ] approval画面のExecuteが完全一致する`Invoke-Vc6Build.ps1` commandではない。
@@ -47,14 +52,20 @@
 - [ ] Bob、Stage、qualification、packet scriptがinit、add、commit、merge、tag、whoamiその他のBazaar writeを実行した／要求した。initial baseline bootstrapと承認済み変更commitは人だけが行う。
 - [ ] 人の独立reviewでCritical不合格があるのにcommitしようとしている。
 - [ ] Test taskが実装taskの状態を引き継いだ、または前工程SHA-256を検証していない。
+- [ ] 拒否試験を専用fresh `green-implement` negative task以外で行った、またはTest modeの拒否をGreen境界の証拠にした。
+- [ ] Open QA negative packetがlive rootのexternal `evidence\negative-packets`外にある、Stage生成の絶対path／SHA-256を確認していない、またはversioned workspaceへ追加された。
+- [ ] negative試験でBobが禁止Edit／不一致Executeのtool requestを出した。人がmanual rejectしても試験は`FAIL`／即時`STOP`とする。
 - [ ] 実機、リアルタイム、専用基板の未実施結果を合格として記録した。
 - [ ] usage logにperson、operator、member、name、email、account、user IDなどの識別列／値がある。
+- [ ] versioned `demo/docs/usage-log.csv`をruntime記録で変更した、または`C:\BobTeamDemo\evidence\usage-log.csv`以外へlive metricsを記録した。
 
 ### 終了／復元
 
 - [ ] restore対象のmarkerまたはbackupが一致しない。
 - [ ] restoreがworkspace、logs、evidenceを削除しようとしている。
-- [ ] Bobのglobal permissionまたは事前設定を復元・確認できない。
+- [ ] rehearsalまたはliveのworkspace／logs／evidenceを技術review前に削除した。
+- [ ] Bobのpermissionまたは事前設定を復元・確認できない。
+- [ ] `/permissions`でrehearsal／live demo folderをuntrust／removeしていない、または親／drive rootがtrustedのままである。
 
 ## 停止時に行うこと
 
