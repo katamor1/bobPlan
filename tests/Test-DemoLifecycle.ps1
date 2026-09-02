@@ -315,6 +315,16 @@ exit $LASTEXITCODE
 
     $rawPath = Join-Path $demoRoot 'evidence\qualification\demo-adapter-qualification.json'
     $rawBytes = [System.IO.File]::ReadAllBytes($rawPath)
+    $manifestPath = Join-Path $demoRoot 'tools\DemoMsdevAdapter.build-manifest.json'
+    $manifest = Get-DemoLifecycleJson $manifestPath
+    $rawContract = Get-DemoLifecycleJson $rawPath
+    foreach ($compilerInputField in @(
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256',
+        'cycleWatchSourceBaselineSha256', 'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256'
+    )) {
+        Assert-True ([string]$manifest.$compilerInputField -match '^[0-9a-f]{64}$') "Lifecycle manifest accepts canonical compiler-input hash '$compilerInputField'"
+        Assert-Equal $rawContract.$compilerInputField $manifest.$compilerInputField "Raw qualification binds compiler-input hash '$compilerInputField' to the build manifest"
+    }
     $raw = Get-DemoLifecycleJson $rawPath
     $raw.adapterSha256 = ('f' * 64)
     Write-DemoLifecycleJson $rawPath $raw
@@ -329,6 +339,43 @@ exit $LASTEXITCODE
     Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'STAGED' 'Pre-transition approval rejection leaves the marker STAGED'
     [System.IO.File]::WriteAllBytes($rawPath, $rawBytes)
     $marker = Get-DemoLifecycleJson $markerPath
+    $marker.hashes.rawQualification = Get-DemoLifecycleHash $rawPath
+    Write-DemoLifecycleJson $markerPath $marker
+
+    $raw = Get-DemoLifecycleJson $rawPath
+    $raw.cycleWatchHeaderSha256 = ('a' * 64)
+    Write-DemoLifecycleJson $rawPath $raw
+    $marker = Get-DemoLifecycleJson $markerPath
+    $marker.hashes.rawQualification = Get-DemoLifecycleHash $rawPath
+    Write-DemoLifecycleJson $markerPath $marker
+    $compilerInputMismatchApproval = Invoke-DemoLifecycleScript $preparePath $approveArgs
+    Assert-True ($compilerInputMismatchApproval.ExitCode -ne 0) 'Approval rejects a valid-looking raw compiler-input hash that differs from the build manifest'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].enabled $false 'Compiler-input mismatch leaves the catalog disabled'
+    Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'STAGED' 'Compiler-input mismatch is rejected before approval transition'
+    [System.IO.File]::WriteAllBytes($rawPath, $rawBytes)
+    $marker = Get-DemoLifecycleJson $markerPath
+    $marker.hashes.rawQualification = Get-DemoLifecycleHash $rawPath
+    Write-DemoLifecycleJson $markerPath $marker
+
+    $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+    $manifest = Get-DemoLifecycleJson $manifestPath
+    $manifest.cycleWatchSourceThreshold3FixedSha256 = 'INVALID-HASH'
+    Write-DemoLifecycleJson $manifestPath $manifest
+    $raw = Get-DemoLifecycleJson $rawPath
+    $raw.cycleWatchSourceThreshold3FixedSha256 = 'INVALID-HASH'
+    Write-DemoLifecycleJson $rawPath $raw
+    $marker = Get-DemoLifecycleJson $markerPath
+    $marker.hashes.buildManifest = Get-DemoLifecycleHash $manifestPath
+    $marker.hashes.rawQualification = Get-DemoLifecycleHash $rawPath
+    Write-DemoLifecycleJson $markerPath $marker
+    $invalidCompilerInputHashApproval = Invoke-DemoLifecycleScript $preparePath $approveArgs
+    Assert-True ($invalidCompilerInputHashApproval.ExitCode -ne 0) 'Approval rejects matching manifest/raw compiler-input values that are not canonical SHA-256'
+    Assert-Equal (Get-DemoLifecycleJson $catalogPath).profiles[0].enabled $false 'Invalid compiler-input hash leaves the catalog disabled'
+    Assert-Equal (Get-DemoLifecycleJson $markerPath).state 'STAGED' 'Invalid compiler-input hash is rejected before approval transition'
+    [System.IO.File]::WriteAllBytes($manifestPath, $manifestBytes)
+    [System.IO.File]::WriteAllBytes($rawPath, $rawBytes)
+    $marker = Get-DemoLifecycleJson $markerPath
+    $marker.hashes.buildManifest = Get-DemoLifecycleHash $manifestPath
     $marker.hashes.rawQualification = Get-DemoLifecycleHash $rawPath
     Write-DemoLifecycleJson $markerPath $marker
 

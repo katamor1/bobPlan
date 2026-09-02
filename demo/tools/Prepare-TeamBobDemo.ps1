@@ -577,6 +577,8 @@ function Assert-DemoManifest {
     Assert-TeamBobExactProperties $manifest @(
         'schemaVersion', 'banner', 'adapterSourceRelativePath', 'adapterSourceSha256', 'generatedConfigurationSha256', 'msBuildPath', 'msBuildSha256',
         'cscPath', 'cscSha256', 'distributionRoot', 'sandboxRoot', 'logRoot', 'projectRelativePath', 'projectSha256', 'vcxProjectSha256',
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256', 'cycleWatchSourceBaselineSha256',
+        'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256',
         'target', 'expectedArtifactRelativePath', 'outputFileName', 'outputSha256'
     ) 'Adapter build manifest' 'INTEGRITY_FAILED'
     if ($manifest.schemaVersion -cne '1.0' -or $manifest.banner -cne $script:DemoBanner -or $manifest.outputFileName -cne 'DemoMsdevAdapter.exe' -or
@@ -586,10 +588,21 @@ function Assert-DemoManifest {
         $manifest.target -cne 'CycleWatch - Win32 Release' -or $manifest.expectedArtifactRelativePath -cne 'demo/CycleWatch/bin/Release/CycleWatchTests.exe') {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Adapter build manifest values do not match the Stage identity.')
     }
+    foreach ($field in @(
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256', 'cycleWatchSourceBaselineSha256',
+        'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256'
+    )) {
+        if (-not ($manifest.$field -is [string]) -or [string]$manifest.$field -notmatch '^[0-9a-f]{64}$') {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Adapter build manifest compiler-input hash '$field' is invalid.")
+        }
+    }
     foreach ($pair in @(
         @((Join-Path $Marker.distributionRoot $manifest.adapterSourceRelativePath.Replace('/', '\')), $manifest.adapterSourceSha256, 'Adapter source'),
         @((Join-Path $Marker.distributionRoot $manifest.projectRelativePath.Replace('/', '\')), $manifest.projectSha256, 'DSP token'),
         @((Join-Path $Marker.distributionRoot 'demo\CycleWatch\CycleWatch.vcxproj'), $manifest.vcxProjectSha256, 'VCX project'),
+        @((Join-Path $Marker.distributionRoot 'demo\CycleWatch\include\CycleWatch.h'), $manifest.cycleWatchHeaderSha256, 'CycleWatch header baseline'),
+        @((Join-Path $Marker.distributionRoot 'demo\CycleWatch\tests\CycleWatchTests.cpp'), $manifest.cycleWatchTestsSha256, 'CycleWatch tests baseline'),
+        @((Join-Path $Marker.distributionRoot 'demo\CycleWatch\src\CycleWatch.cpp'), $manifest.cycleWatchSourceBaselineSha256, 'CycleWatch source baseline'),
         @($manifest.msBuildPath, $manifest.msBuildSha256, 'MSBuild'), @($manifest.cscPath, $manifest.cscSha256, 'Compiler identity')
     )) { Assert-DemoHashField $pair[0] $pair[1] $pair[2] }
     return $manifest
@@ -603,6 +616,8 @@ function Assert-DemoQualificationRecord {
     Assert-TeamBobExactProperties $raw @(
         'schemaVersion', 'banner', 'recordType', 'qualificationEligible', 'approved', 'vc6Qualified', 'pcId', 'visualStudio', 'adapterPath',
         'buildManifestPath', 'adapterSha256', 'msBuildPath', 'msBuildSha256', 'projectSha256', 'vcxProjectSha256', 'sandboxRoot', 'logRoot',
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256', 'cycleWatchSourceBaselineSha256',
+        'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256',
         'evidenceRoot', 'startedAt', 'finishedAt', 'passed', 'probes'
     ) 'Raw qualification record' 'INTEGRITY_FAILED'
     Assert-TeamBobExactProperties $raw.visualStudio @('isComplete', 'isLaunchable') 'Raw qualification Visual Studio state' 'INTEGRITY_FAILED'
@@ -618,6 +633,14 @@ function Assert-DemoQualificationRecord {
         $raw.msBuildPath -cne $Marker.msBuildPath -or $raw.msBuildSha256 -cne $Marker.msBuildSha256 -or $raw.projectSha256 -cne $Manifest.projectSha256 -or
         $raw.vcxProjectSha256 -cne $Manifest.vcxProjectSha256 -or $raw.sandboxRoot -cne $sandboxRoot -or $raw.logRoot -cne $logRoot -or $raw.evidenceRoot -cne $evidenceRoot) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Raw qualification identity, PC, Visual Studio state, or hashes are invalid.')
+    }
+    foreach ($field in @(
+        'cycleWatchHeaderSha256', 'cycleWatchTestsSha256', 'cycleWatchTestsLinkerProbeSha256', 'cycleWatchSourceBaselineSha256',
+        'cycleWatchSourceThreshold3ErrorSha256', 'cycleWatchSourceThreshold3FixedSha256'
+    )) {
+        if (-not ($raw.$field -is [string]) -or [string]$raw.$field -notmatch '^[0-9a-f]{64}$' -or $raw.$field -cne $Manifest.$field) {
+            throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Raw qualification compiler-input hash '$field' does not match the build manifest.")
+        }
     }
     try {
         $started = [DateTimeOffset]::Parse([string]$raw.startedAt, [System.Globalization.CultureInfo]::InvariantCulture)

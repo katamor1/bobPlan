@@ -29,7 +29,10 @@ try {
     $sourcePath = Join-Path $DistributionRoot 'demo\adapter\DemoMsdevAdapter.cs'
     $projectPath = Join-Path $DistributionRoot 'demo\CycleWatch\CycleWatch.dsp'
     $vcxProjectPath = Join-Path $DistributionRoot 'demo\CycleWatch\CycleWatch.vcxproj'
-    foreach ($path in @($MsBuildPath, $sourcePath, $projectPath, $vcxProjectPath)) {
+    $cycleWatchSourcePath = Join-Path $DistributionRoot 'demo\CycleWatch\src\CycleWatch.cpp'
+    $cycleWatchHeaderPath = Join-Path $DistributionRoot 'demo\CycleWatch\include\CycleWatch.h'
+    $cycleWatchTestsPath = Join-Path $DistributionRoot 'demo\CycleWatch\tests\CycleWatchTests.cpp'
+    foreach ($path in @($MsBuildPath, $sourcePath, $projectPath, $vcxProjectPath, $cycleWatchSourcePath, $cycleWatchHeaderPath, $cycleWatchTestsPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Fixture input is missing: $path" }
     }
     $adapterPath = Join-Path $OutputDirectory 'DemoMsdevAdapter.exe'
@@ -51,6 +54,12 @@ try {
         projectRelativePath = 'demo/CycleWatch/CycleWatch.dsp'
         projectSha256 = Get-FixtureHash $projectPath
         vcxProjectSha256 = Get-FixtureHash $vcxProjectPath
+        cycleWatchHeaderSha256 = Get-FixtureHash $cycleWatchHeaderPath
+        cycleWatchTestsSha256 = Get-FixtureHash $cycleWatchTestsPath
+        cycleWatchTestsLinkerProbeSha256 = ('2' * 64)
+        cycleWatchSourceBaselineSha256 = Get-FixtureHash $cycleWatchSourcePath
+        cycleWatchSourceThreshold3ErrorSha256 = ('3' * 64)
+        cycleWatchSourceThreshold3FixedSha256 = ('4' * 64)
         target = 'CycleWatch - Win32 Release'
         expectedArtifactRelativePath = 'demo/CycleWatch/bin/Release/CycleWatchTests.exe'
         outputFileName = 'DemoMsdevAdapter.exe'

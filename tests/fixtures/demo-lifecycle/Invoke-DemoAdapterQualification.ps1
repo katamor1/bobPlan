@@ -103,6 +103,12 @@ try {
         msBuildSha256 = [string]$manifest.msBuildSha256
         projectSha256 = [string]$manifest.projectSha256
         vcxProjectSha256 = [string]$manifest.vcxProjectSha256
+        cycleWatchHeaderSha256 = [string]$manifest.cycleWatchHeaderSha256
+        cycleWatchTestsSha256 = [string]$manifest.cycleWatchTestsSha256
+        cycleWatchTestsLinkerProbeSha256 = [string]$manifest.cycleWatchTestsLinkerProbeSha256
+        cycleWatchSourceBaselineSha256 = [string]$manifest.cycleWatchSourceBaselineSha256
+        cycleWatchSourceThreshold3ErrorSha256 = [string]$manifest.cycleWatchSourceThreshold3ErrorSha256
+        cycleWatchSourceThreshold3FixedSha256 = [string]$manifest.cycleWatchSourceThreshold3FixedSha256
         sandboxRoot = [System.IO.Path]::GetFullPath($SandboxRoot).TrimEnd('\', '/')
         logRoot = [System.IO.Path]::GetFullPath($LogRoot).TrimEnd('\', '/')
         evidenceRoot = [System.IO.Path]::GetFullPath($EvidenceRoot).TrimEnd('\', '/')
