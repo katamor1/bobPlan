@@ -1,8 +1,3 @@
-[CmdletBinding()]
-param(
-    [string]$CycleWatchTestSourcePath
-)
-
 $ErrorActionPreference = 'Stop'
 
 $demoTestStandalone = $null -eq (Get-Command Assert-True -ErrorAction SilentlyContinue)
@@ -156,6 +151,8 @@ function Assert-CycleWatchCaseSequence {
 
     $observationPattern = 'ExpectStatus\(\s*"[^"]*"\s*,\s*watch\.Observe\(\s*"(?<customer>[^"]+)"\s*,\s*(?<warmingUp>true|false)\s*,\s*(?<cycleTimeUs>[0-9]+)U\s*\)\s*,\s*team_bob_demo::CycleStatus::(?<status>Normal|Warning)\s*\)\s*;'
     $observations = [regex]::Matches($functionMatch.Groups['body'].Value, $observationPattern)
+    $allObserveCalls = [regex]::Matches($functionMatch.Groups['body'].Value, 'watch\.Observe\s*\(')
+    Assert-Equal $allObserveCalls.Count $observations.Count "$FunctionName wraps every watch.Observe call in exactly one ordered expectation"
     Assert-Equal $observations.Count $Expected.Count "$FunctionName asserts every ordered Observe result"
     for ($index = 0; $index -lt $Expected.Count; $index++) {
         $actual = @(
@@ -219,12 +216,7 @@ $legacyRelativePaths = @(
 )
 $legacyText = @{}
 foreach ($relativePath in $legacyRelativePaths) {
-    $legacyPath = $demoPaths[$relativePath]
-    if ($relativePath -eq 'demo/CycleWatch/tests/CycleWatchTests.cpp' -and -not [string]::IsNullOrWhiteSpace($CycleWatchTestSourcePath)) {
-        $legacyPath = [System.IO.Path]::GetFullPath($CycleWatchTestSourcePath)
-        Assert-True (Test-Path -LiteralPath $legacyPath -PathType Leaf) "CycleWatch test-source override exists: $legacyPath"
-    }
-    $legacyText[$relativePath] = Get-DemoCp932Text $legacyPath
+    $legacyText[$relativePath] = Get-DemoCp932Text $demoPaths[$relativePath]
     Assert-True ($legacyText[$relativePath] -match [regex]::Escape($legacyBanner)) "$relativePath carries the documented CP932 banner fallback"
 }
 
