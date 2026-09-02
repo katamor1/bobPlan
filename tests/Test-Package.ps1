@@ -334,6 +334,7 @@ Assert-True ($outputRule -match 'only a successful final Rebuild.*READY_FOR_HUMA
 
 Write-Host "PASS: $script:Assertions package contract assertions succeeded."
 
+. (Join-Path $PSScriptRoot 'Test-DemoPackage.ps1')
 . (Join-Path $PSScriptRoot 'Test-Tools.ps1')
 . (Join-Path $PSScriptRoot 'Test-BuildTools.ps1')
 

@@ -1,0 +1,7 @@
+# MSBUILD DEMO ADAPTER — NOT VC6 QUALIFICATION
+inputs/*.docx binary
+inputs/*.xlsx binary
+CycleWatch/CycleWatch.dsp -text
+CycleWatch/include/CycleWatch.h -text
+CycleWatch/src/CycleWatch.cpp -text
+CycleWatch/tests/CycleWatchTests.cpp -text
