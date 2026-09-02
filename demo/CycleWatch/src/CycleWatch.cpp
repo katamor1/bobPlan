@@ -6,7 +6,7 @@
 // 日本語: fault block は adapter qualification 専用で、通常 build では定義しません。
 // TEAM_BOB_DEMO_FAULT_BEGIN
 #if defined(TEAM_BOB_DEMO_FAULT)
-#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT
+#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")
 #endif
 // TEAM_BOB_DEMO_FAULT_END
 
