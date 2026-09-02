@@ -850,7 +850,23 @@ try {
     Assert-Task3BuildOutcome $timeout 'TIMED_OUT' 21 'Bounded MSDEV timeout'
     Assert-True ($timeout.Json.processId -gt 0) 'Timeout result identifies only the spawned process'
     Assert-Equal $timeout.Json.terminationComplete $true 'Timeout records completed owned process-tree termination'
-    Assert-True ($timeoutStopwatch.Elapsed.TotalSeconds -lt 8) 'Timeout and output capture remain bounded when a descendant holds redirected handles'
+    $processStartedAtText = if ($timeout.Json.processStartedAt -is [DateTime] -or $timeout.Json.processStartedAt -is [DateTimeOffset]) {
+        $timeout.Json.processStartedAt.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    } else { [string]$timeout.Json.processStartedAt }
+    $processFinishedAtText = if ($timeout.Json.processFinishedAt -is [DateTime] -or $timeout.Json.processFinishedAt -is [DateTimeOffset]) {
+        $timeout.Json.processFinishedAt.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    } else { [string]$timeout.Json.processFinishedAt }
+    $processStartedAt = [DateTimeOffset]::ParseExact($processStartedAtText, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    $processFinishedAt = [DateTimeOffset]::ParseExact($processFinishedAtText, 'o', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    Assert-True ($processFinishedAt -ge $processStartedAt) 'Timeout process timestamps are ordered from start to finish'
+    $processDuration = $processFinishedAt - $processStartedAt
+    $timeoutDiagnostic = [string]::Format(
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        'Timeout and output capture exceeded the 8-second process bound (process: {0:F3}s; outer wrapper: {1:F3}s)',
+        $processDuration.TotalSeconds,
+        $timeoutStopwatch.Elapsed.TotalSeconds
+    )
+    Assert-True ($processDuration.TotalSeconds -lt 8) $timeoutDiagnostic
     $env:BOB3_MSDEV_MODE = 'success'
     $profile.timeoutSeconds = 2
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
