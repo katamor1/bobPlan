@@ -183,6 +183,13 @@ try {
     Write-GovernanceJson $mappingPolicyPath $mappingPolicy
     Assert-GovernanceTrue (@(@(Test-TeamBobGovernancePackage -GovernanceRoot $mappingRoot) -match 'machine implementation').Count -gt 0) 'Package validator requires one implementation mapping per machine check'
 
+    $unsupportedMappingRoot = Copy-GovernanceFixture $governanceRoot 'unsupported-mapping'
+    $unsupportedMappingPolicyPath = Join-Path $unsupportedMappingRoot 'policy-manifest.json'
+    $unsupportedMappingPolicy = Get-TeamBobGovernanceJson $unsupportedMappingPolicyPath
+    $unsupportedMappingPolicy.machineCheckImplementations[0].implementation = 'Invoke-ArbitraryMachineCheck'
+    Write-GovernanceJson $unsupportedMappingPolicyPath $unsupportedMappingPolicy
+    Assert-GovernanceTrue (@(@(Test-TeamBobGovernancePackage -GovernanceRoot $unsupportedMappingRoot) -match 'machine implementation registry').Count -gt 0) 'Package validator rejects unsupported machine implementation identifiers'
+
     $rolesBundleRoot = Copy-GovernanceFixture $governanceRoot 'roles-bundle'
     $rolesBundlePolicyPath = Join-Path $rolesBundleRoot 'policy-manifest.json'
     $rolesBundlePolicy = Get-TeamBobGovernanceJson $rolesBundlePolicyPath
@@ -193,18 +200,44 @@ try {
     $strictRoot = Copy-GovernanceFixture $governanceRoot 'strict'
     $strictRolesPath = Join-Path $strictRoot 'roles.json'
     $strictRoles = Get-TeamBobGovernanceJson $strictRolesPath
+    $allRolePhases = @('requirements', 'specification', 'impact', 'implementation', 'review', 'test')
     $strictRoles.assignments = @(
-        [pscustomobject][ordered]@{ id = 'ASSIGN-SPEC-001'; role = 'SPECIFICATION_APPROVER'; principalId = 'principal-spec'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2026-09-01T00:00:00Z'; expiresAtUtc = '2026-09-10T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-IMPL-001'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'principal-impl'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2026-09-01T00:00:00Z'; expiresAtUtc = '2026-09-10T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-REV-001'; role = 'INDEPENDENT_REVIEWER'; principalId = 'principal-review'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2026-09-01T00:00:00Z'; expiresAtUtc = '2026-09-10T00:00:00Z' }
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-SPEC-001'; role = 'SPECIFICATION_APPROVER'; principalId = 'principal-spec'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $allRolePhases }; enabled = $true; validFromUtc = '2026-09-01T00:00:00Z'; validUntilUtc = '2026-09-10T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-IMPL-001'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'principal-impl'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $allRolePhases }; enabled = $true; validFromUtc = '2026-09-01T00:00:00Z'; validUntilUtc = '2026-09-10T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-REV-001'; role = 'INDEPENDENT_REVIEWER'; principalId = 'principal-review'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $allRolePhases }; enabled = $true; validFromUtc = '2026-09-01T00:00:00Z'; validUntilUtc = '2026-09-10T00:00:00Z' }
     )
     Write-GovernanceJson $strictRolesPath $strictRoles
     Assert-GovernanceEqual @(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $strictRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')).Count 0 'Strict readiness accepts active in-scope unexpired distinct assignments'
+
+    $roleMutations = @(
+        [pscustomobject]@{ Name = 'empty-principal'; Apply = { param($assignment) $assignment.principalId = '' } },
+        [pscustomobject]@{ Name = 'scalar-scope'; Apply = { param($assignment) $assignment.scope = '*' } },
+        [pscustomobject]@{ Name = 'bad-role-casing'; Apply = { param($assignment) $assignment.role = 'specification_approver' } },
+        [pscustomobject]@{ Name = 'bad-timestamp'; Apply = { param($assignment) $assignment.validFromUtc = '2026-09-01 00:00:00' } },
+        [pscustomobject]@{ Name = 'malformed-assignment-id'; Apply = { param($assignment) $assignment.assignmentId = 'bad id' } }
+    )
+    foreach ($mutation in $roleMutations) {
+        $mutationRoot = Copy-GovernanceFixture $governanceRoot ('role-' + $mutation.Name)
+        $mutationRolesPath = Join-Path $mutationRoot 'roles.json'
+        $mutationRoles = Get-TeamBobGovernanceJson $strictRolesPath
+        & $mutation.Apply $mutationRoles.assignments[0]
+        Write-GovernanceJson $mutationRolesPath $mutationRoles
+        Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $mutationRoot).Count -gt 0) "Package validation rejects role mutation: $($mutation.Name)"
+        Assert-GovernanceTrue (@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $mutationRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')).Count -gt 0) "Strict readiness rejects role mutation: $($mutation.Name)"
+    }
+
+    $scalarAssignmentsRoot = Copy-GovernanceFixture $governanceRoot 'scalar-assignments'
+    $scalarAssignmentsPath = Join-Path $scalarAssignmentsRoot 'roles.json'
+    $scalarAssignments = Get-TeamBobGovernanceJson $strictRolesPath
+    $scalarAssignments.assignments = $scalarAssignments.assignments[0]
+    Write-GovernanceJson $scalarAssignmentsPath $scalarAssignments
+    Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $scalarAssignmentsRoot).Count -gt 0) 'Package validation requires assignments to remain an array'
+
     $strictRoles.assignments[2].principalId = 'principal-spec'
     Write-GovernanceJson $strictRolesPath $strictRoles
     Assert-GovernanceTrue (@(@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $strictRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')) -match 'distinct').Count -gt 0) 'Strict readiness rejects the same principal in two roles'
     $strictRoles.assignments[2].principalId = 'principal-review'
-    $strictRoles.assignments[2].expiresAtUtc = '2026-09-02T00:00:00Z'
+    $strictRoles.assignments[2].validUntilUtc = '2026-09-02T00:00:00Z'
     Write-GovernanceJson $strictRolesPath $strictRoles
     Assert-GovernanceTrue (@(@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $strictRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')) -match 'unexpired').Count -gt 0) 'Strict readiness rejects expired assignments'
 } finally {

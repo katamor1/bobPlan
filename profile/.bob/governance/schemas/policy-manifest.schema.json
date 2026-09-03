@@ -9,7 +9,7 @@
     "maxApprovalValidityHours":{"type":"integer","const":168},
     "commonCheckIds":{"type":"array","minItems":5,"maxItems":5,"items":{"type":"string","pattern":"^GOV-[MA]-[0-9]{3}$"}},
     "bundleMembers":{"type":"array","minItems":12,"maxItems":12,"items":{"type":"string","minLength":1}},
-    "machineCheckImplementations":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["checkId","implementation"],"properties":{"checkId":{"type":"string","pattern":"^[A-Z]+-M-[0-9]{3}$"},"implementation":{"type":"string","minLength":1}}}},
+    "machineCheckImplementations":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["checkId","implementation"],"properties":{"checkId":{"type":"string","pattern":"^[A-Z]+-M-[0-9]{3}$"},"implementation":{"type":"string","pattern":"^[a-z][a-z0-9.-]+$"}}}},
     "phases":{"type":"array","minItems":6,"maxItems":6,"items":{"type":"object","additionalProperties":false,"required":["id","ordinal","command","mode","artifact","commonCheckIds","checkIds","completionApprovalRole"],"properties":{"id":{"type":"string","enum":["requirements","specification","impact","implementation","review","test"]},"ordinal":{"type":"integer"},"command":{"type":"string","minLength":1},"mode":{"type":"string","minLength":1},"artifact":{"type":"string","minLength":1},"commonCheckIds":{"type":"array","minItems":5,"maxItems":5,"items":{"type":"string","pattern":"^GOV-[MA]-[0-9]{3}$"}},"checkIds":{"type":"array","minItems":1,"items":{"type":"string","pattern":"^[A-Z]+-[MAH]-[0-9]{3}$"}},"completionApprovalRole":{"enum":[null,"SPECIFICATION_APPROVER","IMPLEMENTATION_APPROVER","INDEPENDENT_REVIEWER"]}}}}
   }
 }

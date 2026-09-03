@@ -318,10 +318,11 @@ try {
     Assert-Equal $initialize.ExitCode 0 'Task 3 fixture registers only runtime fake executables in isolated LOCALAPPDATA'
     $strictRolesPath = Join-Path $workingTree '.bob/governance/roles.json'
     $strictRoles = Get-Content -Raw -LiteralPath $strictRolesPath | ConvertFrom-Json
+    $strictRolePhases = @('requirements', 'specification', 'impact', 'implementation', 'review', 'test')
     $strictRoles.assignments = @(
-        [pscustomobject][ordered]@{ id = 'ASSIGN-SPEC-BUILD-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-build-spec'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-IMPL-BUILD-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-build-impl'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-REVIEW-BUILD-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-build-review'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' }
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-SPEC-BUILD-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-build-spec'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-IMPL-BUILD-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-build-impl'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-REVIEW-BUILD-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-build-review'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' }
     )
     Write-JsonFixture $strictRolesPath $strictRoles
     $strictNonAscii = Invoke-TestScript (Join-Path $workingTree 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $workingTree, '-Strict')

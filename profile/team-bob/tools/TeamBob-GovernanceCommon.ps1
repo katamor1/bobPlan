@@ -1,5 +1,24 @@
 $ErrorActionPreference = 'Stop'
 
+# Closed dispatch keys, not PowerShell command names. Task 2's evaluator must
+# dispatch only through this exact registry and must not invoke policy strings.
+$script:TeamBobMachineImplementationRegistry = [ordered]@{
+    'GOV-M-001' = 'governance.integrity'
+    'GOV-M-002' = 'governance.phase-prerequisites'
+    'GOV-M-003' = 'governance.path-encoding'
+    'GOV-M-004' = 'governance.forbidden-terminology'
+    'REQ-M-001' = 'requirements.ledger-identity'
+    'SPEC-M-001' = 'specification.required-sections'
+    'SPEC-M-002' = 'specification.reqid-references'
+    'IMP-M-001' = 'impact.required-areas'
+    'IMPL-M-001' = 'implementation.entry-gates'
+    'IMPL-M-002' = 'implementation.allowed-files'
+    'IMPL-M-003' = 'implementation.legacy-encoding'
+    'IMPL-M-004' = 'implementation.build-evidence'
+    'REV-M-001' = 'review.finding-shape'
+    'TEST-M-001' = 'test.traceability'
+}
+
 function Get-TeamBobGovernanceFileHash {
     param([Parameter(Mandatory = $true)][string]$Path)
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
@@ -59,6 +78,54 @@ function Test-TeamBobGovernanceSchemaClosed {
     } elseif ($Node -is [System.Array]) {
         for ($index = 0; $index -lt $Node.Count; $index++) { $errors += @(Test-TeamBobGovernanceSchemaClosed $Node[$index] "$Path[$index]") }
     }
+    return @($errors)
+}
+
+function ConvertFrom-TeamBobGovernanceUtcInstant {
+    param([object]$Value)
+    if (-not ($Value -is [string]) -or $Value -notmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?Z$') { return $null }
+    $parsed = [datetimeoffset]::MinValue
+    $formats = [string[]]@("yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'")
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    if (-not [datetimeoffset]::TryParseExact($Value, $formats, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) { return $null }
+    return $parsed
+}
+
+function Test-TeamBobGovernanceRoleAssignment {
+    param([object]$Assignment)
+    $errors = @()
+    $fields = @('assignmentId', 'role', 'principalId', 'scope', 'enabled', 'validFromUtc', 'validUntilUtc')
+    if (-not (Test-TeamBobGovernanceExactProperties $Assignment $fields)) { return @('shape: role assignment fields') }
+    if (-not ($Assignment.assignmentId -is [string]) -or $Assignment.assignmentId -cnotmatch '^ASSIGN-[A-Z0-9]+(?:-[A-Z0-9]+)*$') { $errors += 'shape: role assignmentId' }
+    if (-not ($Assignment.principalId -is [string]) -or [string]::IsNullOrWhiteSpace($Assignment.principalId)) { $errors += 'shape: role principalId' }
+    if (@('SPECIFICATION_APPROVER', 'IMPLEMENTATION_APPROVER', 'INDEPENDENT_REVIEWER') -cnotcontains $Assignment.role) { $errors += 'shape: role enum' }
+    if (-not ($Assignment.enabled -is [bool])) { $errors += 'shape: role enabled' }
+    if (-not (Test-TeamBobGovernanceExactProperties $Assignment.scope @('allTasks', 'taskIds', 'phases'))) {
+        $errors += 'shape: role scope'
+    } else {
+        if (-not ($Assignment.scope.allTasks -is [bool])) { $errors += 'shape: role scope allTasks' }
+        if (-not ($Assignment.scope.taskIds -is [System.Array])) {
+            $errors += 'shape: role scope taskIds'
+        } else {
+            foreach ($taskId in @($Assignment.scope.taskIds)) {
+                if (-not ($taskId -is [string]) -or [string]::IsNullOrWhiteSpace($taskId)) { $errors += 'shape: role scope taskId' }
+            }
+            if ($Assignment.scope.allTasks -eq $true -and @($Assignment.scope.taskIds).Count -ne 0) { $errors += 'shape: role scope allTasks/taskIds consistency' }
+            if ($Assignment.scope.allTasks -eq $false -and @($Assignment.scope.taskIds).Count -eq 0) { $errors += 'shape: role scope allTasks/taskIds consistency' }
+        }
+        if (-not ($Assignment.scope.phases -is [System.Array]) -or @($Assignment.scope.phases).Count -eq 0) {
+            $errors += 'shape: role scope phases'
+        } else {
+            $phaseIds = @('requirements', 'specification', 'impact', 'implementation', 'review', 'test')
+            foreach ($phase in @($Assignment.scope.phases)) {
+                if (-not ($phase -is [string]) -or $phaseIds -cnotcontains $phase) { $errors += 'shape: role scope phase' }
+            }
+            if (@($Assignment.scope.phases | Sort-Object -Unique).Count -ne @($Assignment.scope.phases).Count) { $errors += 'shape: duplicate role scope phase' }
+        }
+    }
+    $validFrom = ConvertFrom-TeamBobGovernanceUtcInstant $Assignment.validFromUtc
+    $validUntil = ConvertFrom-TeamBobGovernanceUtcInstant $Assignment.validUntilUtc
+    if ($null -eq $validFrom -or $null -eq $validUntil -or $validUntil -le $validFrom) { $errors += 'shape: role assignment UTC validity' }
     return @($errors)
 }
 
@@ -189,18 +256,25 @@ function Test-TeamBobGovernancePackage {
     foreach ($mapping in @($policy.machineCheckImplementations)) {
         if (-not (Test-TeamBobGovernanceExactProperties $mapping @('checkId', 'implementation')) -or [string]::IsNullOrWhiteSpace([string]$mapping.implementation)) { $errors += 'machine implementation: invalid mapping' }
         $mappingIds += $mapping.checkId
+        $registeredImplementation = $null
+        foreach ($registeredCheckId in $script:TeamBobMachineImplementationRegistry.Keys) {
+            if ([string]$registeredCheckId -ceq [string]$mapping.checkId) { $registeredImplementation = $script:TeamBobMachineImplementationRegistry[$registeredCheckId]; break }
+        }
+        if ($null -eq $registeredImplementation -or [string]$mapping.implementation -cne [string]$registeredImplementation) {
+            $errors += "machine implementation registry: unsupported mapping $($mapping.checkId)=$($mapping.implementation)"
+        }
     }
     if ((@($mappingIds | Sort-Object) -join ',') -cne ($machineIds -join ',')) { $errors += 'machine implementation: mapping must cover every machine check exactly once' }
+    if ($script:TeamBobMachineImplementationRegistry.Count -ne $machineIds.Count) { $errors += 'machine implementation registry: registry must cover every machine check exactly once' }
 
     $roles = $documents['roles.json']
     if (-not (Test-TeamBobGovernanceExactProperties $roles @('policyVersion', 'assignments')) -or $roles.policyVersion -ne '0.2.0-poc') { $errors += 'shape: roles document' }
+    if (-not ($roles.assignments -is [System.Array])) { $errors += 'shape: roles assignments array' }
     $assignmentIds = @{}
     foreach ($assignment in @($roles.assignments)) {
-        if (-not (Test-TeamBobGovernanceExactProperties $assignment @('id', 'role', 'principalId', 'scope', 'status', 'validFromUtc', 'expiresAtUtc'))) { $errors += 'shape: role assignment'; continue }
-        if ($assignmentIds.ContainsKey([string]$assignment.id)) { $errors += 'ids: duplicate role assignment' } else { $assignmentIds[[string]$assignment.id] = $true }
-        if (@('SPECIFICATION_APPROVER', 'IMPLEMENTATION_APPROVER', 'INDEPENDENT_REVIEWER') -notcontains $assignment.role -or @('ACTIVE', 'INACTIVE') -notcontains $assignment.status -or @($assignment.scope).Count -eq 0) { $errors += "shape: role assignment values $($assignment.id)" }
-        $from = [datetime]::MinValue; $to = [datetime]::MinValue
-        if (-not [datetime]::TryParse([string]$assignment.validFromUtc, [ref]$from) -or -not [datetime]::TryParse([string]$assignment.expiresAtUtc, [ref]$to) -or $to -le $from) { $errors += "shape: role assignment dates $($assignment.id)" }
+        $assignmentErrors = @(Test-TeamBobGovernanceRoleAssignment $assignment)
+        foreach ($assignmentError in $assignmentErrors) { $errors += "$assignmentError $($assignment.assignmentId)" }
+        if ($assignmentIds.ContainsKey([string]$assignment.assignmentId)) { $errors += 'ids: duplicate role assignment' } else { $assignmentIds[[string]$assignment.assignmentId] = $true }
     }
 
     foreach ($relativePath in @($expectedFiles | Where-Object { $_ -like 'schemas/*' })) {
@@ -213,7 +287,8 @@ function Test-TeamBobGovernanceStrictReadiness {
     param(
         [Parameter(Mandatory = $true)][string]$GovernanceRoot,
         [datetime]$NowUtc = [datetime]::UtcNow,
-        [string]$Scope = '*'
+        [string]$TaskId = '*',
+        [string]$Phase = ''
     )
     $errors = @()
     $packageErrors = @(Test-TeamBobGovernancePackage -GovernanceRoot $GovernanceRoot)
@@ -222,10 +297,11 @@ function Test-TeamBobGovernanceStrictReadiness {
     $selected = @()
     foreach ($role in @('SPECIFICATION_APPROVER', 'IMPLEMENTATION_APPROVER', 'INDEPENDENT_REVIEWER')) {
         $matches = @($roles.assignments | Where-Object {
-            $_.role -eq $role -and $_.status -eq 'ACTIVE' -and
-            ([datetime]$_.validFromUtc).ToUniversalTime() -le $NowUtc.ToUniversalTime() -and
-            ([datetime]$_.expiresAtUtc).ToUniversalTime() -gt $NowUtc.ToUniversalTime() -and
-            (@($_.scope) -contains '*' -or @($_.scope) -contains $Scope)
+            @(Test-TeamBobGovernanceRoleAssignment $_).Count -eq 0 -and $_.role -ceq $role -and $_.enabled -eq $true -and
+            (ConvertFrom-TeamBobGovernanceUtcInstant $_.validFromUtc) -le ([datetimeoffset]$NowUtc.ToUniversalTime()) -and
+            (ConvertFrom-TeamBobGovernanceUtcInstant $_.validUntilUtc) -gt ([datetimeoffset]$NowUtc.ToUniversalTime()) -and
+            ($_.scope.allTasks -eq $true -or @($_.scope.taskIds) -ccontains $TaskId) -and
+            ([string]::IsNullOrWhiteSpace($Phase) -or @($_.scope.phases) -ccontains $Phase)
         })
         if ($matches.Count -ne 1) { $errors += "strict: one active in-scope unexpired assignment required for $role" }
         else { $selected += $matches[0] }

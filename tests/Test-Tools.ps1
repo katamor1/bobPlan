@@ -305,10 +305,11 @@ exit /b 41
     # Strict validator uses an isolated installed profile with active, scoped, unexpired, distinct role assignments.
     $strictRolesPath = Join-Path $catalogProfileRoot '.bob/governance/roles.json'
     $strictRoles = Get-Content -Raw -LiteralPath $strictRolesPath | ConvertFrom-Json
+    $strictRolePhases = @('requirements', 'specification', 'impact', 'implementation', 'review', 'test')
     $strictRoles.assignments = @(
-        [pscustomobject][ordered]@{ id = 'ASSIGN-SPEC-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-spec'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-IMPL-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-impl'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
-        [pscustomobject][ordered]@{ id = 'ASSIGN-REVIEW-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-review'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' }
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-SPEC-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-spec'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-IMPL-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-impl'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-REVIEW-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-review'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' }
     )
     Write-JsonFixture $strictRolesPath $strictRoles
     $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
