@@ -327,6 +327,45 @@ try {
     Assert-ComplianceTrue $arbitraryApprovalRejected 'Prior PASS rejects arbitrary bytes masquerading as approval'
     Assert-ComplianceTrue $replayedApprovalRejected 'Prior PASS rejects cross-phase approval replay even when bytes and hash exist'
 
+    $validPriorAccepted=$true;try{Assert-TeamBobPriorComplianceResult $ledgerResult $chainContext $chainGovernance 'requirements'}catch{$validPriorAccepted=$false}
+    Assert-ComplianceTrue $validPriorAccepted 'Unmodified historical machine output remains valid'
+    foreach($machineMutation in @('path','line','message','status','order','duplicate','missing')){
+        $mutatedPrior=$ledgerResult|ConvertTo-Json -Depth 30|ConvertFrom-Json
+        switch($machineMutation){
+            'path' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-004'})[0]).evidence[0].value='work-packet.md'}
+            'line' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-004'})[0]).evidence[1].value='2'}
+            'message' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-003'})[0]).message='Forged machine message.'}
+            'status' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-003'})[0]).status='FAIL'}
+            'order' {$temporary=$mutatedPrior.checks[0];$mutatedPrior.checks[0]=$mutatedPrior.checks[1];$mutatedPrior.checks[1]=$temporary}
+            'duplicate' {$mutatedPrior.checks[1]=$mutatedPrior.checks[0]}
+            'missing' {$mutatedPrior.checks=@($mutatedPrior.checks|Select-Object -Skip 1)}
+        }
+        $mutationCode=$null;try{Assert-TeamBobPriorComplianceResult $mutatedPrior $chainContext $chainGovernance 'requirements'}catch{$mutationCode=$_.Exception.Data['NativeExitCode']}
+        $expectedMutationCode=if(@('path','line','message','status') -ccontains $machineMutation){30}else{20}
+        Assert-ComplianceEqual $mutationCode $expectedMutationCode "Historical machine $machineMutation mutation is classified correctly"
+    }
+
+    # A hash-consistent chain still fails when stored machine facts contradict deterministic re-evaluation.
+    $machineHistoryTask=New-ComplianceTaskFixture 'MACHINE-HISTORY-1' $bazaarRoot $policyHash $roleHash
+    $machineHistoryReqArtifact=Join-Path $machineHistoryTask.Root 'drafts/requirement-ledger.csv';Write-ComplianceUtf8 $machineHistoryReqArtifact $phaseData[0].Text
+    $machineHistoryReqAssessment=Join-Path $machineHistoryTask.Root 'drafts/assessment-requirements.json';New-ComplianceAssessment $machineHistoryReqAssessment 'MACHINE-HISTORY-1' 'requirements' (Get-ComplianceHash $machineHistoryTask.Packet) $policyHash $roleHash 'drafts/requirement-ledger.csv' (Get-ComplianceHash $machineHistoryReqArtifact) $phaseData[0].Ai
+    Assert-ComplianceEqual (Invoke-ComplianceScript $compliancePath @('-WorkPacket',$machineHistoryTask.Packet,'-Phase','requirements','-ArtifactPath',$machineHistoryReqArtifact,'-AssessmentPath',$machineHistoryReqAssessment)).ExitCode 0 'Machine-history fixture completes requirements'
+    $machineHistorySpecArtifact=Join-Path $machineHistoryTask.Root 'drafts/external-spec.md';Write-ComplianceUtf8 $machineHistorySpecArtifact $phaseData[1].Text
+    $machineHistorySpecAssessment=Join-Path $machineHistoryTask.Root 'drafts/assessment-specification.json';New-ComplianceAssessment $machineHistorySpecAssessment 'MACHINE-HISTORY-1' 'specification' (Get-ComplianceHash $machineHistoryTask.Packet) $policyHash $roleHash 'drafts/external-spec.md' (Get-ComplianceHash $machineHistorySpecArtifact) $phaseData[1].Ai
+    $machineHistoryApproval=Invoke-ComplianceScript $approvalPath @('-WorkPacket',$machineHistoryTask.Packet,'-Phase','specification','-AssignmentId','ASSIGN-SPEC','-ArtifactPath',$machineHistorySpecArtifact,'-EvidencePath',$machineHistorySpecArtifact,'-ExpiresAtUtc',$now.AddHours(2).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ'),'-HumanTerminal')
+    Assert-ComplianceEqual $machineHistoryApproval.ExitCode 0 'Machine-history fixture creates specification approval'
+    $machineHistoryApprovalPath=([regex]::Match($machineHistoryApproval.Output,'(?m)^CREATED\s+(.+\.json)\s*$')).Groups[1].Value.Trim()
+    $machineHistoryReqResultFile=Get-LatestComplianceResult $machineHistoryTask.Root 'requirements';$machineHistoryReqResult=Get-Content -Raw -LiteralPath $machineHistoryReqResultFile.FullName|ConvertFrom-Json
+    (@($machineHistoryReqResult.checks|Where-Object{$_.id -ceq 'GOV-M-003'})[0]).message='Forged machine message.';Write-ComplianceJson $machineHistoryReqResultFile.FullName $machineHistoryReqResult
+    $forgedMachineHash=Get-ComplianceHash $machineHistoryReqResultFile.FullName
+    $machineHistoryApprovalDocument=Get-Content -Raw -LiteralPath $machineHistoryApprovalPath|ConvertFrom-Json;$machineHistoryApprovalDocument.prerequisiteResultSha256=$forgedMachineHash;Write-ComplianceJson $machineHistoryApprovalPath $machineHistoryApprovalDocument
+    $machineHistoryStatePath=Join-Path $machineHistoryTask.Root 'state/phase-state.json';$machineHistoryState=Get-Content -Raw -LiteralPath $machineHistoryStatePath|ConvertFrom-Json;$machineHistoryState.latestResultSha256=$forgedMachineHash;Write-ComplianceJson $machineHistoryStatePath $machineHistoryState
+    $machineHistoryStateBefore=[System.IO.File]::ReadAllBytes($machineHistoryStatePath);$machineHistoryResultsBefore=@(Get-ChildItem (Join-Path $machineHistoryTask.Root 'results') -File).Count
+    $forgedMachineEvaluation=Invoke-ComplianceScript $compliancePath @('-WorkPacket',$machineHistoryTask.Packet,'-Phase','specification','-ArtifactPath',$machineHistorySpecArtifact,'-AssessmentPath',$machineHistorySpecAssessment,'-ApprovalRecordPath',$machineHistoryApprovalPath)
+    Assert-ComplianceEqual $forgedMachineEvaluation.ExitCode 30 'Hash-consistent forged historical machine output is an integrity failure'
+    Assert-ComplianceEqual @(Get-ChildItem (Join-Path $machineHistoryTask.Root 'results') -File).Count $machineHistoryResultsBefore 'Forged historical machine output creates no new result'
+    Assert-ComplianceTrue (([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($machineHistoryStatePath))) -ceq ([Convert]::ToBase64String($machineHistoryStateBefore))) 'Forged historical machine output does not advance state'
+
     foreach ($entryViolation in @(
         [pscustomobject]@{Field='Risk';Value='Amber'},
         [pscustomobject]@{Field='Open QA';Value=@('QA-OPEN')},

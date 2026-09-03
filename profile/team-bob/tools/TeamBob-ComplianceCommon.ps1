@@ -146,7 +146,8 @@ function Assert-TeamBobPriorComplianceResult {
     for($index=0;$index -lt @($definitions).Count;$index++){
         $definition=$definitions[$index];$check=$Result.checks[$index]
         Assert-TeamBobComplianceExactProperties $check @('id','kind','status','evidence','message') "Prior result check $index"
-        if($check.id -cne $definition.id -or $check.kind -cne $definition.kind -or $check.status -cne 'PASS' -or -not($check.message -is [string]) -or [string]::IsNullOrWhiteSpace($check.message) -or -not($check.evidence -is [System.Array]) -or -not(Test-TeamBobEvidenceTypes @($check.evidence) @($definition.requiredEvidence))){throw (New-TeamBobComplianceFailure 20 "Prior result check is invalid: $($definition.id)")}
+        $validStoredStatus=if($definition.kind -ceq 'machine'){@('PASS','FAIL') -ccontains $check.status}else{$check.status -ceq 'PASS'}
+        if($check.id -cne $definition.id -or $check.kind -cne $definition.kind -or -not $validStoredStatus -or -not($check.message -is [string]) -or [string]::IsNullOrWhiteSpace($check.message) -or -not($check.evidence -is [System.Array]) -or -not(Test-TeamBobEvidenceTypes @($check.evidence) @($definition.requiredEvidence))){throw (New-TeamBobComplianceFailure 20 "Prior result check is invalid: $($definition.id)")}
         foreach($item in @($check.evidence)){
             Assert-TeamBobComplianceExactProperties $item @('type','value') "Prior result evidence $($definition.id)"
             if(@('path','line','sha256','rationale','command','approvalRecord','resultHash') -cnotcontains $item.type -or -not($item.value -is [string]) -or [string]::IsNullOrWhiteSpace($item.value)){throw (New-TeamBobComplianceFailure 20 "Prior result evidence is invalid: $($definition.id)")}
@@ -553,7 +554,15 @@ function Assert-TeamBobPriorReferencedContracts {
     $phasePolicy=Get-TeamBobPhasePolicy $Governance.Policy $Phase
     $artifactPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.artifactPath)) 'Prior artifact' 'INTEGRITY_FAILED'
     $artifact=Get-TeamBobGovernedRelativeFile $Context $artifactPath 'Prior artifact'
-    $prerequisite=if($Result.prerequisiteResultPath -is [string]){[pscustomobject]@{Path=[string]$Result.prerequisiteResultPath;Hash=[string]$Result.prerequisiteResultSha256;Phase=$script:TeamBobPhaseOrder[[array]::IndexOf($script:TeamBobPhaseOrder,$Phase)-1]}}else{$null}
+    $prerequisite=$null
+    if($Result.prerequisiteResultPath -is [string]){
+        $priorPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.prerequisiteResultPath)) 'Prior machine-check predecessor' 'INTEGRITY_FAILED'
+        if(-not(Test-TeamBobPathAtOrBelow $priorPath (Join-Path $Context.TaskRoot 'results')) -or -not(Test-Path -LiteralPath $priorPath -PathType Leaf)){throw(New-TeamBobComplianceFailure 30 'Prior machine-check predecessor is outside results or missing.')}
+        $priorPhysical=Get-TeamBobPhysicalPath $priorPath 'Prior machine-check predecessor' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $priorPhysical $Context.ResultsPhysical 'Prior machine-check predecessor' 'INTEGRITY_FAILED'
+        if((Get-TeamBobGovernanceFileHash $priorPath) -cne $Result.prerequisiteResultSha256){throw(New-TeamBobComplianceFailure 30 'Prior machine-check predecessor hash changed.')}
+        $priorPhase=$script:TeamBobPhaseOrder[[array]::IndexOf($script:TeamBobPhaseOrder,$Phase)-1]
+        $prerequisite=[pscustomobject]@{Path=[string]$Result.prerequisiteResultPath;Hash=[string]$Result.prerequisiteResultSha256;Phase=$priorPhase;Document=(Read-TeamBobComplianceJson $priorPath 'Prior machine-check predecessor')}
+    }
     $approval=$null
     if($null -ne $phasePolicy.completionApprovalRole){
         $approvalPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.approvalRecordPath)) 'Prior approval' 'INTEGRITY_FAILED'
@@ -564,9 +573,16 @@ function Assert-TeamBobPriorReferencedContracts {
     $assessmentPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.assessmentPath)) 'Prior assessment' 'INTEGRITY_FAILED'
     $assessment=Read-TeamBobAssessment $Context $Governance $artifact $phasePolicy $Phase $assessmentPath $prerequisite $approval
     if($assessment.Info.Hash -cne $Result.assessmentSha256){throw(New-TeamBobComplianceFailure 30 'Prior PASS assessment hash changed.')}
-    foreach($definition in @(Get-TeamBobChecklistDefinitions $Governance $phasePolicy)){
+    $definitions=@(Get-TeamBobChecklistDefinitions $Governance $phasePolicy)
+    $derivedContext=$Context|Select-Object *
+    $storedStateCheck=@($Result.checks|Where-Object{$_.id -ceq 'GOV-M-002'})[0]
+    if($null -ne $storedStateCheck -and @($storedStateCheck.evidence).Count -gt 0 -and $storedStateCheck.evidence[0].type -ceq 'sha256'){$derivedContext.StateHash=[string]$storedStateCheck.evidence[0].value}
+    foreach($definition in $definitions){
         $resultCheck=@($Result.checks|Where-Object{$_.id -ceq $definition.id})[0]
-        if($definition.kind -ceq 'ai'){
+        if($definition.kind -ceq 'machine'){
+            $derivedCheck=Invoke-TeamBobMachineCheck $definition $packet $derivedContext $artifact $prerequisite $Governance
+            if(($resultCheck|ConvertTo-Json -Compress -Depth 20) -cne ($derivedCheck|ConvertTo-Json -Compress -Depth 20)){throw(New-TeamBobComplianceFailure 30 "Historical machine result contradicts re-derived facts: $($definition.id)")}
+        } elseif($definition.kind -ceq 'ai'){
             $assessmentCheck=$assessment.Checks[[string]$definition.id]
             if($resultCheck.status -cne $assessmentCheck.status -or $resultCheck.message -cne $assessmentCheck.message -or ((@($resultCheck.evidence)|ConvertTo-Json -Compress -Depth 10) -cne (@($assessmentCheck.evidence)|ConvertTo-Json -Compress -Depth 10))){throw(New-TeamBobComplianceFailure 20 "Prior PASS AI result does not match its bound assessment: $($definition.id)")}
         } elseif($definition.kind -ceq 'human'){
