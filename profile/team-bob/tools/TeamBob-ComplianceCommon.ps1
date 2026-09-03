@@ -179,6 +179,7 @@ function Assert-TeamBobPriorComplianceResult {
     $phaseIndex=[array]::IndexOf($script:TeamBobPhaseOrder,$ExpectedPhase)
     if($phaseIndex -eq 0 -and ($null -ne $Result.prerequisiteResultPath -or $null -ne $Result.prerequisiteResultSha256)){throw(New-TeamBobComplianceFailure 20 'Requirements result must have a null predecessor.')}
     if($phaseIndex -gt 0 -and (-not $hasPreviousPath -or -not $hasPreviousHash)){throw(New-TeamBobComplianceFailure 20 'Non-requirements result must reference its exact predecessor.')}
+    Assert-TeamBobPriorReferencedContracts $Result $Context $Governance $ExpectedPhase
 }
 
 function Assert-TeamBobPhaseState {
@@ -438,12 +439,16 @@ function Invoke-TeamBobMachineCheck {
                 foreach ($findingLine in $findingLines) {
                     $match=[regex]::Match($findingLine,'^\[(?<severity>BLOCKER|WARNING)\] CheckId=(?<check>[A-Z]+-[AMH]-[0-9]{3}); ReqID=(?<req>REQ-[A-Za-z0-9_-]+); Path=(?<path>[^;]+); Line=(?<line>[1-9][0-9]*); Evidence=(?<evidence>[^;]+); Rationale=(?<rationale>[^;]+); Action=(?<action>[^;]+); Disposition=(?<disposition>OPEN|RESOLVED|ACCEPTED)$')
                     if(-not $match.Success){$status='FAIL';$message='Review finding is not in the required structured form.';continue}
+                    $blankMandatory=$false;foreach($captureName in @('evidence','rationale','action')){if([string]::IsNullOrWhiteSpace($match.Groups[$captureName].Value)){$blankMandatory=$true}}
+                    if($blankMandatory){$status='FAIL';$message='Review finding mandatory text fields must be nonblank.';continue}
                     $relative=$match.Groups['path'].Value.Replace('\','/')
                     if($knownIds -cnotcontains $match.Groups['check'].Value -or @($Packet.ReqIDs) -cnotcontains $match.Groups['req'].Value -or @($Packet.'Allowed Files') -cnotcontains $relative){$status='FAIL';$message='Review finding references an unknown check, requirement, or Allowed File.';continue}
                     if($relative -match '(^|/)\.\.?(/|$)|(^|/)\.bzr(/|$)' -or [System.IO.Path]::IsPathRooted($relative)){$status='FAIL';$message='Review finding path is not a normalized Allowed File.';continue}
                     $source=Get-TeamBobCanonicalPath (Join-Path ([string]$Packet.'Bazaar Root') $relative) 'Review finding source' 'INTEGRITY_FAILED'
-                    $sourceText=Read-TeamBobUtf8File $source 'Review finding source' 'INTEGRITY_FAILED'
-                    if([int]$match.Groups['line'].Value -gt @($sourceText -split "`r?`n").Count){$status='FAIL';$message='Review finding source line is out of range.'}
+                    Assert-TeamBobAllowedEncoding @([pscustomobject]@{FullPath=$source;RelativePath=$relative})
+                    $sourceText=Read-TeamBobStrictCp932File $source
+                    $sourceBody=$sourceText.TrimEnd([char[]]@([char]13,[char]10));$sourceLineCount=if($sourceBody.Length -eq 0){0}else{@($sourceBody -split "`r`n").Count}
+                    if([int]$match.Groups['line'].Value -gt $sourceLineCount){$status='FAIL';$message='Review finding source line is out of range.'}
                 }
             }
             $evidence=@($pathEvidence,$lineEvidence)
@@ -538,4 +543,34 @@ function Read-TeamBobApprovalForPhase {
     }
     if ($approved -gt $NowUtc) { throw (New-TeamBobComplianceFailure 20 'Approval time is in the future.') }
     return [pscustomobject]@{ Info=$info; Record=$record; IsCurrent=($expires -gt $NowUtc) }
+}
+
+function Assert-TeamBobPriorReferencedContracts {
+    param([object]$Result,[object]$Context,[object]$Governance,[string]$Phase)
+    $evaluated=ConvertFrom-TeamBobGovernanceUtcInstant $Result.evaluatedAtUtc
+    $packet=Read-TeamBobCanonicalPacket $Context.PacketPath
+    $assignments=Get-TeamBobSelectedAssignments $packet $Governance.Roles $Context.TaskId -RequireActive -AtUtc $evaluated
+    $phasePolicy=Get-TeamBobPhasePolicy $Governance.Policy $Phase
+    $artifactPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.artifactPath)) 'Prior artifact' 'INTEGRITY_FAILED'
+    $artifact=Get-TeamBobGovernedRelativeFile $Context $artifactPath 'Prior artifact'
+    $prerequisite=if($Result.prerequisiteResultPath -is [string]){[pscustomobject]@{Path=[string]$Result.prerequisiteResultPath;Hash=[string]$Result.prerequisiteResultSha256;Phase=$script:TeamBobPhaseOrder[[array]::IndexOf($script:TeamBobPhaseOrder,$Phase)-1]}}else{$null}
+    $approval=$null
+    if($null -ne $phasePolicy.completionApprovalRole){
+        $approvalPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.approvalRecordPath)) 'Prior approval' 'INTEGRITY_FAILED'
+        $approval=Read-TeamBobApprovalForPhase $Context $Governance $artifact $prerequisite $phasePolicy $assignments $Phase $approvalPath $evaluated
+        if(-not $approval.IsCurrent){throw(New-TeamBobComplianceFailure 20 'Prior PASS references an approval that was not current at evaluation.')}
+        if($approval.Info.Hash -cne $Result.approvalRecordSha256){throw(New-TeamBobComplianceFailure 30 'Prior PASS approval hash changed.')}
+    }
+    $assessmentPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Result.assessmentPath)) 'Prior assessment' 'INTEGRITY_FAILED'
+    $assessment=Read-TeamBobAssessment $Context $Governance $artifact $phasePolicy $Phase $assessmentPath $prerequisite $approval
+    if($assessment.Info.Hash -cne $Result.assessmentSha256){throw(New-TeamBobComplianceFailure 30 'Prior PASS assessment hash changed.')}
+    foreach($definition in @(Get-TeamBobChecklistDefinitions $Governance $phasePolicy)){
+        $resultCheck=@($Result.checks|Where-Object{$_.id -ceq $definition.id})[0]
+        if($definition.kind -ceq 'ai'){
+            $assessmentCheck=$assessment.Checks[[string]$definition.id]
+            if($resultCheck.status -cne $assessmentCheck.status -or $resultCheck.message -cne $assessmentCheck.message -or ((@($resultCheck.evidence)|ConvertTo-Json -Compress -Depth 10) -cne (@($assessmentCheck.evidence)|ConvertTo-Json -Compress -Depth 10))){throw(New-TeamBobComplianceFailure 20 "Prior PASS AI result does not match its bound assessment: $($definition.id)")}
+        } elseif($definition.kind -ceq 'human'){
+            if($null -eq $approval -or $resultCheck.status -cne 'PASS' -or @($resultCheck.evidence).Count -ne 1 -or $resultCheck.evidence[0].type -cne 'approvalRecord' -or $resultCheck.evidence[0].value -cne $approval.Info.RelativePath){throw(New-TeamBobComplianceFailure 20 'Prior PASS human result does not match its bound approval.')}
+        }
+    }
 }

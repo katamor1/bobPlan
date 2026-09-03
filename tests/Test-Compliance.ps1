@@ -292,6 +292,41 @@ try {
     $crossRejected=$false;try{[void](Get-TeamBobBoundPriorResult $crossWrapper 'requirements' $chainContext $chainGovernance)}catch{$crossRejected=$true}
     Assert-ComplianceTrue $crossRejected 'Prior result traversal rejects cross-phase backtracking'
 
+    # Recursive PASS-chain validation must parse and validate its referenced assessment and approval bytes.
+    $forgedAssessmentResult=$ledgerResult|ConvertTo-Json -Depth 30|ConvertFrom-Json
+    $forgedAssessmentResult.assessmentPath='work-packet.md';$forgedAssessmentResult.assessmentSha256=(Get-ComplianceHash $task.Packet)
+    $forgedAssessmentRejected=$false;try{Assert-TeamBobPriorComplianceResult $forgedAssessmentResult $chainContext $chainGovernance 'requirements'}catch{$forgedAssessmentRejected=$true}
+
+    $specResult=Get-Content -Raw -LiteralPath $specResultFile.FullName|ConvertFrom-Json
+    $arbitraryApprovalPath=Join-Path $task.Root 'approvals/arbitrary.json';Write-ComplianceJson $arbitraryApprovalPath ([ordered]@{not='an approval'})
+    $arbitraryApprovalResult=$specResult|ConvertTo-Json -Depth 30|ConvertFrom-Json
+    $arbitraryApprovalResult.approvalRecordPath='approvals/arbitrary.json';$arbitraryApprovalResult.approvalRecordSha256=(Get-ComplianceHash $arbitraryApprovalPath)
+    $arbitraryApprovalRejected=$false;try{Assert-TeamBobPriorComplianceResult $arbitraryApprovalResult $chainContext $chainGovernance 'specification'}catch{$arbitraryApprovalRejected=$true}
+
+    $reviewApprovalPath=[string]$reviewPrerequisite.Document.approvalRecordPath
+    $replayedApprovalResult=$specResult|ConvertTo-Json -Depth 30|ConvertFrom-Json
+    $replayedApprovalResult.approvalRecordPath=$reviewApprovalPath;$replayedApprovalResult.approvalRecordSha256=(Get-ComplianceHash (Join-Path $task.Root $reviewApprovalPath))
+    $replayedApprovalRejected=$false;try{Assert-TeamBobPriorComplianceResult $replayedApprovalResult $chainContext $chainGovernance 'specification'}catch{$replayedApprovalRejected=$true}
+
+    $blankFindingPath=Join-Path $task.Root 'drafts/blank-finding-review.md'
+    Write-ComplianceUtf8 $blankFindingPath "# Code Review`r`n## ReqIDs`r`nREQ-100`r`n## Allowed Files`r`nsrc/example.cpp`r`n## Findings`r`n[BLOCKER] CheckId=REV-A-001; ReqID=REQ-100; Path=src/example.cpp; Line=1; Evidence=   ; Rationale= `t; Action=   ; Disposition=OPEN`r`n## Evidence`r`nEvidence`r`n## Human Disposition`r`nPending`r`n"
+    $blankFindingInfo=[pscustomobject]@{FullPath=$blankFindingPath;RelativePath='drafts/blank-finding-review.md';Hash=(Get-ComplianceHash $blankFindingPath)}
+    $blankFinding=Invoke-TeamBobMachineCheck (@($allDefinitions|Where-Object{$_.id -ceq 'REV-M-001'})[0]) $chainPacket $chainContext $blankFindingInfo $reviewPrerequisite $chainGovernance
+    Assert-ComplianceEqual $blankFinding.status 'FAIL' 'REV-M-001 rejects whitespace-only mandatory finding text'
+
+    $japanese=([string][char]0x65e5)+([char]0x672c)+([char]0x8a9e)
+    $cp932=[System.Text.Encoding]::GetEncoding(932);[System.IO.File]::WriteAllBytes((Join-Path $bazaarRoot 'src/example.cpp'),$cp932.GetBytes("// $japanese`r`nint main() { return 0; }`r`n"))
+    foreach($cp932LineCase in @([pscustomobject]@{Line=2;Expected='PASS'},[pscustomobject]@{Line=3;Expected='FAIL'})){
+        $cp932ReviewPath=Join-Path $task.Root ("drafts/cp932-review-$($cp932LineCase.Line).md")
+        Write-ComplianceUtf8 $cp932ReviewPath "# Code Review`r`n## ReqIDs`r`nREQ-100`r`n## Allowed Files`r`nsrc/example.cpp`r`n## Findings`r`n[WARNING] CheckId=REV-A-001; ReqID=REQ-100; Path=src/example.cpp; Line=$($cp932LineCase.Line); Evidence=source line; Rationale=review rationale; Action=fix; Disposition=OPEN`r`n## Evidence`r`nEvidence`r`n## Human Disposition`r`nPending`r`n"
+        $cp932ReviewInfo=[pscustomobject]@{FullPath=$cp932ReviewPath;RelativePath=("drafts/cp932-review-$($cp932LineCase.Line).md");Hash=(Get-ComplianceHash $cp932ReviewPath)}
+        $cp932Review=Invoke-TeamBobMachineCheck (@($allDefinitions|Where-Object{$_.id -ceq 'REV-M-001'})[0]) $chainPacket $chainContext $cp932ReviewInfo $reviewPrerequisite $chainGovernance
+        Assert-ComplianceEqual $cp932Review.status $cp932LineCase.Expected "REV-M-001 handles CP932 source line $($cp932LineCase.Line): $($cp932Review.message)"
+    }
+    Assert-ComplianceTrue $forgedAssessmentRejected 'Prior PASS rejects a packet masquerading as its assessment'
+    Assert-ComplianceTrue $arbitraryApprovalRejected 'Prior PASS rejects arbitrary bytes masquerading as approval'
+    Assert-ComplianceTrue $replayedApprovalRejected 'Prior PASS rejects cross-phase approval replay even when bytes and hash exist'
+
     foreach ($entryViolation in @(
         [pscustomobject]@{Field='Risk';Value='Amber'},
         [pscustomobject]@{Field='Open QA';Value=@('QA-OPEN')},
