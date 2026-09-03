@@ -86,13 +86,26 @@ function Invoke-DemoAdapterScript {
 
 function Invoke-DemoAdapterExecutable {
     param([string]$Path, [string[]]$Arguments = @())
-    $savedPreference = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & $Path @Arguments 2>&1 | Out-String
-        $exitCode = $LASTEXITCODE
-    } finally { $ErrorActionPreference = $savedPreference }
-    return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
+    $argumentText = @($Arguments | ForEach-Object {
+        if ($_ -notmatch '[\s"]') { $_ } else { '"' + $_.Replace('\\', '\\').Replace('"', '\\"') + '"' }
+    }) -join ' '
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $Path
+    $start.Arguments = $argumentText
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false, $true)
+    $start.StandardErrorEncoding = New-Object System.Text.UTF8Encoding($false, $true)
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $start
+    [void]$process.Start()
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $exitCode = $process.ExitCode
+    $process.Dispose()
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = ($stdout + $stderr) }
 }
 
 function Get-DemoAdapterUtf8Text {
@@ -987,7 +1000,8 @@ try {
     }
     Assert-Equal (@(Read-DemoAdapterTrace $tracePath).Count) 4 'Qualification launches MSBuild only for Make, Rebuild, compiler, and linker probes'
     Assert-Equal (Get-DemoAdapterTreeFingerprint $distributionRoot) $distributionFingerprint 'Qualification never mutates source distribution'
-    $retainedLinkSources = @(Get-ChildItem -LiteralPath $sandboxRoot -Filter 'CycleWatchTests.cpp' -File -Recurse | Where-Object {
+    $qualificationSandboxRoot = Join-Path $sandboxRoot 'ADAPTER-QUALIFY'
+    $retainedLinkSources = @(Get-ChildItem -LiteralPath $qualificationSandboxRoot -Filter 'CycleWatchTests.cpp' -File -Recurse | Where-Object {
         [System.Text.Encoding]::GetEncoding(932).GetString([System.IO.File]::ReadAllBytes($_.FullName)).Contains('TEAM_BOB_DEMO_MISSING_LINK_SYMBOL')
     })
     Assert-Equal $retainedLinkSources.Count 1 'Link probe modifies exactly one retained sandbox source'
