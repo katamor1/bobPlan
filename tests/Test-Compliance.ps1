@@ -107,15 +107,21 @@ function Get-LatestComplianceResult {
     return Get-ChildItem -LiteralPath (Join-Path $TaskRoot 'results') -Filter "compliance-$Phase-*.json" -File | Sort-Object Name | Select-Object -Last 1
 }
 function New-ComplianceBuildResult {
-    param([string]$Path,[string]$TaskId,[string]$WorkPacket,[string]$BuildProfileId,[string]$BazaarBranch,[string]$BazaarRevision,[string]$AllowedPath,[string]$AllowedHash)
+    param([string]$Path,[object]$Gate,[object]$Packet,[string]$Action,[int]$Attempt,[object]$MakePredecessorPath=$null,[object]$MakePredecessorSha256=$null)
     $root=Split-Path -Parent (Split-Path -Parent $Path)
+    $snapshot=Get-TeamBobProtectedSnapshot $Gate.Context
+    $switch=if($Action -ceq 'Make'){'/MAKE'}else{'/REBUILD'}
     return [ordered]@{
-        schemaVersion='1.0';status='SUCCEEDED';exitCode=0;message='Fixture producer-shaped successful Rebuild.';taskId=$TaskId;action='Rebuild';attempt=1
-        workPacket=$WorkPacket;buildProfileId=$BuildProfileId;sandboxPath=(Join-Path $root 'sandbox');logDirectory=(Join-Path $root 'logs');stdoutPath=(Join-Path $root 'logs/stdout.log');stderrPath=(Join-Path $root 'logs/stderr.log')
+        schemaVersion='1.0';status='SUCCEEDED';exitCode=0;message="Fixture producer-shaped successful $Action.";taskId=$Gate.TaskContext.TaskId;action=$Action;attempt=$Attempt
+        workPacket=$Gate.WorkPacketPath;buildProfileId=$Packet.'Build Profile ID';sandboxPath=(Join-Path $root 'sandbox');logDirectory=(Join-Path $root 'logs');stdoutPath=(Join-Path $root 'logs/stdout.log');stderrPath=(Join-Path $root 'logs/stderr.log')
         outputLogPath=(Join-Path $root 'logs/build.log');processId=1234;processExitCode=0;processStartedAt='2026-09-04T00:00:00.0000000Z';processFinishedAt='2026-09-04T00:00:01.0000000Z'
-        terminationComplete=$true;captureComplete=$true;preBazaarStatus='';postBazaarStatus='';preBazaarBranch=$BazaarBranch;postBazaarBranch=$BazaarBranch;preBazaarRevision=$BazaarRevision;postBazaarRevision=$BazaarRevision
-        preSourceInventory=@('F|src/example.cpp|1|'+$AllowedHash);postSourceInventory=@('F|src/example.cpp|1|'+$AllowedHash);preBzrInventory=@('F|branch.conf|1|'+('1'*64));postBzrInventory=@('F|branch.conf|1|'+('1'*64))
-        preAllowedHashes=@($AllowedPath+'|'+$AllowedHash);postAllowedHashes=@($AllowedPath+'|'+$AllowedHash);expectedArtifacts=@('bin/fixture.exe');invokedArguments=@('fixture.dsp','/REBUILD','Fixture - Win32 Release','/OUT',(Join-Path $root 'logs/build.log'));resultPath=$Path
+        terminationComplete=$true;captureComplete=$true;preBazaarStatus='';postBazaarStatus='';preBazaarBranch=$Packet.'Bazaar Branch';postBazaarBranch=$Packet.'Bazaar Branch';preBazaarRevision=$Packet.'Bazaar Full Revision ID';postBazaarRevision=$Packet.'Bazaar Full Revision ID'
+        preSourceInventory=@($snapshot.SourceInventory);postSourceInventory=@($snapshot.SourceInventory);preBzrInventory=@($snapshot.BzrInventory);postBzrInventory=@($snapshot.BzrInventory)
+        preAllowedHashes=@($snapshot.AllowedHashes);postAllowedHashes=@($snapshot.AllowedHashes);expectedArtifacts=@('bin/fixture.exe');invokedArguments=@('fixture.dsp',$switch,'Fixture - Win32 Release','/OUT',(Join-Path $root 'logs/build.log'));resultPath=$Path
+        workPacketSha256=$Gate.WorkPacketSha256;policyVersion=$Gate.PolicyVersion;policyBundleSha256=$Gate.PolicyBundleSha256;roleLedgerSha256=$Gate.RoleLedgerSha256
+        phaseStatePath=$Gate.PhaseStatePath;phaseStateSha256=$Gate.PhaseStateSha256;phaseStateSemanticSha256=$Gate.PhaseStateSemanticSha256
+        prerequisiteImpactResultPath=$Gate.ImpactResultPath;prerequisiteImpactResultSha256=$Gate.ImpactResultSha256;implementationApprovalPath=$Gate.ImplementationApprovalPath;implementationApprovalSha256=$Gate.ImplementationApprovalSha256
+        makePredecessorPath=$MakePredecessorPath;makePredecessorSha256=$MakePredecessorSha256;finalIntegrityVerified=$true
     }
 }
 
@@ -185,8 +191,12 @@ try {
     foreach ($phase in $phaseData) {
         $artifactPath = Join-Path $task.Root $phase.Artifact
         if($phase.Phase -ceq 'implementation'){
-            $allowedHash=Get-ComplianceHash (Join-Path $bazaarRoot 'src/example.cpp')
-            Write-ComplianceJson $artifactPath (New-ComplianceBuildResult $artifactPath 'CHAIN-1' $task.Packet 'fixture-vc6' 'fixture-branch' 'fixture-revision' 'src/example.cpp' $allowedHash)
+            $packetObject=Get-CanonicalPacketObject $task.Packet
+            $executionGate=Get-TeamBobImplementationExecutionGate (Join-Path $fixtureProfile 'team-bob/tools') $task.Packet $packetObject
+            $makePath=Join-Path $task.Root 'results/build-result-make-fixture.json'
+            Write-ComplianceJson $makePath (New-ComplianceBuildResult $makePath $executionGate $packetObject 'Make' 1)
+            $makeHash=Get-ComplianceHash $makePath
+            Write-ComplianceJson $artifactPath (New-ComplianceBuildResult $artifactPath $executionGate $packetObject 'Rebuild' 1 $makePath $makeHash)
         } else { Write-ComplianceUtf8 $artifactPath $phase.Text }
         $packetHash = Get-ComplianceHash $task.Packet
         $artifactHash = Get-ComplianceHash $artifactPath
@@ -204,6 +214,11 @@ try {
         if ($null -ne $approvalRecordPath) { $arguments += @('-ApprovalRecordPath', $approvalRecordPath) }
         $result = Invoke-ComplianceScript $compliancePath $arguments
         Assert-ComplianceEqual $result.ExitCode 0 "$($phase.Phase) compliance passes; output: $($result.Output.Trim())"
+        if($phase.Phase -ceq 'implementation'){
+            $wrongPhaseStatus=$null
+            try{[void](Get-TeamBobImplementationExecutionGate (Join-Path $fixtureProfile 'team-bob/tools') $task.Packet (Get-CanonicalPacketObject $task.Packet))}catch{$wrongPhaseStatus=$_.Exception.Data['TeamBobStatus']}
+            Assert-ComplianceEqual $wrongPhaseStatus 'GATE_UNRESOLVED' 'A valid review-phase state is an unresolved implementation execution gate'
+        }
         $resultFile = Get-LatestComplianceResult $task.Root $phase.Phase
         Assert-ComplianceTrue ($null -ne $resultFile) "$($phase.Phase) creates an immutable timestamped result"
         $resultJson = Get-Content -Raw -LiteralPath $resultFile.FullName | ConvertFrom-Json
@@ -401,8 +416,11 @@ try {
 
     foreach ($entryViolation in @(
         [pscustomobject]@{Field='Risk';Value='Amber'},
+        [pscustomobject]@{Field='Risk';Value='Red'},
         [pscustomobject]@{Field='Open QA';Value=@('QA-OPEN')},
-        [pscustomobject]@{Field='RT Impact Clear';Value='NO'}
+        [pscustomobject]@{Field='RT Impact Clear';Value='NO'},
+        [pscustomobject]@{Field='Build Impact Clear';Value='NO'},
+        [pscustomobject]@{Field='Clean Working Copy';Value='NO'}
     )) {
         $badEntry=($chainPacket|ConvertTo-Json -Depth 30|ConvertFrom-Json)
         $badEntry.PSObject.Properties[$entryViolation.Field].Value=$entryViolation.Value

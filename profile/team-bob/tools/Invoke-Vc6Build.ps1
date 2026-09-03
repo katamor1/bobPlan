@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-GovernanceCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-ComplianceCommon.ps1')
 
 $exitCodes = @{ SUCCEEDED = 0; CODE_FAILED_RETRYABLE = 10; CODE_FAILED_STOP = 11; ENVIRONMENT_FAILED = 20; TIMED_OUT = 21; INTEGRITY_FAILED = 30 }
 $result = [ordered]@{
@@ -17,6 +19,9 @@ $result = [ordered]@{
     preBazaarBranch = $null; postBazaarBranch = $null; preBazaarRevision = $null; postBazaarRevision = $null
     preSourceInventory = @(); postSourceInventory = @(); preBzrInventory = @(); postBzrInventory = @()
     preAllowedHashes = @(); postAllowedHashes = @(); expectedArtifacts = @(); invokedArguments = @(); resultPath = $null
+    workPacketSha256=$null;policyVersion=$null;policyBundleSha256=$null;roleLedgerSha256=$null;phaseStatePath=$null;phaseStateSha256=$null;phaseStateSemanticSha256=$null
+    prerequisiteImpactResultPath=$null;prerequisiteImpactResultSha256=$null;implementationApprovalPath=$null;implementationApprovalSha256=$null
+    makePredecessorPath=$null;makePredecessorSha256=$null;finalIntegrityVerified=$false
 }
 $resultPath = $null
 $resultTrustedParentPhysical = $null
@@ -51,6 +56,7 @@ function Complete-TeamBobBuild {
             $Status = 'INTEGRITY_FAILED'
             $result.status = $Status
             $result.exitCode = 30
+            $result.finalIntegrityVerified = $false
             $result.message = 'Final protected-state proof failed after result publication: ' + $_.Exception.Message
             try {
                 Write-TeamBobUtf8File $resultPath (($result | ConvertTo-Json -Depth 20) + [Environment]::NewLine) $resultTrustedParentPhysical
@@ -77,7 +83,16 @@ try {
     [void](Get-TeamBobPhysicalPath $workPacketFull 'Work packet' 'Leaf' 'INTEGRITY_FAILED')
     $result.workPacket = $workPacketFull
     $packet = Read-TeamBobCanonicalPacket $workPacketFull
-    $context = Get-TeamBobPacketContext $packet $workPacketFull
+    $executionGate = Get-TeamBobImplementationExecutionGate $PSScriptRoot $workPacketFull $packet
+    $context = $executionGate.Context
+    $makePredecessor=$null
+    if($Action -eq 'Rebuild'){$makePredecessor=Get-TeamBobValidMakePredecessor $executionGate $Attempt}
+    $result.taskId=$executionGate.TaskContext.TaskId;$result.workPacketSha256=$executionGate.WorkPacketSha256;$result.policyVersion=$executionGate.PolicyVersion
+    $result.policyBundleSha256=$executionGate.PolicyBundleSha256;$result.roleLedgerSha256=$executionGate.RoleLedgerSha256
+    $result.phaseStatePath=$executionGate.PhaseStatePath;$result.phaseStateSha256=$executionGate.PhaseStateSha256;$result.phaseStateSemanticSha256=$executionGate.PhaseStateSemanticSha256
+    $result.prerequisiteImpactResultPath=$executionGate.ImpactResultPath;$result.prerequisiteImpactResultSha256=$executionGate.ImpactResultSha256
+    $result.implementationApprovalPath=$executionGate.ImplementationApprovalPath;$result.implementationApprovalSha256=$executionGate.ImplementationApprovalSha256
+    if($null -ne $makePredecessor){$result.makePredecessorPath=$makePredecessor.Path;$result.makePredecessorSha256=$makePredecessor.Hash}
     $resultsInfo = Get-TeamBobTaskResultsContext $context -Create
     $resultPath = Join-Path $resultsInfo.FullPath ('build-result-' + [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffffffZ') + '-' + [guid]::NewGuid().ToString('N') + '.json')
     $resultTrustedParentPhysical = $context.TaskPhysical
@@ -254,12 +269,30 @@ try {
             $result.postAllowedHashes = @($postSnapshot.AllowedHashes)
             $result.postSourceInventory = @($postSnapshot.SourceInventory)
             $result.postBzrInventory = @($postSnapshot.BzrInventory)
+            if($pendingStatus -eq 'SUCCEEDED'){
+                $postExecutionGate=Get-TeamBobImplementationExecutionGate $PSScriptRoot $workPacketFull $packet
+                Assert-TeamBobExecutionGateUnchanged $executionGate $postExecutionGate
+                if($Action -eq 'Rebuild'){
+                    $postMakePredecessor=Get-TeamBobValidMakePredecessor $postExecutionGate $Attempt
+                    if($postMakePredecessor.Path -cne $result.makePredecessorPath -or $postMakePredecessor.Hash -cne $result.makePredecessorSha256){throw(New-TeamBobComplianceFailure 30 'Make predecessor changed during Rebuild execution.')}
+                }
+                $result.finalIntegrityVerified=$true
+            }
         } catch {
             $postflightFailure = $_.Exception.Message
         }
     }
     if ($null -ne $postflightFailure) { Complete-TeamBobBuild 'INTEGRITY_FAILED' ("Postflight integrity proof failed: $postflightFailure") }
+    if($pendingStatus -ne 'SUCCEEDED'){$result.finalIntegrityVerified=$false}
     Complete-TeamBobBuild $pendingStatus $pendingMessage
 } catch {
+    if($null -eq $resultPath){
+        [Console]::Error.WriteLine($_.Exception.Message)
+        $earlyCode=30;$earlyToken='INTEGRITY_FAILED'
+        if($_.Exception.Data['TeamBobStatus'] -eq 'GATE_FAILED'){$earlyCode=10;$earlyToken='GATE_FAILED'}
+        elseif($_.Exception.Data['TeamBobStatus'] -eq 'GATE_UNRESOLVED'){$earlyCode=11;$earlyToken='GATE_UNRESOLVED'}
+        elseif($_.Exception.Data['TeamBobStatus'] -in @('PACKET_VERSION_UNSUPPORTED','PACKET_SCHEMA_INVALID','CONTRACT_INVALID')){$earlyCode=20;$earlyToken='CONTRACT_INVALID'}
+        [Console]::Out.WriteLine($earlyToken);exit $earlyCode
+    }
     Complete-TeamBobBuild (Get-TeamBobExceptionStatus $_.Exception) $_.Exception.Message
 }

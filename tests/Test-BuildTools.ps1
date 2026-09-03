@@ -61,14 +61,14 @@ function Write-Task3PacketFixture {
         [string[]]$ForbiddenAreas = @('actual-machine', 'control-network', 'mainline', 'secrets')
     )
     $packet = [ordered]@{
-        'Profile Version' = '0.2.0-poc'; 'Policy Version' = '0.2.0-poc'; 'Policy Bundle SHA256' = ('0' * 64); 'Role Ledger SHA256' = ('1' * 64); 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Fixture Customer'
+        'Profile Version' = '0.2.0-poc'; 'Policy Version' = '0.2.0-poc'; 'Policy Bundle SHA256' = $(if($script:Task3PolicyHash){$script:Task3PolicyHash}else{('0' * 64)}); 'Role Ledger SHA256' = $(if($script:Task3RoleHash){$script:Task3RoleHash}else{('1' * 64)}); 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Fixture Customer'
         'ReqIDs' = @('REQ-TASK3-001'); 'Word Baseline' = 'WORD-1'; 'QA Baseline' = 'QA-1'; 'Spec Baseline' = 'SPEC-1'
         'Bazaar Root' = [System.IO.Path]::GetFullPath($BazaarRoot); 'Bazaar Branch' = 'fixture-branch'; 'Bazaar Full Revision ID' = 'fixture-revision-id-full-123'
         'Allowed Files' = @($AllowedFiles); 'Forbidden Areas' = @($ForbiddenAreas)
         'RT Impact' = 'None'; 'Safety Impact' = 'None'; 'Board Impact' = 'None'; 'Driver Impact' = 'None'; 'ABI Impact' = 'None'; 'Build Impact' = 'Fixture'; 'Customer Branch Impact' = 'None'
         'RT Impact Clear' = 'YES'; 'Safety Impact Clear' = 'YES'; 'Board Impact Clear' = 'YES'; 'Driver Impact Clear' = 'YES'; 'ABI Impact Clear' = 'YES'; 'Build Impact Clear' = 'YES'; 'Customer Branch Impact Clear' = 'YES'
         'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $BuildProfileId; 'Max-Repair-Cycles' = 2
-        'Specification Assignment ID' = 'ASSIGN-SPEC'; 'Implementation Assignment ID' = 'ASSIGN-IMPL'; 'Independent Reviewer Assignment ID' = 'ASSIGN-REVIEW'
+        'Specification Assignment ID' = 'ASSIGN-SPEC-BUILD-TEST'; 'Implementation Assignment ID' = 'ASSIGN-IMPL-BUILD-TEST'; 'Independent Reviewer Assignment ID' = 'ASSIGN-REVIEW-BUILD-TEST'
     }
     $json = $packet | ConvertTo-Json -Depth 20
     Write-Utf8NoBomFixture $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")
@@ -86,6 +86,86 @@ function Write-Task3PacketObjectFixture {
     param([string]$Path, [object]$Packet)
     $json = $Packet | ConvertTo-Json -Depth 20
     Write-Utf8NoBomFixture $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")
+}
+
+function Get-Task3OptionalTreeFingerprint {
+    param([string]$Path)
+    if(-not(Test-Path -LiteralPath $Path -PathType Container)){return '<MISSING>'}
+    return Get-TreeFingerprintFixture $Path
+}
+
+function Invoke-Task3RejectedWrapperWithoutEffects {
+    param(
+        [string]$Path,[string[]]$Arguments,[string]$TaskRoot,[string]$SandboxTaskRoot,
+        [string]$LogTaskRoot,[string]$WorkingTree,[string]$Label
+    )
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $beforeResults=Get-Task3OptionalTreeFingerprint (Join-Path $TaskRoot 'results')
+    $beforeSandbox=Get-Task3OptionalTreeFingerprint $SandboxTaskRoot
+    $beforeLogs=Get-Task3OptionalTreeFingerprint $LogTaskRoot
+    $beforeSource=Get-TreeFingerprintFixture (Join-Path $WorkingTree 'src')
+    $beforeBzr=Get-TreeFingerprintFixture (Join-Path $WorkingTree '.bzr')
+    $result=Invoke-TestScript $Path $Arguments
+    Assert-True ($result.ExitCode -ne 0) "$Label is rejected"
+    Assert-Equal (Get-Task3OptionalTreeFingerprint (Join-Path $TaskRoot 'results')) $beforeResults "$Label writes no result"
+    Assert-Equal (Get-Task3OptionalTreeFingerprint $SandboxTaskRoot) $beforeSandbox "$Label creates no sandbox"
+    Assert-Equal (Get-Task3OptionalTreeFingerprint $LogTaskRoot) $beforeLogs "$Label creates no log"
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $WorkingTree 'src')) $beforeSource "$Label preserves source"
+    Assert-Equal (Get-TreeFingerprintFixture (Join-Path $WorkingTree '.bzr')) $beforeBzr "$Label preserves .bzr"
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' "$Label invokes no MSDEV"
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' "$Label invokes no Bazaar"
+    return $result
+}
+
+function New-Task3GovernedExecutionFixture {
+    param([string]$WorkingTree,[string]$TaskId,[string]$BuildProfileId)
+    $tools = Join-Path $WorkingTree 'team-bob/tools'
+    $startRunner=Join-Path ([System.IO.Path]::GetTempPath()) ('team-bob-task3-start-'+[guid]::NewGuid().ToString('N')+'.ps1')
+    Write-Utf8NoBomFixture $startRunner @'
+param([string]$StartPath,[string]$WorkingTree,[string]$TaskId,[string]$BuildProfileId,[string]$AllowedSecond)
+& $StartPath -TaskId $TaskId -BazaarRoot $WorkingTree -Difficulty Small -Classification Green -Customer 'Fixture Customer' `
+    -ReqIds @('REQ-TASK3-001') -WordBaseline WORD-1 -QaBaseline QA-1 -SpecBaseline SPEC-1 `
+    -AllowedFiles @('src/example.cpp',$AllowedSecond) -BuildProfileId $BuildProfileId `
+    -SpecificationAssignmentId ASSIGN-SPEC-BUILD-TEST -ImplementationAssignmentId ASSIGN-IMPL-BUILD-TEST -IndependentReviewerAssignmentId ASSIGN-REVIEW-BUILD-TEST `
+    -RTImpactClear YES -SafetyImpactClear YES -BoardImpactClear YES -DriverImpactClear YES -ABIImpactClear YES -BuildImpactClear YES -CustomerBranchImpactClear YES
+'@
+    try{$start=Invoke-TestScript $startRunner @('-StartPath',(Join-Path $tools 'Start-TeamBobTask.ps1'),'-WorkingTree',$WorkingTree,'-TaskId',$TaskId,'-BuildProfileId',$BuildProfileId,'-AllowedSecond','src/日本.cpp')}finally{Remove-Item -LiteralPath $startRunner -Force -ErrorAction SilentlyContinue}
+    Assert-Equal $start.ExitCode 0 "Task 3 fixture starts through the real Task 2 API; output: $($start.Output.Trim())"
+    $taskRoot = Join-Path $WorkingTree ('team-bob-work/' + $TaskId)
+    $packetPath = Join-Path $taskRoot 'work-packet.md'
+    $packet = Read-Task3PacketObjectFixture $packetPath
+    $packetHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $packetPath).Hash.ToLowerInvariant()
+    $phaseContracts = @(
+        [pscustomobject]@{ Phase='requirements'; Relative='drafts/requirement-ledger.csv'; Text="ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State`r`nREQ-TASK3-001,WORD-1,Fixture interpretation,Fixture acceptance,QA-1,Closed,Fixture evidence,Not required`r`n"; Ai=@('GOV-A-001','REQ-A-001'); Assignment=$null },
+        [pscustomobject]@{ Phase='specification'; Relative='drafts/external-spec.md'; Text="# Specification`r`n`r`n## ReqIDs`r`nREQ-TASK3-001`r`n`r`n## Scope`r`nFixture scope.`r`n`r`n## Acceptance Criteria`r`nAC-TASK3-001: Fixture acceptance.`r`n`r`n## Evidence`r`nFixture evidence.`r`n`r`n## Human Approval`r`nBound approval.`r`n"; Ai=@('GOV-A-001','SPEC-A-001'); Assignment='ASSIGN-SPEC-BUILD-TEST' },
+        [pscustomobject]@{ Phase='impact'; Relative='drafts/impact-analysis.md'; Text="# Impact Analysis`r`n`r`n| Area | Impact |`r`n|---|---|`r`n| RT | Clear |`r`n| Safety | Clear |`r`n| Board | Clear |`r`n| Driver | Clear |`r`n| ABI | Clear |`r`n| Build | Clear |`r`n| Customer Branch | Clear |`r`n"; Ai=@('GOV-A-001','IMP-A-001'); Assignment='ASSIGN-IMPL-BUILD-TEST' }
+    )
+    $impactResult = $null
+    $impactApproval = $null
+    foreach ($phaseContract in $phaseContracts) {
+        $artifactPath = Join-Path $taskRoot $phaseContract.Relative
+        Write-Utf8NoBomFixture $artifactPath $phaseContract.Text
+        $artifactHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifactPath).Hash.ToLowerInvariant()
+        $assessmentPath = Join-Path $taskRoot ('drafts/assessment-' + $phaseContract.Phase + '.json')
+        $checks = @($phaseContract.Ai | ForEach-Object { [ordered]@{ id=$_;status='PASS';evidence=@([ordered]@{type='path';value=$phaseContract.Relative},[ordered]@{type='line';value='1'},[ordered]@{type='rationale';value='Fixture assessment evidence.'});message='Fixture assessment passed.' } })
+        Write-JsonFixture $assessmentPath ([ordered]@{schemaVersion='1.0';profileVersion='0.2.0-poc';policyVersion='0.2.0-poc';taskId=$TaskId;phase=$phaseContract.Phase;workPacketSha256=$packetHash;policyBundleSha256=$packet.'Policy Bundle SHA256';roleLedgerSha256=$packet.'Role Ledger SHA256';artifactPath=$phaseContract.Relative;artifactSha256=$artifactHash;checks=$checks})
+        $approvalPath = $null
+        if ($null -ne $phaseContract.Assignment) {
+            $approval = Invoke-TestScript (Join-Path $tools 'New-TeamBobApprovalRecord.ps1') @('-WorkPacket',$packetPath,'-Phase',$phaseContract.Phase,'-AssignmentId',$phaseContract.Assignment,'-ArtifactPath',$artifactPath,'-EvidencePath',$artifactPath,'-ExpiresAtUtc',([DateTimeOffset]::UtcNow.AddHours(24).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')),'-HumanTerminal')
+            Assert-Equal $approval.ExitCode 0 "Task 3 fixture creates real $($phaseContract.Phase) approval; output: $($approval.Output.Trim())"
+            $approvalPath = @(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'approvals') -Filter ('approval-' + $phaseContract.Phase + '-*.json') -File | Sort-Object Name | Select-Object -Last 1)[0].FullName
+        }
+        $complianceArgs = @('-WorkPacket',$packetPath,'-Phase',$phaseContract.Phase,'-ArtifactPath',$artifactPath,'-AssessmentPath',$assessmentPath)
+        if ($null -ne $approvalPath) { $complianceArgs += @('-ApprovalRecordPath',$approvalPath) }
+        $compliance = Invoke-TestScript (Join-Path $tools 'Invoke-TeamBobComplianceCheck.ps1') $complianceArgs
+        Assert-Equal $compliance.ExitCode 0 "Task 3 fixture completes real $($phaseContract.Phase) compliance; output: $($compliance.Output.Trim())"
+        if ($phaseContract.Phase -eq 'impact') {
+            $impactResult = @(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'results') -Filter 'compliance-impact-*.json' -File | Sort-Object Name | Select-Object -Last 1)[0].FullName
+            $impactApproval = $approvalPath
+        }
+    }
+    return [pscustomobject]@{ TaskRoot=$taskRoot;PacketPath=$packetPath;ImpactResultPath=$impactResult;ImpactApprovalPath=$impactApproval }
 }
 
 function New-Task3PacketPathFixture {
@@ -267,9 +347,10 @@ function Invoke-Task3BuildWithoutDurableResultFixture {
 }
 
 function Assert-Task3BuildWithoutDurableResult {
-    param([object]$Result, [string]$Message)
-    Assert-Equal $Result.ExitCode 30 "$Message uses the fixed integrity exit code"
-    Assert-True ($Result.Output -match '(?m)^INTEGRITY_FAILED\s*$') "$Message emits the fixed integrity status token"
+    param([object]$Result, [string]$Message,[int]$ExpectedCode=30)
+    $expectedToken=if($ExpectedCode -eq 20){'CONTRACT_INVALID'}else{'INTEGRITY_FAILED'}
+    Assert-Equal $Result.ExitCode $ExpectedCode "$Message uses the fixed pre-execution exit code"
+    Assert-True ($Result.Output -match ('(?m)^'+$expectedToken+'\s*$')) "$Message emits the fixed pre-execution status token"
 }
 
 $task3RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -340,10 +421,13 @@ try {
     $catalogPath = Join-Path $workingTree 'team-bob/config/vc6-build-targets.json'
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
     $taskId = 'BUILD-0001'
-    $taskDirectory = Join-Path $workingTree ('team-bob-work/' + $taskId)
-    New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') -Force | Out-Null
-    $workPacketPath = Join-Path $taskDirectory 'work-packet.md'
-    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    $governedFixture = New-Task3GovernedExecutionFixture $workingTree $taskId $profile.id
+    $taskDirectory = $governedFixture.TaskRoot
+    $workPacketPath = $governedFixture.PacketPath
+    $governedPacketBytes = [System.IO.File]::ReadAllBytes($workPacketPath)
+    $governedPacket = Read-Task3PacketObjectFixture $workPacketPath
+    $script:Task3PolicyHash = [string]$governedPacket.'Policy Bundle SHA256'
+    $script:Task3RoleHash = [string]$governedPacket.'Role Ledger SHA256'
     $buildPath = Join-Path $workingTree 'team-bob/tools/Invoke-Vc6Build.ps1'
     $evidencePath = Join-Path $workingTree 'team-bob/tools/Export-BazaarEvidence.ps1'
     $buildCommonPath = Join-Path $workingTree 'team-bob/tools/TeamBob-BuildCommon.ps1'
@@ -515,6 +599,7 @@ try {
         [pscustomobject]@{ Name = 'branch empty'; Field = 'Bazaar Branch'; Value = '' },
         [pscustomobject]@{ Name = 'revision type'; Field = 'Bazaar Full Revision ID'; Value = 7 },
         [pscustomobject]@{ Name = 'Allowed Files type'; Field = 'Allowed Files'; Value = 'src/example.cpp' },
+        [pscustomobject]@{ Name = 'Allowed Files outside root'; Field = 'Allowed Files'; Value = @('../outside.cpp'); ExpectedCode = 30 },
         [pscustomobject]@{ Name = 'Forbidden Areas empty array'; Field = 'Forbidden Areas'; EmptyArray = $true },
         [pscustomobject]@{ Name = 'RT impact empty'; Field = 'RT Impact'; Value = '' },
         [pscustomobject]@{ Name = 'Safety impact type'; Field = 'Safety Impact'; Value = 7 },
@@ -546,7 +631,8 @@ try {
         [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
         [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
         $tamperedResult = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
-        Assert-Task3BuildWithoutDurableResult $tamperedResult ("Tampered runtime work-packet contract: " + $tamperCase.Name)
+        $tamperExpectedCode=if($null -ne $tamperCase.PSObject.Properties['ExpectedCode']){[int]$tamperCase.ExpectedCode}else{20}
+        Assert-Task3BuildWithoutDurableResult $tamperedResult ("Tampered runtime work-packet contract: " + $tamperCase.Name) $tamperExpectedCode
         Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' ("Tampered packet invokes no MSDEV: " + $tamperCase.Name)
         Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' ("Tampered packet invokes no Bazaar query: " + $tamperCase.Name)
     }
@@ -589,7 +675,7 @@ try {
     $uncBazaarRoot = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildWithoutDurableResult $uncBazaarRoot 'Work Packet UNC Bazaar root'
     Assert-True ($uncBazaarRoot.Output -match 'local non-UNC|network') 'Work Packet UNC Bazaar root rejection identifies the local-only boundary'
-    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    [System.IO.File]::WriteAllBytes($workPacketPath, $governedPacketBytes)
 
     $profile.projectFile = '\\fixture-server.invalid\fixture-share\fixture.dsp'
     Write-JsonFixture $catalogPath ([pscustomobject]@{ profiles = @($profile) })
@@ -667,33 +753,88 @@ try {
     Assert-Equal (Get-TreeFingerprintFixture $outsideResultsTarget) $outsideResultsFingerprint 'Outside results-junction rejection writes no durable output through the alias'
     [System.IO.Directory]::Delete($outsideResultsDirectory)
 
-    $sandboxAliasTaskId = 'BUILD-SANDBOX-ALIAS'
-    $sandboxAliasPacket = New-Task3PacketPathFixture $workingTree $sandboxAliasTaskId $profile.id
-    $sandboxTaskAlias = Join-Path $sandboxRoot $sandboxAliasTaskId
+    $sandboxTaskAlias = Join-Path $sandboxRoot $taskId
     New-Item -ItemType Junction -Path $sandboxTaskAlias -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
     $bzrBeforeSandboxAlias = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
-    $sandboxAliasBuild = Invoke-Task3BuildFixture $buildPath $sandboxAliasPacket 'Make' 0
+    $sandboxAliasBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $sandboxAliasBuild 'INTEGRITY_FAILED' 30 'Per-task sandbox junction targeting .bzr'
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeSandboxAlias 'Sandbox task-child alias rejection does not copy source into .bzr'
     Assert-True (-not ($sandboxAliasBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Sandbox task-child alias cannot produce false success'
     [System.IO.Directory]::Delete($sandboxTaskAlias)
 
-    $logAliasTaskId = 'BUILD-LOG-ALIAS'
-    $logAliasPacket = New-Task3PacketPathFixture $workingTree $logAliasTaskId $profile.id
-    $logTaskAlias = Join-Path $logRoot $logAliasTaskId
+    $logTaskAlias = Join-Path $logRoot $taskId
     New-Item -ItemType Junction -Path $logTaskAlias -Target (Join-Path $workingTree '.bzr') -ErrorAction Stop | Out-Null
     $bzrBeforeLogAlias = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
-    $logAliasBuild = Invoke-Task3BuildFixture $buildPath $logAliasPacket 'Make' 0
+    $logAliasBuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $logAliasBuild 'INTEGRITY_FAILED' 30 'Per-task log junction targeting .bzr'
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $bzrBeforeLogAlias 'Log task-child alias rejection writes no log evidence into .bzr'
     Assert-True (-not ($logAliasBuild.Output -match '(?m)^SUCCEEDED\s*$')) 'Log task-child alias cannot produce false success'
     [System.IO.Directory]::Delete($logTaskAlias)
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
 
+    $governanceTamperCases=@(
+        [pscustomobject]@{Name='policy bundle';Path=(Join-Path $workingTree '.bob/governance/policy-manifest.json');Kind='append'},
+        [pscustomobject]@{Name='role ledger';Path=(Join-Path $workingTree '.bob/governance/roles.json');Kind='append'},
+        [pscustomobject]@{Name='phase state';Path=(Join-Path $taskDirectory 'state/phase-state.json');Kind='state'},
+        [pscustomobject]@{Name='bound impact result';Path=$governedFixture.ImpactResultPath;Kind='append'},
+        [pscustomobject]@{Name='implementation approval';Path=$governedFixture.ImpactApprovalPath;Kind='append'}
+    )
+    foreach($governanceTamperCase in $governanceTamperCases){
+        $savedGovernanceBytes=[System.IO.File]::ReadAllBytes($governanceTamperCase.Path)
+        try{
+            if($governanceTamperCase.Kind -ceq 'state'){
+                $changedState=[System.IO.File]::ReadAllText($governanceTamperCase.Path,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+                $changedState.currentPhase='review'
+                Write-JsonFixture $governanceTamperCase.Path $changedState
+            }else{
+                $changedBytes=New-Object byte[] ($savedGovernanceBytes.Length+1)
+                [Array]::Copy($savedGovernanceBytes,$changedBytes,$savedGovernanceBytes.Length)
+                $changedBytes[$changedBytes.Length-1]=0x20
+                [System.IO.File]::WriteAllBytes($governanceTamperCase.Path,$changedBytes)
+            }
+            [void](Invoke-Task3RejectedWrapperWithoutEffects $buildPath @('-WorkPacket',$workPacketPath,'-Action','Make','-Attempt','0') $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree ("Build pre-gate " + $governanceTamperCase.Name + ' tamper'))
+            [void](Invoke-Task3RejectedWrapperWithoutEffects $evidencePath @('-WorkPacket',$workPacketPath) $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree ("Evidence pre-gate " + $governanceTamperCase.Name + ' tamper'))
+        }finally{[System.IO.File]::WriteAllBytes($governanceTamperCase.Path,$savedGovernanceBytes)}
+    }
+
+    $missingApprovalPath=$governedFixture.ImpactApprovalPath+'.missing-fixture'
+    [System.IO.File]::Move($governedFixture.ImpactApprovalPath,$missingApprovalPath)
+    try{
+        [void](Invoke-Task3RejectedWrapperWithoutEffects $buildPath @('-WorkPacket',$workPacketPath,'-Action','Make','-Attempt','0') $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree 'Build pre-gate absent approval')
+        [void](Invoke-Task3RejectedWrapperWithoutEffects $evidencePath @('-WorkPacket',$workPacketPath) $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree 'Evidence pre-gate absent approval')
+    }finally{[System.IO.File]::Move($missingApprovalPath,$governedFixture.ImpactApprovalPath)}
+
+    $savedExpiredApproval=[System.IO.File]::ReadAllBytes($governedFixture.ImpactApprovalPath)
+    $savedExpiredImpact=[System.IO.File]::ReadAllBytes($governedFixture.ImpactResultPath)
+    $expiredStatePath=Join-Path $taskDirectory 'state/phase-state.json'
+    $savedExpiredState=[System.IO.File]::ReadAllBytes($expiredStatePath)
+    try{
+        $expiredImpact=[System.IO.File]::ReadAllText($governedFixture.ImpactResultPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+        $impactEvaluatedAt=[DateTimeOffset]::Parse([string]$expiredImpact.evaluatedAtUtc,[System.Globalization.CultureInfo]::InvariantCulture,[System.Globalization.DateTimeStyles]::RoundtripKind)
+        $expiredApproval=[System.IO.File]::ReadAllText($governedFixture.ImpactApprovalPath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+        $expiredApproval.approvedAtUtc=$impactEvaluatedAt.AddSeconds(-1).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        $expiredApproval.expiresAtUtc=$impactEvaluatedAt.AddMilliseconds(100).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')
+        Write-JsonFixture $governedFixture.ImpactApprovalPath $expiredApproval
+        $expiredImpact.approvalRecordSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $governedFixture.ImpactApprovalPath).Hash.ToLowerInvariant()
+        Write-JsonFixture $governedFixture.ImpactResultPath $expiredImpact
+        $expiredState=[System.IO.File]::ReadAllText($expiredStatePath,[System.Text.Encoding]::UTF8)|ConvertFrom-Json
+        $expiredState.latestResultSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $governedFixture.ImpactResultPath).Hash.ToLowerInvariant()
+        Write-JsonFixture $expiredStatePath $expiredState
+        $expiredBuild=Invoke-Task3RejectedWrapperWithoutEffects $buildPath @('-WorkPacket',$workPacketPath,'-Action','Make','-Attempt','0') $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree 'Build pre-gate expired approval'
+        $expiredEvidence=Invoke-Task3RejectedWrapperWithoutEffects $evidencePath @('-WorkPacket',$workPacketPath) $taskDirectory (Join-Path $sandboxRoot $taskId) (Join-Path $logRoot $taskId) $workingTree 'Evidence pre-gate expired approval'
+        Assert-Equal $expiredBuild.ExitCode 11 'Expired build approval is gate-unresolved'
+        Assert-Equal $expiredEvidence.ExitCode 11 'Expired evidence approval is gate-unresolved'
+    }finally{
+        [System.IO.File]::WriteAllBytes($governedFixture.ImpactApprovalPath,$savedExpiredApproval)
+        [System.IO.File]::WriteAllBytes($governedFixture.ImpactResultPath,$savedExpiredImpact)
+        [System.IO.File]::WriteAllBytes($expiredStatePath,$savedExpiredState)
+    }
+
     $make = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $make 'SUCCEEDED' 0 'Successful Make'
     Assert-Equal $make.Json.action 'Make' 'Build result records the requested Make action'
     Assert-Equal $make.Json.attempt 0 'Build result records attempt zero'
+    Assert-Equal $make.Json.workPacketSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $workPacketPath).Hash.ToLowerInvariant()) 'Build result records exact packet provenance'
     Assert-True (Test-Path -LiteralPath $make.Json.sandboxPath -PathType Container) 'Build creates a new per-attempt sandbox'
     Assert-True (Test-Path -LiteralPath (Join-Path $make.Json.sandboxPath 'bin/fixture.exe') -PathType Leaf) 'Successful build verifies the expected sandbox artifact'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $workingTree 'bin/fixture.exe'))) 'Original tree receives no VC6 artifact'
@@ -734,12 +875,51 @@ try {
 
     [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG, '')
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
+    $sameAttemptMake = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 1
+    Assert-Task3BuildOutcome $sameAttemptMake 'SUCCEEDED' 0 'Same-attempt Make predecessor'
+    Assert-Equal $sameAttemptMake.Json.makePredecessorPath $null 'Make stores a null predecessor path'
+    Assert-Equal $sameAttemptMake.Json.makePredecessorSha256 $null 'Make stores a null predecessor hash'
+    foreach($predecessorCase in @(
+        [pscustomobject]@{Name='wrong attempt';Attempt=2;ExpectedCode=10;Setup=$null;Cleanup=$null},
+        [pscustomobject]@{Name='malformed claimed candidate';Attempt=1;ExpectedCode=20;Setup='malformed';Cleanup='malformed'}
+    )){
+        $malformedCandidate=Join-Path $taskDirectory 'results/build-result-malformed-claimed.json'
+        if($predecessorCase.Setup -eq 'malformed'){Write-Utf8NoBomFixture $malformedCandidate '{"action":"Make"}' }
+        [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG,'');[System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG,'')
+        $beforeRejectedResults=Get-Task3OptionalTreeFingerprint (Join-Path $taskDirectory 'results')
+        $beforeRejectedSandbox=Get-Task3OptionalTreeFingerprint (Join-Path $sandboxRoot $taskId)
+        $beforeRejectedLogs=Get-Task3OptionalTreeFingerprint (Join-Path $logRoot $taskId)
+        $beforeRejectedSource=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash
+        $beforeRejectedBzr=Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
+        $rejectedPredecessor=Invoke-TestScript $buildPath @('-WorkPacket',$workPacketPath,'-Action','Rebuild','-Attempt',([string]$predecessorCase.Attempt))
+        Assert-Equal $rejectedPredecessor.ExitCode $predecessorCase.ExpectedCode "Rebuild rejects $($predecessorCase.Name) before side effects"
+        Assert-Equal (Get-Task3OptionalTreeFingerprint (Join-Path $taskDirectory 'results')) $beforeRejectedResults "Rejected $($predecessorCase.Name) preserves results"
+        Assert-Equal (Get-Task3OptionalTreeFingerprint (Join-Path $sandboxRoot $taskId)) $beforeRejectedSandbox "Rejected $($predecessorCase.Name) preserves sandboxes"
+        Assert-Equal (Get-Task3OptionalTreeFingerprint (Join-Path $logRoot $taskId)) $beforeRejectedLogs "Rejected $($predecessorCase.Name) preserves logs"
+        Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash $beforeRejectedSource "Rejected $($predecessorCase.Name) preserves source"
+        Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $beforeRejectedBzr "Rejected $($predecessorCase.Name) preserves .bzr"
+        Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' "Rejected $($predecessorCase.Name) invokes no MSDEV"
+        Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' "Rejected $($predecessorCase.Name) invokes no Bazaar"
+        if($predecessorCase.Cleanup -eq 'malformed'){Remove-Item -LiteralPath $malformedCandidate -Force}
+    }
+    $duplicateSameAttemptMake = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 1
+    [System.IO.File]::WriteAllText($env:BOB3_MSDEV_COMMAND_LOG,'');[System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG,'')
+    $beforeAmbiguousResults=Get-Task3OptionalTreeFingerprint (Join-Path $taskDirectory 'results')
+    $ambiguousRebuild=Invoke-TestScript $buildPath @('-WorkPacket',$workPacketPath,'-Action','Rebuild','-Attempt','1')
+    Assert-Equal $ambiguousRebuild.ExitCode 10 'Rebuild rejects multiple valid same-attempt Make predecessors'
+    Assert-Equal (Get-Task3OptionalTreeFingerprint (Join-Path $taskDirectory 'results')) $beforeAmbiguousResults 'Ambiguous predecessor rejection writes no result'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_MSDEV_COMMAND_LOG)) '' 'Ambiguous predecessor rejection invokes no MSDEV'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB3_BZR_COMMAND_LOG)) '' 'Ambiguous predecessor rejection invokes no Bazaar'
+    Remove-Item -LiteralPath $duplicateSameAttemptMake.ResultPath -Force
     $rebuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Rebuild' 1
     Assert-Task3BuildOutcome $rebuild 'SUCCEEDED' 0 'Successful Rebuild'
     . $buildCommonPath
     $producerShapeAccepted=$true
     try { Assert-TeamBobBuildResultContract $rebuild.Json 'INTEGRITY_FAILED' } catch { $producerShapeAccepted=$false }
     Assert-True $producerShapeAccepted 'The shared build-result contract accepts the exact real Invoke-Vc6Build producer shape'
+    Assert-Equal $rebuild.Json.makePredecessorPath $sameAttemptMake.ResultPath 'Rebuild binds the exact same-attempt Make path'
+    Assert-Equal $rebuild.Json.makePredecessorSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $sameAttemptMake.ResultPath).Hash.ToLowerInvariant()) 'Rebuild binds the exact same-attempt Make bytes'
+    Assert-Equal $rebuild.Json.finalIntegrityVerified $true 'Successful Rebuild records final governance and protected-state verification'
     $rebuildCommand = @(Read-Utf8LinesFixture $env:BOB3_MSDEV_COMMAND_LOG)[0] -split "`t"
     Assert-Equal $rebuildCommand[1] '/REBUILD' 'Rebuild performs exactly the requested /REBUILD action'
 
@@ -950,6 +1130,13 @@ try {
     $env:BOB3_MSDEV_MUTATE_PATH = $null
     Write-Cp932Fixture (Join-Path $workingTree 'src/example.cpp') "int main() { return 0; }`r`n"
 
+    $phaseStatePath=Join-Path $taskDirectory 'state/phase-state.json'
+    $savedPhaseStateBytes=[System.IO.File]::ReadAllBytes($phaseStatePath)
+    $env:BOB3_MSDEV_MUTATE_PATH=$phaseStatePath
+    try{$governancePostflightFailure=Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0}finally{$env:BOB3_MSDEV_MUTATE_PATH=$null;[System.IO.File]::WriteAllBytes($phaseStatePath,$savedPhaseStateBytes)}
+    Assert-Task3BuildOutcome $governancePostflightFailure 'INTEGRITY_FAILED' 30 'Governance state mutation during native build postflight'
+    Assert-Equal $governancePostflightFailure.Json.finalIntegrityVerified $false 'Governance postflight failure never records final integrity success'
+
     $env:BOB3_MSDEV_DELETE_PATH = Join-Path $workingTree 'src/example.cpp'
     $deletionFailure = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildOutcome $deletionFailure 'INTEGRITY_FAILED' 30 'Allowed File deletion during build postflight'
@@ -962,16 +1149,19 @@ try {
     Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id @("unsafe`tpath")
     $controlForbidden = Invoke-Task3BuildWithoutDurableResultFixture $buildPath $workPacketPath 'Make' 0
     Assert-Task3BuildWithoutDurableResult $controlForbidden 'Forbidden Areas control-character entry'
-    Write-Task3PacketFixture $workPacketPath $workingTree $taskId @('src/example.cpp', 'src/日本.cpp') $profile.id
+    [System.IO.File]::WriteAllBytes($workPacketPath, $governedPacketBytes)
 
     $env:BOB3_MSDEV_MODE = 'success'
-    $env:BOB3_MSDEV_BLOCK_RESULT_DIRECTORY = Join-Path $taskDirectory 'results'
-    $resultPersistenceFailure = Invoke-TestScript $buildPath @('-WorkPacket', $workPacketPath, '-Action', 'Make', '-Attempt', '0')
+    $savedPersistenceStatus=$env:BOB3_BZR_STATUS;$env:BOB3_BZR_STATUS=''
+    $persistenceFixture=New-Task3GovernedExecutionFixture $workingTree 'BUILD-PERSISTENCE' $profile.id
+    $env:BOB3_BZR_STATUS=$savedPersistenceStatus
+    $env:BOB3_MSDEV_BLOCK_RESULT_DIRECTORY = Join-Path $persistenceFixture.TaskRoot 'results'
+    $resultPersistenceFailure = Invoke-TestScript $buildPath @('-WorkPacket', $persistenceFixture.PacketPath, '-Action', 'Make', '-Attempt', '0')
     Assert-Equal $resultPersistenceFailure.ExitCode 30 'Result persistence failure cannot return successful exit code'
     Assert-True ($resultPersistenceFailure.Output -match '(?m)^INTEGRITY_FAILED\s*$') 'Result persistence failure emits only INTEGRITY_FAILED status'
     $env:BOB3_MSDEV_BLOCK_RESULT_DIRECTORY = $null
-    Remove-Item -LiteralPath (Join-Path $taskDirectory 'results') -Force
-    New-Item -ItemType Directory -Path (Join-Path $taskDirectory 'results') | Out-Null
+    Remove-Item -LiteralPath (Join-Path $persistenceFixture.TaskRoot 'results') -Force
+    New-Item -ItemType Directory -Path (Join-Path $persistenceFixture.TaskRoot 'results') | Out-Null
 
     $evidenceAliasTaskId = 'EVIDENCE-TASK-ALIAS'
     $outsideEvidenceTask = Join-Path $task3FixtureRoot 'outside-evidence-task-target'
@@ -1042,9 +1232,25 @@ try {
     Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $evidenceResults 'bazaar-status.txt')).TrimEnd("`r", "`n")) $env:BOB3_BZR_STATUS 'Evidence status file preserves exact status content'
     Assert-Equal ([System.IO.File]::ReadAllText((Join-Path $evidenceResults 'bazaar-diff.patch')).Replace("`r`n", "`n")) $env:BOB3_BZR_DIFF 'Evidence diff file preserves exact diff content'
     Assert-Equal $evidenceManifest.revisionId 'fixture-revision-id-full-123' 'Evidence manifest contains the exact full revision id'
+    Assert-Equal $evidenceManifest.workPacketSha256 ((Get-FileHash -Algorithm SHA256 -LiteralPath $workPacketPath).Hash.ToLowerInvariant()) 'Evidence manifest binds exact packet bytes'
+    Assert-Equal $evidenceManifest.prerequisiteImpactResultPath $governedFixture.ImpactResultPath 'Evidence manifest binds the exact impact PASS result'
+    Assert-Equal $evidenceManifest.implementationApprovalPath $governedFixture.ImpactApprovalPath 'Evidence manifest binds the exact current implementation approval'
+    Assert-Equal $evidenceManifest.finalIntegrityVerified $true 'Evidence manifest records final governance revalidation'
     Assert-SetEqual $evidenceManifest.commands @('status --short', 'diff', 'nick', 'version-info --custom --template={revision_id}') 'Evidence manifest records only read-only commands'
     Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash $evidenceSourceHash 'Evidence export preserves source bytes'
     Assert-Equal (Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')) $evidenceBzrFingerprint 'Evidence export preserves .bzr bytes'
+
+    $savedEvidenceStateBytes=[System.IO.File]::ReadAllBytes($phaseStatePath)
+    $beforeGovernanceEvidenceResults=Get-TreeFingerprintFixture $evidenceResults
+    [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG,'')
+    $env:BOB3_BZR_MUTATE_COMMAND='version-info';$env:BOB3_BZR_MUTATE_OCCURRENCE='1';$env:BOB3_BZR_MUTATE_PATH=$phaseStatePath
+    try{$governanceEvidencePostflight=Invoke-TestScript $evidencePath @('-WorkPacket',$workPacketPath)}finally{
+        $env:BOB3_BZR_MUTATE_COMMAND=$null;$env:BOB3_BZR_MUTATE_OCCURRENCE=$null;$env:BOB3_BZR_MUTATE_PATH=$null
+        [System.IO.File]::WriteAllBytes($phaseStatePath,$savedEvidenceStateBytes)
+    }
+    Assert-Equal $governanceEvidencePostflight.ExitCode 30 'Evidence rejects a governance state change during Bazaar queries'
+    Assert-True (-not($governanceEvidencePostflight.Output -match '(?m)^EXPORTED\s*$')) 'Governance-mutated evidence cannot report false export success'
+    Assert-Equal (Get-TreeFingerprintFixture $evidenceResults) $beforeGovernanceEvidenceResults 'Governance-mutated evidence publishes no partial files'
 
     $postEvidenceSignal = Join-Path $task3FixtureRoot 'post-evidence-mutation.signal'
     $env:BOB3_TEST_EVIDENCE_PUBLICATION_MUTATE_PATH = Join-Path $workingTree '.bzr/branch.conf'

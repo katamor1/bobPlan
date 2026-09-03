@@ -24,6 +24,39 @@ try {
     $targetFullPath = $targetInfo.FullPath
     Assert-TeamBobPhysicalSeparation $targetInfo.PhysicalPath $distributionPhysical 'TargetPath and protected distribution source' 'INTEGRITY_FAILED'
 
+    # A genuine v0.1 profile is never upgraded in place.  Inspect only the
+    # canonical marker leaf, after the physical target boundary is trusted and
+    # before source enumeration, planning output, directory creation, or writes.
+    $legacyMarkerPath = Join-Path $targetFullPath 'team-bob\profile-manifest.json'
+    if (Test-Path -LiteralPath $legacyMarkerPath -PathType Leaf) {
+        $isClosedLegacyMarker = $false
+        try {
+            $legacyMarkerPhysical = Get-TeamBobPhysicalPath $legacyMarkerPath 'Existing profile marker' 'Leaf' 'INTEGRITY_FAILED'
+            Assert-TeamBobPhysicalChild $legacyMarkerPhysical $targetInfo.PhysicalPath 'Existing profile marker' 'INTEGRITY_FAILED'
+            $legacyMarkerText = Read-TeamBobUtf8File $legacyMarkerPath 'Existing profile marker' 'INTEGRITY_FAILED'
+            $legacyMarkerScan = Get-TeamBobJsonMemberScan $legacyMarkerText
+            $legacyMarker = $legacyMarkerText | ConvertFrom-Json
+            Assert-TeamBobExactProperties $legacyMarker @('version','profile','compatibility','contracts') 'Existing v0.1 profile marker' 'INTEGRITY_FAILED'
+            Assert-TeamBobExactProperties $legacyMarker.profile @('id','name') 'Existing v0.1 profile marker profile' 'INTEGRITY_FAILED'
+            Assert-TeamBobExactProperties $legacyMarker.compatibility @('operatingSystem','ide','toolchain','vcs') 'Existing v0.1 profile marker compatibility' 'INTEGRITY_FAILED'
+            Assert-TeamBobExactProperties $legacyMarker.contracts @('workPacketSchema','buildTargetSchema','buildTargets','modes','rules') 'Existing v0.1 profile marker contracts' 'INTEGRITY_FAILED'
+            $isClosedLegacyMarker = $legacyMarkerScan.DuplicateMemberNames.Count -eq 0 -and
+                $legacyMarker.version -ceq '0.1.0-poc' -and $legacyMarker.profile.id -ceq 'team-bob-vc6-bazaar' -and
+                $legacyMarker.profile.name -ceq 'Team Bob VC6 Bazaar Profile' -and
+                $legacyMarker.compatibility.operatingSystem -ceq 'Windows' -and $legacyMarker.compatibility.ide -ceq 'IBM Bob IDE 2.1.x' -and
+                $legacyMarker.compatibility.toolchain -ceq 'Visual C++ 6.0' -and $legacyMarker.compatibility.vcs -ceq 'Bazaar' -and
+                $legacyMarker.contracts.workPacketSchema -ceq 'config/work-packet.schema.json' -and
+                $legacyMarker.contracts.buildTargetSchema -ceq 'config/vc6-build-targets.schema.json' -and
+                $legacyMarker.contracts.buildTargets -ceq 'config/vc6-build-targets.json' -and
+                $legacyMarker.contracts.modes -ceq '../.bob/custom_modes.yaml' -and $legacyMarker.contracts.rules -ceq '../.bob/rules/'
+        } catch {
+            # Malformed, spoofed, partial, and unknown markers deliberately fall
+            # through to the normal all-or-nothing conflict preflight.
+            $isClosedLegacyMarker = $false
+        }
+        if ($isClosedLegacyMarker) { throw 'UPGRADE_REQUIRES_FRESH_TARGET: v0.1.0-poc must be installed into a fresh target.' }
+    }
+
     $directories = @()
     $files = @()
     $pendingSourceDirectories = New-Object System.Collections.ArrayList
@@ -111,6 +144,10 @@ try {
     }
     exit 0
 } catch {
+    if ($_.Exception.Message -like 'UPGRADE_REQUIRES_FRESH_TARGET:*') {
+        [Console]::Error.WriteLine('UPGRADE_REQUIRES_FRESH_TARGET')
+        exit 1
+    }
     Write-Error $_.Exception.Message
     exit 1
 }

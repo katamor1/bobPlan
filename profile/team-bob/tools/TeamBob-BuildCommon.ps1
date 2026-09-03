@@ -423,7 +423,10 @@ function Get-TeamBobBuildResultContractFields {
         'schemaVersion','status','exitCode','message','taskId','action','attempt','workPacket','buildProfileId','sandboxPath','logDirectory','stdoutPath','stderrPath',
         'outputLogPath','processId','processExitCode','processStartedAt','processFinishedAt','terminationComplete','captureComplete','preBazaarStatus','postBazaarStatus',
         'preBazaarBranch','postBazaarBranch','preBazaarRevision','postBazaarRevision','preSourceInventory','postSourceInventory','preBzrInventory','postBzrInventory',
-        'preAllowedHashes','postAllowedHashes','expectedArtifacts','invokedArguments','resultPath'
+        'preAllowedHashes','postAllowedHashes','expectedArtifacts','invokedArguments','resultPath',
+        'workPacketSha256','policyVersion','policyBundleSha256','roleLedgerSha256','phaseStatePath','phaseStateSha256','phaseStateSemanticSha256',
+        'prerequisiteImpactResultPath','prerequisiteImpactResultSha256','implementationApprovalPath','implementationApprovalSha256',
+        'makePredecessorPath','makePredecessorSha256','finalIntegrityVerified'
     )
 }
 
@@ -434,6 +437,11 @@ function Assert-TeamBobBuildResultContract {
     if($Result.schemaVersion -cne '1.0' -or -not($Result.status -is [string]) -or -not $exitCodes.ContainsKey([string]$Result.status) -or -not(Test-TeamBobInteger $Result.exitCode) -or [int]$Result.exitCode -ne [int]$exitCodes[[string]$Result.status]){throw(New-TeamBobFailure $FailureStatus 'Build result status/exitCode contract is invalid.')}
     if(-not($Result.message -is [string]) -or [string]::IsNullOrWhiteSpace($Result.message) -or -not($Result.taskId -is [string]) -or [string]::IsNullOrWhiteSpace($Result.taskId) -or @('Make','Rebuild') -cnotcontains $Result.action -or -not(Test-TeamBobInteger $Result.attempt) -or [int]$Result.attempt -lt 0 -or [int]$Result.attempt -gt 2){throw(New-TeamBobFailure $FailureStatus 'Build result identity fields are invalid.')}
     foreach($name in @('workPacket','buildProfileId','resultPath')){if(-not($Result.$name -is [string]) -or [string]::IsNullOrWhiteSpace([string]$Result.$name)){throw(New-TeamBobFailure $FailureStatus "Build result $name is invalid.")}}
+    foreach($name in @('policyVersion','phaseStatePath','prerequisiteImpactResultPath','implementationApprovalPath')){if(-not($Result.$name -is [string]) -or [string]::IsNullOrWhiteSpace([string]$Result.$name)){throw(New-TeamBobFailure $FailureStatus "Build result $name is invalid.")}}
+    foreach($name in @('workPacketSha256','policyBundleSha256','roleLedgerSha256','phaseStateSha256','phaseStateSemanticSha256','prerequisiteImpactResultSha256','implementationApprovalSha256')){if(-not($Result.$name -is [string]) -or $Result.$name -cnotmatch '^[0-9a-f]{64}$'){throw(New-TeamBobFailure $FailureStatus "Build result $name must be a lowercase SHA-256 hash.")}}
+    $hasMakePath=$Result.makePredecessorPath -is [string];$hasMakeHash=$Result.makePredecessorSha256 -is [string]
+    if($hasMakePath -ne $hasMakeHash -or ($hasMakePath -and [string]::IsNullOrWhiteSpace($Result.makePredecessorPath)) -or ($hasMakeHash -and $Result.makePredecessorSha256 -cnotmatch '^[0-9a-f]{64}$')){throw(New-TeamBobFailure $FailureStatus 'Build result Make predecessor reference is invalid.')}
+    if(-not($Result.finalIntegrityVerified -is [bool])){throw(New-TeamBobFailure $FailureStatus 'Build result finalIntegrityVerified must be Boolean.')}
     foreach($name in @('sandboxPath','logDirectory','stdoutPath','stderrPath','outputLogPath','preBazaarStatus','postBazaarStatus','preBazaarBranch','postBazaarBranch','preBazaarRevision','postBazaarRevision','processStartedAt','processFinishedAt')){if($null -ne $Result.$name -and -not($Result.$name -is [string])){throw(New-TeamBobFailure $FailureStatus "Build result $name must be a string or null.")}}
     foreach($name in @('processId','processExitCode')){if($null -ne $Result.$name -and -not(Test-TeamBobInteger $Result.$name)){throw(New-TeamBobFailure $FailureStatus "Build result $name must be an integer or null.")}}
     foreach($name in @('terminationComplete','captureComplete')){if($null -ne $Result.$name -and -not($Result.$name -is [bool])){throw(New-TeamBobFailure $FailureStatus "Build result $name must be a Boolean or null.")}}
@@ -753,13 +761,23 @@ function Get-TeamBobLocalEnvironment {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment registration is missing: $path") }
     [void](Get-TeamBobPhysicalPath $path 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
     $environment = Read-TeamBobJsonFile $path 'Local environment registration' 'ENVIRONMENT_FAILED'
-    $fields = @('schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId', 'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot')
+    $fields = @('schemaVersion', 'profileId', 'profileVersion', 'policyVersion', 'policyBundleSha256', 'policyManifestSchemaId', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId', 'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot')
     Assert-TeamBobExactProperties $environment $fields 'Local environment registration' 'ENVIRONMENT_FAILED'
     $manifest = Read-TeamBobJsonFile $ManifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
     $workSchema = Read-TeamBobJsonFile $WorkSchemaPath 'Work-packet schema' 'ENVIRONMENT_FAILED'
     $buildSchema = Read-TeamBobJsonFile $BuildSchemaPath 'Build-target schema' 'ENVIRONMENT_FAILED'
+    $teamBobRoot = Split-Path -Parent $ManifestPath
+    $governanceRoot = Join-Path (Split-Path -Parent $teamBobRoot) '.bob\governance'
+    $policyPath = Join-Path $governanceRoot 'policy-manifest.json'
+    $policySchemaPath = Join-Path $governanceRoot 'schemas\policy-manifest.schema.json'
+    if (-not (Test-Path -LiteralPath $policyPath -PathType Leaf) -or -not (Test-Path -LiteralPath $policySchemaPath -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Installed policy identity files are missing.') }
+    $governanceErrors = @(Test-TeamBobGovernancePackage -GovernanceRoot $governanceRoot)
+    if ($governanceErrors.Count -gt 0) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' ('Installed governance package is invalid: ' + ($governanceErrors -join '; '))) }
+    $policy = Read-TeamBobJsonFile $policyPath 'Policy manifest' 'ENVIRONMENT_FAILED'
+    $policySchema = Read-TeamBobJsonFile $policySchemaPath 'Policy-manifest schema' 'ENVIRONMENT_FAILED'
     if ($environment.schemaVersion -ne '1.0' -or $environment.profileId -ne $manifest.profile.id -or $environment.profileVersion -ne $manifest.version -or
-        $environment.workPacketSchemaId -ne $workSchema.'$id' -or $environment.buildTargetSchemaId -ne $buildSchema.'$id') {
+        $environment.policyVersion -ne $policy.policyVersion -or $environment.policyBundleSha256 -cne (Get-TeamBobPolicyBundleHash $governanceRoot) -or
+        $environment.policyManifestSchemaId -ne $policySchema.'$id' -or $environment.workPacketSchemaId -ne $workSchema.'$id' -or $environment.buildTargetSchemaId -ne $buildSchema.'$id') {
         throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'Local environment profile/schema identity does not match the installed profile.')
     }
     if ([string]::IsNullOrWhiteSpace([string]$environment.pcId) -or -not ([string]$environment.pcId).Equals([Environment]::MachineName, [System.StringComparison]::OrdinalIgnoreCase)) {

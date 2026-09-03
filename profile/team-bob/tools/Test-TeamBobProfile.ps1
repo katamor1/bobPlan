@@ -214,12 +214,17 @@ if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
         [void](Get-TeamBobPhysicalPath $environmentPath 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
         $environment = Read-TeamBobJsonFile $environmentPath 'Local environment registration' 'ENVIRONMENT_FAILED'
         Assert-TeamBobExactProperties $environment @(
-            'schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId',
+            'schemaVersion', 'profileId', 'profileVersion', 'policyVersion', 'policyBundleSha256', 'policyManifestSchemaId', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId',
             'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot'
         ) 'Local environment registration' 'ENVIRONMENT_FAILED'
+        $governanceRoot = Join-Path $RepositoryRoot '.bob/governance'
+        $policy = Read-TeamBobJsonFile (Join-Path $governanceRoot 'policy-manifest.json') 'Policy manifest' 'ENVIRONMENT_FAILED'
+        $policySchema = Read-TeamBobJsonFile (Join-Path $governanceRoot 'schemas/policy-manifest.schema.json') 'Policy-manifest schema' 'ENVIRONMENT_FAILED'
         $identityValid = $null -ne $manifest -and $null -ne $workSchema -and $null -ne $buildSchema -and
             $environment.schemaVersion -eq '1.0' -and $environment.profileId -eq $manifest.profile.id -and
-            $environment.profileVersion -eq $manifest.version -and $environment.workPacketSchemaId -eq $workSchema.'$id' -and
+            $environment.profileVersion -eq $manifest.version -and $environment.policyVersion -eq $policy.policyVersion -and
+            $environment.policyBundleSha256 -ceq (Get-TeamBobPolicyBundleHash $governanceRoot) -and $environment.policyManifestSchemaId -eq $policySchema.'$id' -and
+            $environment.workPacketSchemaId -eq $workSchema.'$id' -and
             $environment.buildTargetSchemaId -eq $buildSchema.'$id' -and $environment.pcId -eq [Environment]::MachineName
         Add-TeamBobCheck 'Local environment identity' $identityValid 'Registration matches manifest and schema identities'
 

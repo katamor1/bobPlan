@@ -115,6 +115,47 @@ try {
     Assert-Equal $rerunResult.ExitCode 0 'Installer identical rerun is idempotent'
     Assert-True ($rerunResult.Output -match 'IDENTICAL') 'Installer reports identical files on rerun'
 
+    $legacyUpgradeTarget = Join-Path $fixtureRoot 'legacy-v01-target'
+    New-Item -ItemType Directory -Path (Join-Path $legacyUpgradeTarget 'team-bob'), (Join-Path $legacyUpgradeTarget '.bzr') -Force | Out-Null
+    Write-JsonFixture (Join-Path $legacyUpgradeTarget 'team-bob/profile-manifest.json') ([pscustomobject][ordered]@{
+        version = '0.1.0-poc'
+        profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar'; name = 'Team Bob VC6 Bazaar Profile' }
+        compatibility = [pscustomobject][ordered]@{ operatingSystem = 'Windows'; ide = 'IBM Bob IDE 2.1.x'; toolchain = 'Visual C++ 6.0'; vcs = 'Bazaar' }
+        contracts = [pscustomobject][ordered]@{ workPacketSchema = 'config/work-packet.schema.json'; buildTargetSchema = 'config/vc6-build-targets.schema.json'; buildTargets = 'config/vc6-build-targets.json'; modes = '../.bob/custom_modes.yaml'; rules = '../.bob/rules/' }
+    })
+    Write-Utf8NoBomFixture (Join-Path $legacyUpgradeTarget '.bzr/branch.conf') 'legacy-upgrade-bzr'
+    Write-Utf8NoBomFixture (Join-Path $legacyUpgradeTarget 'untouched.txt') 'legacy-upgrade-target'
+    $legacyUpgradeFingerprint = Get-TreeFingerprintFixture $legacyUpgradeTarget
+    $legacyUpgradeSourceFingerprint = Get-TreeFingerprintFixture $toolsRepoRoot
+    $legacyUpgradeRegistration = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $v02UpgradeRegistration = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
+    Write-Utf8NoBomFixture $legacyUpgradeRegistration 'LEGACY-UPGRADE-REGISTRATION'
+    Write-Utf8NoBomFixture $v02UpgradeRegistration 'V02-UPGRADE-REGISTRATION'
+    foreach ($upgradeMode in @('WhatIf', 'Apply')) {
+        $upgradeArguments = @('-TargetPath', $legacyUpgradeTarget)
+        if ($upgradeMode -eq 'WhatIf') { $upgradeArguments += '-WhatIf' }
+        $legacyUpgradeResult = Invoke-TestScript $installerPath $upgradeArguments
+        Assert-True ($legacyUpgradeResult.ExitCode -ne 0) "Installer rejects an in-place v0.1 upgrade in $upgradeMode mode"
+        Assert-True ($legacyUpgradeResult.Output -match 'UPGRADE_REQUIRES_FRESH_TARGET') "v0.1 $upgradeMode refusal emits the fixed migration token"
+        Assert-Equal (Get-TreeFingerprintFixture $legacyUpgradeTarget) $legacyUpgradeFingerprint "v0.1 $upgradeMode refusal preserves target and .bzr bytes"
+        Assert-Equal (Get-TreeFingerprintFixture $toolsRepoRoot) $legacyUpgradeSourceFingerprint "v0.1 $upgradeMode refusal preserves distribution source bytes"
+        Assert-Equal ([System.IO.File]::ReadAllText($legacyUpgradeRegistration)) 'LEGACY-UPGRADE-REGISTRATION' "v0.1 $upgradeMode refusal preserves legacy registration"
+        Assert-Equal ([System.IO.File]::ReadAllText($v02UpgradeRegistration)) 'V02-UPGRADE-REGISTRATION' "v0.1 $upgradeMode refusal preserves v0.2 registration"
+    }
+    foreach ($markerCase in @(
+        [pscustomobject]@{ Name = 'spoofed'; Value = [pscustomobject][ordered]@{ version = '0.1.0-poc'; profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar' }; extra = 'spoof' } },
+        [pscustomobject]@{ Name = 'unknown'; Value = [pscustomobject][ordered]@{ version = '9.9.9'; profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar' } } }
+    )) {
+        $markerTarget = Join-Path $fixtureRoot ('marker-' + $markerCase.Name)
+        Write-JsonFixture (Join-Path $markerTarget 'team-bob/profile-manifest.json') $markerCase.Value
+        $markerFingerprint = Get-TreeFingerprintFixture $markerTarget
+        $markerResult = Invoke-TestScript $installerPath @('-TargetPath', $markerTarget, '-WhatIf')
+        Assert-True ($markerResult.ExitCode -ne 0) "Installer rejects $($markerCase.Name) marker as a normal conflict"
+        Assert-True ($markerResult.Output -match 'CONFLICT' -and $markerResult.Output -notmatch 'UPGRADE_REQUIRES_FRESH_TARGET') "Installer does not grant the v0.1 token to a $($markerCase.Name) marker"
+        Assert-Equal (Get-TreeFingerprintFixture $markerTarget) $markerFingerprint "Installer preserves $($markerCase.Name) conflict bytes"
+    }
+    Remove-Item -LiteralPath $legacyUpgradeRegistration, $v02UpgradeRegistration -Force
+
     $conflictPath = Join-Path $installTarget 'AGENTS.md'
     Write-Utf8NoBomFixture $conflictPath 'local-conflict'
     $missingBeforeConflict = Join-Path $installTarget 'team-bob/templates/test-spec.md'
@@ -235,6 +276,9 @@ exit /b 41
     Assert-Equal $environment.schemaVersion '1.0' 'Environment registration has a stable schema version'
     Assert-Equal $environment.profileId 'team-bob-vc6-bazaar' 'Environment registration records profile identity'
     Assert-Equal $environment.profileVersion '0.2.0-poc' 'Environment registration records profile version'
+    Assert-Equal $environment.policyVersion '0.2.0-poc' 'Environment registration records policy version'
+    Assert-True ([string]$environment.policyBundleSha256 -match '^[0-9a-f]{64}$') 'Environment registration records the installed policy bundle hash'
+    Assert-Equal $environment.policyManifestSchemaId 'https://team-bob.local/schemas/policy-manifest.schema.json' 'Environment registration records the policy-manifest schema identity'
     Assert-Equal $environment.pcId ([Environment]::MachineName) 'Environment registration records stable machine identity'
     Assert-Equal $environment.msdevSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $msdevPath).Hash.ToLowerInvariant() 'Environment registration hashes MSDEV'
     Assert-Equal $environment.bazaarSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $bazaarPath).Hash.ToLowerInvariant() 'Environment registration hashes Bazaar'

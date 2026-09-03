@@ -3,6 +3,8 @@ param([Parameter(Mandatory = $true)][string]$WorkPacket)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-GovernanceCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-ComplianceCommon.ps1')
 
 $nativeExitCode = 1
 try {
@@ -10,8 +12,8 @@ try {
     if (-not (Test-Path -LiteralPath $workPacketFull -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' "Work packet does not exist: $workPacketFull") }
     [void](Get-TeamBobPhysicalPath $workPacketFull 'Work packet' 'Leaf' 'INTEGRITY_FAILED')
     $packet = Read-TeamBobCanonicalPacket $workPacketFull
-    $context = Get-TeamBobPacketContext $packet $workPacketFull
-    $resultsInfo = Get-TeamBobTaskResultsContext $context -Create
+    $executionGate = Get-TeamBobImplementationExecutionGate $PSScriptRoot $workPacketFull $packet
+    $context = $executionGate.Context
     $profileRoot = Split-Path -Parent $PSScriptRoot
     $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
     $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
@@ -59,6 +61,14 @@ try {
     if ($null -ne $integrityFailure) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("Evidence postflight integrity proof failed: " + $integrityFailure.Message) 30) }
     if ($null -ne $operationFailure) { throw $operationFailure }
 
+    try {
+        $postExecutionGate=Get-TeamBobImplementationExecutionGate $PSScriptRoot $workPacketFull $packet
+        Assert-TeamBobExecutionGateUnchanged $executionGate $postExecutionGate
+    } catch {
+        throw (New-TeamBobFailure 'INTEGRITY_FAILED' ("Evidence governance postflight proof failed: " + $_.Exception.Message) 30)
+    }
+    $resultsInfo = Get-TeamBobTaskResultsContext $context -Create
+
     $resultDirectory = $resultsInfo.FullPath
     foreach ($query in $queries) { Write-TeamBobUtf8File (Join-Path $resultDirectory $query.File) ([string]$outputs[$query.Name]) $context.TaskPhysical }
     $manifest = [ordered]@{
@@ -66,6 +76,11 @@ try {
         bazaarSha256 = Get-TeamBobFileHash $environment.bazaarPath; branchNick = (Get-TeamBobNormalizedProcessText ([string]$outputs['nick']))
         revisionId = (Get-TeamBobNormalizedProcessText ([string]$outputs['revision'])); commands = @($queries | ForEach-Object { $_.Arguments -join ' ' })
         commandResults = @($commandRecords); files = @($queries.File); exportedAt = [DateTimeOffset]::UtcNow.ToString('o')
+        workPacketPath=$executionGate.WorkPacketPath;workPacketSha256=$executionGate.WorkPacketSha256;policyVersion=$executionGate.PolicyVersion
+        policyBundleSha256=$executionGate.PolicyBundleSha256;roleLedgerSha256=$executionGate.RoleLedgerSha256
+        phaseStatePath=$executionGate.PhaseStatePath;phaseStateSha256=$executionGate.PhaseStateSha256;phaseStateSemanticSha256=$executionGate.PhaseStateSemanticSha256
+        prerequisiteImpactResultPath=$executionGate.ImpactResultPath;prerequisiteImpactResultSha256=$executionGate.ImpactResultSha256
+        implementationApprovalPath=$executionGate.ImplementationApprovalPath;implementationApprovalSha256=$executionGate.ImplementationApprovalSha256;finalIntegrityVerified=$true
     }
     $manifestPath = Join-Path $resultDirectory 'bazaar-evidence-manifest.json'
     Write-TeamBobUtf8File $manifestPath (($manifest | ConvertTo-Json -Depth 10) + [Environment]::NewLine) $context.TaskPhysical
@@ -75,6 +90,9 @@ try {
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)
     if ($null -ne $_.Exception.Data['TeamBobStatus'] -and [string]$_.Exception.Data['TeamBobStatus'] -eq 'INTEGRITY_FAILED') { $nativeExitCode = 30 }
+    if ($_.Exception.Data['TeamBobStatus'] -eq 'GATE_FAILED') { $nativeExitCode = 10 }
+    if ($_.Exception.Data['TeamBobStatus'] -eq 'GATE_UNRESOLVED') { $nativeExitCode = 11 }
+    if ($_.Exception.Data['TeamBobStatus'] -in @('PACKET_VERSION_UNSUPPORTED','PACKET_SCHEMA_INVALID','CONTRACT_INVALID')) { $nativeExitCode = 20 }
     if ($null -ne $_.Exception.Data['NativeExitCode'] -and [int]$_.Exception.Data['NativeExitCode'] -gt 0) { $nativeExitCode = [int]$_.Exception.Data['NativeExitCode'] }
     if ($nativeExitCode -lt 1 -or $nativeExitCode -gt 255) { $nativeExitCode = 1 }
     exit $nativeExitCode

@@ -326,10 +326,22 @@ function Get-TeamBobBoundPriorResult {
 }
 
 function Get-TeamBobTask2BuildResult {
-    param([object]$Artifact,[object]$Packet,[object]$Context)
+    param([object]$Artifact,[object]$Packet,[object]$Context,[object]$Governance,[object]$Prerequisite)
     $build=Read-TeamBobComplianceJson $Artifact.FullPath 'Build result'
     try{Assert-TeamBobBuildResultContract $build 'CONTRACT_INVALID'}catch{throw(New-TeamBobComplianceFailure 20 $_.Exception.Message)}
     if($build.taskId -cne $Context.TaskId -or $build.action -cne 'Rebuild' -or $build.status -cne 'SUCCEEDED' -or [int]$build.exitCode -ne 0 -or $build.workPacket -cne $Context.PacketPath -or $build.buildProfileId -cne $Packet.'Build Profile ID' -or -not([string]$build.resultPath).Equals($Artifact.FullPath,[System.StringComparison]::OrdinalIgnoreCase)){throw(New-TeamBobComplianceFailure 20 'Build result does not identify the current task successful Rebuild artifact.')}
+    if($null -eq $Prerequisite -or $Prerequisite.Phase -cne 'impact'){throw(New-TeamBobComplianceFailure 20 'Build result requires the bound impact predecessor.')}
+    $impactApprovalPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Prerequisite.Document.approvalRecordPath)) 'Bound implementation approval' 'INTEGRITY_FAILED'
+    foreach($pair in @(
+        @('workPacketSha256',$Context.PacketHash),@('policyVersion',[string]$Governance.Policy.policyVersion),@('policyBundleSha256',$Governance.PolicyHash),@('roleLedgerSha256',$Governance.RoleHash),
+        @('phaseStatePath',$Context.StatePath),@('phaseStateSemanticSha256',$Context.StateBinding),
+        @('prerequisiteImpactResultPath',(Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$Prerequisite.Path)) 'Bound impact result' 'INTEGRITY_FAILED')),@('prerequisiteImpactResultSha256',[string]$Prerequisite.Hash),
+        @('implementationApprovalPath',$impactApprovalPath),@('implementationApprovalSha256',[string]$Prerequisite.Document.approvalRecordSha256)
+    )){if($build.($pair[0]) -cne $pair[1]){throw(New-TeamBobComplianceFailure 30 "Build result provenance changed: $($pair[0])")}}
+    if($build.finalIntegrityVerified -ne $true){throw(New-TeamBobComplianceFailure 20 'Successful Rebuild lacks final integrity verification.')}
+    $historicalGate=[pscustomobject]@{Context=(Get-TeamBobPacketContext $Packet $Context.PacketPath);TaskContext=$Context;WorkPacketPath=$Context.PacketPath;WorkPacketSha256=$build.workPacketSha256;PolicyVersion=$build.policyVersion;PolicyBundleSha256=$build.policyBundleSha256;RoleLedgerSha256=$build.roleLedgerSha256;PhaseStatePath=$build.phaseStatePath;PhaseStateSha256=$build.phaseStateSha256;PhaseStateSemanticSha256=$build.phaseStateSemanticSha256;ImpactResultPath=$build.prerequisiteImpactResultPath;ImpactResultSha256=$build.prerequisiteImpactResultSha256;ImplementationApprovalPath=$build.implementationApprovalPath;ImplementationApprovalSha256=$build.implementationApprovalSha256}
+    $make=Get-TeamBobValidMakePredecessor $historicalGate ([int]$build.attempt)
+    if($build.makePredecessorPath -cne $make.Path -or $build.makePredecessorSha256 -cne $make.Hash){throw(New-TeamBobComplianceFailure 30 'Rebuild does not bind the exact same-attempt Make predecessor.')}
     if(-not(Test-TeamBobInteger $build.processId) -or [int64]$build.processId -le 0 -or -not(Test-TeamBobInteger $build.processExitCode) -or [int]$build.processExitCode -ne 0 -or $build.captureComplete -ne $true){throw(New-TeamBobComplianceFailure 20 'Successful Rebuild process evidence is invalid.')}
     $started=ConvertFrom-TeamBobGovernanceUtcInstant $build.processStartedAt;$finished=ConvertFrom-TeamBobGovernanceUtcInstant $build.processFinishedAt
     if($null -eq $started -or $null -eq $finished -or $finished -lt $started){throw(New-TeamBobComplianceFailure 20 'Successful Rebuild timestamps are invalid.')}
@@ -428,7 +440,7 @@ function Invoke-TeamBobMachineCheck {
             $evidence=@($resultEvidence)
         }
         'IMPL-M-002' {
-            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context
+            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context $Governance $Prerequisite
             if ((@($build.preSourceInventory) -join "`n") -cne (@($build.postSourceInventory) -join "`n") -or (@($build.preBzrInventory) -join "`n") -cne (@($build.postBzrInventory) -join "`n") -or (@($build.preAllowedHashes) -join "`n") -cne (@($build.postAllowedHashes) -join "`n")) { $status='FAIL'; $message='Build result records post-build source, allowed-file, or Bazaar integrity drift.' }
             $evidence=@($pathEvidence,$shaEvidence)
         }
@@ -444,7 +456,7 @@ function Invoke-TeamBobMachineCheck {
             try{Assert-TeamBobAllowedEncoding $allowedObjects}catch{$status='FAIL';$message=$_.Exception.Message}
         }
         'IMPL-M-004' {
-            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context
+            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context $Governance $Prerequisite
             if ($build.status -cne 'SUCCEEDED' -or $build.action -cne 'Rebuild') { $status='FAIL'; $message='Implementation requires a successful final Rebuild result.' }
             $evidence=@([ordered]@{type='command';value='Rebuild'},$resultEvidence)
         }
@@ -611,4 +623,94 @@ function Assert-TeamBobPriorReferencedContracts {
             if($null -eq $approval -or $resultCheck.status -cne 'PASS' -or @($resultCheck.evidence).Count -ne 1 -or $resultCheck.evidence[0].type -cne 'approvalRecord' -or $resultCheck.evidence[0].value -cne $approval.Info.RelativePath){throw(New-TeamBobComplianceFailure 20 'Prior PASS human result does not match its bound approval.')}
         }
     }
+}
+
+function New-TeamBobExecutionGateFailure {
+    param([ValidateSet(10,11)][int]$ExitCode,[string]$Message)
+    $exception = New-TeamBobFailure $(if($ExitCode -eq 10){'GATE_FAILED'}else{'GATE_UNRESOLVED'}) $Message $ExitCode
+    return $exception
+}
+
+function Get-TeamBobImplementationExecutionGate {
+    param([string]$ToolsRoot,[string]$WorkPacketPath,[object]$Packet,[datetimeoffset]$NowUtc=[datetimeoffset]::UtcNow)
+    $governance=Get-TeamBobCurrentGovernance $ToolsRoot $Packet
+    $context=Get-TeamBobTaskGovernanceContext $WorkPacketPath $Packet
+    $assignments=Get-TeamBobSelectedAssignments $Packet $governance.Roles $context.TaskId -RequireActive -AtUtc $NowUtc
+    $state=Read-TeamBobComplianceJson $context.StatePath 'Phase state'
+    if($state.currentPhase -cne 'implementation'){
+        $currentIndex=[array]::IndexOf($script:TeamBobPhaseOrder,[string]$state.currentPhase)
+        if($currentIndex -lt 0){[void](Assert-TeamBobPhaseState $state $context $governance 'implementation')}
+        [void](Assert-TeamBobPhaseState $state $context $governance ([string]$state.currentPhase))
+        throw (New-TeamBobExecutionGateFailure 11 'Implementation execution is not currently the authorized phase.')
+    }
+    $impact=Assert-TeamBobPhaseState $state $context $governance 'implementation'
+    if($null -eq $impact -or $impact.Phase -cne 'impact' -or $impact.Document.status -cne 'PASS'){throw (New-TeamBobExecutionGateFailure 11 'Implementation execution requires the exact impact PASS predecessor.')}
+
+    $impactPolicy=Get-TeamBobPhasePolicy $governance.Policy 'impact'
+    $impactArtifactPath=Get-TeamBobCanonicalPath (Join-Path $context.TaskRoot ([string]$impact.Document.artifactPath)) 'Impact artifact' 'INTEGRITY_FAILED'
+    $impactArtifact=Get-TeamBobGovernedRelativeFile $context $impactArtifactPath 'Impact artifact'
+    if($impactArtifact.Hash -cne $impact.Document.artifactSha256){throw (New-TeamBobComplianceFailure 30 'Bound impact artifact hash changed.')}
+    $impactPrerequisite=[pscustomobject]@{Path=[string]$impact.Document.prerequisiteResultPath;Hash=[string]$impact.Document.prerequisiteResultSha256;Phase='specification';Document=(Read-TeamBobComplianceJson (Get-TeamBobCanonicalPath (Join-Path $context.TaskRoot ([string]$impact.Document.prerequisiteResultPath)) 'Impact predecessor' 'INTEGRITY_FAILED') 'Impact predecessor')}
+    $approvalPath=Get-TeamBobCanonicalPath (Join-Path $context.TaskRoot ([string]$impact.Document.approvalRecordPath)) 'Implementation approval' 'INTEGRITY_FAILED'
+    $approval=Read-TeamBobApprovalForPhase $context $governance $impactArtifact $impactPrerequisite $impactPolicy $assignments 'impact' $approvalPath $NowUtc
+    if($null -eq $approval -or -not $approval.IsCurrent){throw (New-TeamBobExecutionGateFailure 11 'A current IMPLEMENTATION_APPROVER approval bound to impact is required.')}
+    if($approval.Info.Hash -cne $impact.Document.approvalRecordSha256){throw (New-TeamBobComplianceFailure 30 'Bound implementation approval hash changed.')}
+
+    # Only a packet whose governance and complete prerequisite chain are trusted
+    # may produce a policy-level FAIL/UNRESOLVED classification.
+    if($Packet.Risk -cne 'Green'){throw (New-TeamBobExecutionGateFailure 10 'Implementation execution requires Green risk.')}
+    if(@($Packet.'Open QA').Count -ne 0){throw (New-TeamBobExecutionGateFailure 10 'Implementation execution requires empty Open QA.')}
+    foreach($field in @('RT Impact Clear','Safety Impact Clear','Board Impact Clear','Driver Impact Clear','ABI Impact Clear','Build Impact Clear','Customer Branch Impact Clear','Clean Working Copy')){
+        if($Packet.PSObject.Properties[$field].Value -cne 'YES'){throw (New-TeamBobExecutionGateFailure 10 "Implementation execution gate is not clear: $field")}
+    }
+
+    # Resolve the build-facing context only after the trusted negative gate is
+    # known clear.  This proves every Allowed File is a physical in-tree leaf.
+    $buildContext=Get-TeamBobPacketContext $Packet $WorkPacketPath
+    return [pscustomobject][ordered]@{
+        Context=$buildContext;Governance=$governance;TaskContext=$context
+        WorkPacketPath=$context.PacketPath;WorkPacketSha256=$context.PacketHash
+        PolicyVersion=[string]$governance.Policy.policyVersion;PolicyBundleSha256=$governance.PolicyHash;RoleLedgerSha256=$governance.RoleHash
+        PhaseStatePath=$context.StatePath;PhaseStateSha256=$context.StateHash;PhaseStateSemanticSha256=(Get-TeamBobSemanticStateBinding $state)
+        ImpactResultPath=(Get-TeamBobCanonicalPath (Join-Path $context.TaskRoot ([string]$impact.Path)) 'Impact result' 'INTEGRITY_FAILED');ImpactResultSha256=[string]$impact.Hash
+        ImplementationApprovalPath=$approval.Info.FullPath;ImplementationApprovalSha256=$approval.Info.Hash
+    }
+}
+
+function Assert-TeamBobExecutionGateUnchanged {
+    param([object]$Before,[object]$After)
+    foreach($field in @('WorkPacketPath','WorkPacketSha256','PolicyVersion','PolicyBundleSha256','RoleLedgerSha256','PhaseStatePath','PhaseStateSha256','PhaseStateSemanticSha256','ImpactResultPath','ImpactResultSha256','ImplementationApprovalPath','ImplementationApprovalSha256')){
+        if($Before.$field -cne $After.$field){throw (New-TeamBobComplianceFailure 30 "Governance execution anchor changed during execution: $field")}
+    }
+}
+
+function Get-TeamBobValidMakePredecessor {
+    param([object]$Gate,[int]$Attempt)
+    $resultsRoot=Join-Path $Gate.TaskContext.TaskRoot 'results'
+    $current=Get-TeamBobProtectedSnapshot $Gate.Context
+    $candidates=@()
+    foreach($file in @(Get-ChildItem -LiteralPath $resultsRoot -Filter 'build-result-*.json' -File | Sort-Object Name)){
+        try{$document=Read-TeamBobComplianceJson $file.FullName 'Build-result predecessor candidate'}catch{throw(New-TeamBobComplianceFailure 20 ('Malformed claimed build predecessor: '+$_.Exception.Message))}
+        # A closed Rebuild result is not a Make-predecessor claim.  Do not let
+        # unrelated historical Rebuild failures poison predecessor discovery,
+        # but fail closed once an artifact actually claims the matching Make.
+        if(-not($document.action -is [string])){throw(New-TeamBobComplianceFailure 20 'Malformed claimed build predecessor: action is missing.')}
+        if($document.action -cne 'Make'){continue}
+        if(-not(Test-TeamBobInteger $document.attempt)){throw(New-TeamBobComplianceFailure 20 'Malformed claimed build predecessor: attempt is invalid.')}
+        if([int]$document.attempt -ne $Attempt){continue}
+        try{Assert-TeamBobBuildResultContract $document 'CONTRACT_INVALID'}catch{throw(New-TeamBobComplianceFailure 20 ('Malformed claimed build predecessor: '+$_.Exception.Message))}
+        if($document.status -cne 'SUCCEEDED'){continue}
+        if($document.taskId -cne $Gate.TaskContext.TaskId -or -not([string]$document.resultPath).Equals($file.FullName,[System.StringComparison]::OrdinalIgnoreCase)){throw(New-TeamBobComplianceFailure 20 'Successful Make predecessor identity is invalid.')}
+        foreach($pair in @(
+            @('workPacket',$Gate.WorkPacketPath),@('workPacketSha256',$Gate.WorkPacketSha256),@('policyVersion',$Gate.PolicyVersion),@('policyBundleSha256',$Gate.PolicyBundleSha256),@('roleLedgerSha256',$Gate.RoleLedgerSha256),
+            @('phaseStatePath',$Gate.PhaseStatePath),@('phaseStateSha256',$Gate.PhaseStateSha256),@('phaseStateSemanticSha256',$Gate.PhaseStateSemanticSha256),@('prerequisiteImpactResultPath',$Gate.ImpactResultPath),@('prerequisiteImpactResultSha256',$Gate.ImpactResultSha256),
+            @('implementationApprovalPath',$Gate.ImplementationApprovalPath),@('implementationApprovalSha256',$Gate.ImplementationApprovalSha256)
+        )){if($document.($pair[0]) -cne $pair[1]){throw(New-TeamBobComplianceFailure 30 "Successful Make predecessor provenance changed: $($pair[0])")}}
+        if($document.finalIntegrityVerified -ne $true -or $null -ne $document.makePredecessorPath -or $null -ne $document.makePredecessorSha256){throw(New-TeamBobComplianceFailure 20 'Successful Make predecessor integrity or predecessor fields are invalid.')}
+        foreach($field in @('preSourceInventory','preBzrInventory','preAllowedHashes')){$post='post'+$field.Substring(3);if((@($document.$field)-join "`n") -cne (@($document.$post)-join "`n")){throw(New-TeamBobComplianceFailure 30 "Successful Make predecessor $field pair differs.")}}
+        if((@($document.postSourceInventory)-join "`n") -cne (@($current.SourceInventory)-join "`n") -or (@($document.postBzrInventory)-join "`n") -cne (@($current.BzrInventory)-join "`n") -or (@($document.postAllowedHashes)-join "`n") -cne (@($current.AllowedHashes)-join "`n")){throw(New-TeamBobComplianceFailure 30 'Successful Make predecessor is stale relative to current protected bytes.')}
+        $candidates += [pscustomobject]@{Path=$file.FullName;Hash=(Get-TeamBobGovernanceFileHash $file.FullName);Document=$document}
+    }
+    if($candidates.Count -ne 1){throw(New-TeamBobExecutionGateFailure 10 "Rebuild attempt $Attempt requires exactly one valid successful Make predecessor; found $($candidates.Count).")}
+    return $candidates[0]
 }
