@@ -316,6 +316,14 @@ try {
     $initializePath = Join-Path $workingTree 'team-bob/tools/Initialize-LocalEnvironment.ps1'
     $initialize = Invoke-TestScript $initializePath @('-MsdevPath', $fakeTools.MsdevPath, '-BazaarPath', $fakeTools.BazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot)
     Assert-Equal $initialize.ExitCode 0 'Task 3 fixture registers only runtime fake executables in isolated LOCALAPPDATA'
+    $strictRolesPath = Join-Path $workingTree '.bob/governance/roles.json'
+    $strictRoles = Get-Content -Raw -LiteralPath $strictRolesPath | ConvertFrom-Json
+    $strictRoles.assignments = @(
+        [pscustomobject][ordered]@{ id = 'ASSIGN-SPEC-BUILD-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-build-spec'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ id = 'ASSIGN-IMPL-BUILD-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-build-impl'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ id = 'ASSIGN-REVIEW-BUILD-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-build-review'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' }
+    )
+    Write-JsonFixture $strictRolesPath $strictRoles
     $strictNonAscii = Invoke-TestScript (Join-Path $workingTree 'team-bob/tools/Test-TeamBobProfile.ps1') @('-RepositoryRoot', $workingTree, '-Strict')
     Assert-Equal $strictNonAscii.ExitCode 0 'Strict validator round-trips non-ASCII LOCALAPPDATA, tool, sandbox, and log paths'
     Assert-True ($strictNonAscii.Output -match 'SUMMARY.*Failed=0') 'Strict non-ASCII environment validation emits a zero-failure summary'

@@ -1,0 +1,8 @@
+{
+  "policyVersion": "0.2.0-poc",
+  "checks": [
+    {"id":"REV-M-001","phase":"review","title":"Every finding has the required structured fields","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"REV-A-001","phase":"review","title":"Findings are evidence-backed or the review explicitly declares no findings","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"REV-H-001","phase":"review","title":"Independent review approval is recorded","kind":"human","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["approvalRecord"],"requiredRole":"INDEPENDENT_REVIEWER"}
+  ]
+}

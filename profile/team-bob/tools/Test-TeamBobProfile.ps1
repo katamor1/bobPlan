@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-GovernanceCommon.ps1')
 
 function Get-TeamBobSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -146,10 +147,23 @@ $requiredRelativePaths = @(
     'team-bob/templates/exception-record.md', 'team-bob/config/work-packet.schema.json',
     'team-bob/config/vc6-build-targets.schema.json', 'team-bob/config/vc6-build-targets.json',
     'team-bob/tools/Initialize-LocalEnvironment.ps1', 'team-bob/tools/Start-TeamBobTask.ps1', 'team-bob/tools/Test-TeamBobProfile.ps1',
-    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
+    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1',
+    'team-bob/tools/TeamBob-GovernanceCommon.ps1', 'team-bob/tools/Test-TeamBobGovernance.ps1',
+    '.bob/governance/policy-manifest.json', '.bob/governance/glossary.json', '.bob/governance/checklists/authoring.json',
+    '.bob/governance/checklists/review.json', '.bob/governance/roles.json', '.bob/governance/schemas/policy-manifest.schema.json',
+    '.bob/governance/schemas/glossary.schema.json', '.bob/governance/schemas/checklist.schema.json', '.bob/governance/schemas/roles.schema.json',
+    '.bob/governance/schemas/approval-record.schema.json', '.bob/governance/schemas/compliance-assessment.schema.json',
+    '.bob/governance/schemas/compliance-result.schema.json', '.bob/governance/schemas/phase-state.schema.json'
 )
 $missingRequired = @($requiredRelativePaths | Where-Object { -not (Test-Path -LiteralPath (Join-Path $RepositoryRoot $_) -PathType Leaf) })
 Add-TeamBobCheck 'Required modes commands rules templates and tools' ($missingRequired.Count -eq 0) (($missingRequired -join ', '))
+
+$governanceErrors = @(Test-TeamBobGovernancePackage -GovernanceRoot (Join-Path $RepositoryRoot '.bob/governance'))
+Add-TeamBobCheck 'Governance package' ($governanceErrors.Count -eq 0) (($governanceErrors -join '; '))
+if ($Strict -and $governanceErrors.Count -eq 0) {
+    $roleErrors = @(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot (Join-Path $RepositoryRoot '.bob/governance'))
+    Add-TeamBobCheck 'Governance role readiness' ($roleErrors.Count -eq 0) (($roleErrors -join '; '))
+}
 
 try {
     $modes = Read-TeamBobJsonFile (Join-Path $RepositoryRoot '.bob/custom_modes.yaml') 'Custom modes document' 'ENVIRONMENT_FAILED'

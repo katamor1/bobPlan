@@ -1,0 +1,10 @@
+{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "$id":"https://team-bob.local/schemas/approval-record.schema.json",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","policyVersion","taskId","phase","assignmentId","role","principalId","approvedAtUtc","expiresAtUtc","workPacketSha256","policyBundleSha256","roleLedgerSha256","artifactPath","artifactSha256","prerequisiteResultSha256","evidence"],
+  "properties":{
+    "schemaVersion":{"type":"string","const":"1.0"},"policyVersion":{"type":"string","const":"0.2.0-poc"},"taskId":{"type":"string","minLength":1},"phase":{"type":"string","enum":["specification","impact","review","test"]},"assignmentId":{"type":"string","minLength":1},"role":{"type":"string","enum":["SPECIFICATION_APPROVER","IMPLEMENTATION_APPROVER","INDEPENDENT_REVIEWER"]},"principalId":{"type":"string","minLength":1},"approvedAtUtc":{"type":"string","pattern":"Z$"},"expiresAtUtc":{"type":"string","pattern":"Z$"},"workPacketSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"policyBundleSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"roleLedgerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"artifactPath":{"type":"string","minLength":1},"artifactSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"prerequisiteResultSha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},"evidence":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["path","sha256"],"properties":{"path":{"type":"string","minLength":1},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}}
+  }
+}

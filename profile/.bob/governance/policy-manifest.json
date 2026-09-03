@@ -1,0 +1,43 @@
+{
+  "policyVersion": "0.2.0-poc",
+  "maxApprovalValidityHours": 168,
+  "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"],
+  "bundleMembers": [
+    "policy-manifest.json",
+    "glossary.json",
+    "checklists/authoring.json",
+    "checklists/review.json",
+    "schemas/policy-manifest.schema.json",
+    "schemas/glossary.schema.json",
+    "schemas/checklist.schema.json",
+    "schemas/roles.schema.json",
+    "schemas/approval-record.schema.json",
+    "schemas/compliance-assessment.schema.json",
+    "schemas/compliance-result.schema.json",
+    "schemas/phase-state.schema.json"
+  ],
+  "machineCheckImplementations": [
+    {"checkId": "GOV-M-001", "implementation": "Test-TeamBobGovernanceIntegrity"},
+    {"checkId": "GOV-M-002", "implementation": "Test-TeamBobPhasePrerequisites"},
+    {"checkId": "GOV-M-003", "implementation": "Test-TeamBobGovernedPathEncoding"},
+    {"checkId": "GOV-M-004", "implementation": "Test-TeamBobForbiddenTerminology"},
+    {"checkId": "REQ-M-001", "implementation": "Test-TeamBobRequirementLedgerIdentity"},
+    {"checkId": "SPEC-M-001", "implementation": "Test-TeamBobSpecificationSections"},
+    {"checkId": "SPEC-M-002", "implementation": "Test-TeamBobSpecificationReqIds"},
+    {"checkId": "IMP-M-001", "implementation": "Test-TeamBobImpactAreas"},
+    {"checkId": "IMPL-M-001", "implementation": "Test-TeamBobImplementationGate"},
+    {"checkId": "IMPL-M-002", "implementation": "Test-TeamBobAllowedFiles"},
+    {"checkId": "IMPL-M-003", "implementation": "Test-TeamBobLegacyEncoding"},
+    {"checkId": "IMPL-M-004", "implementation": "Test-TeamBobBuildEvidence"},
+    {"checkId": "REV-M-001", "implementation": "Test-TeamBobReviewFindingShape"},
+    {"checkId": "TEST-M-001", "implementation": "Test-TeamBobTestTraceability"}
+  ],
+  "phases": [
+    {"id": "requirements", "ordinal": 1, "command": "bob-normalize-requirements", "mode": "req-spec-draft", "artifact": "drafts/requirement-ledger.csv", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["REQ-M-001", "REQ-A-001"], "completionApprovalRole": null},
+    {"id": "specification", "ordinal": 2, "command": "bob-draft-spec", "mode": "req-spec-draft", "artifact": "drafts/external-spec.md", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["SPEC-M-001", "SPEC-M-002", "SPEC-A-001", "SPEC-H-001"], "completionApprovalRole": "SPECIFICATION_APPROVER"},
+    {"id": "impact", "ordinal": 3, "command": "bob-analyze-impact", "mode": "impact-review", "artifact": "drafts/impact-analysis.md", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["IMP-M-001", "IMP-A-001", "IMP-H-001"], "completionApprovalRole": "IMPLEMENTATION_APPROVER"},
+    {"id": "implementation", "ordinal": 4, "command": "bob-implement-green", "mode": "green-implement", "artifact": "results/build-result-*.json", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["IMPL-M-001", "IMPL-M-002", "IMPL-M-003", "IMPL-M-004", "IMPL-A-001"], "completionApprovalRole": null},
+    {"id": "review", "ordinal": 5, "command": "bob-review-change", "mode": "change-review", "artifact": "drafts/code-review.md", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["REV-M-001", "REV-A-001", "REV-H-001"], "completionApprovalRole": "INDEPENDENT_REVIEWER"},
+    {"id": "test", "ordinal": 6, "command": "bob-draft-test", "mode": "test-draft", "artifact": "drafts/test-spec.md", "commonCheckIds": ["GOV-M-001", "GOV-M-002", "GOV-M-003", "GOV-M-004", "GOV-A-001"], "checkIds": ["TEST-M-001", "TEST-A-001", "TEST-H-001"], "completionApprovalRole": "SPECIFICATION_APPROVER"}
+  ]
+}

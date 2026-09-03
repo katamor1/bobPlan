@@ -302,8 +302,16 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.bazaarPath ([System.IO.Path]::GetFullPath($bazaarPath)) 'Environment initializer records canonical Bazaar path after Force'
 
-    # Strict validator accepts the complete source profile and rejects environment/hash/profile selection failures.
-    $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    # Strict validator uses an isolated installed profile with active, scoped, unexpired, distinct role assignments.
+    $strictRolesPath = Join-Path $catalogProfileRoot '.bob/governance/roles.json'
+    $strictRoles = Get-Content -Raw -LiteralPath $strictRolesPath | ConvertFrom-Json
+    $strictRoles.assignments = @(
+        [pscustomobject][ordered]@{ id = 'ASSIGN-SPEC-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-spec'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ id = 'ASSIGN-IMPL-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-impl'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ id = 'ASSIGN-REVIEW-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-review'; scope = @('*'); status = 'ACTIVE'; validFromUtc = '2000-01-01T00:00:00Z'; expiresAtUtc = '2099-01-01T00:00:00Z' }
+    )
+    Write-JsonFixture $strictRolesPath $strictRoles
+    $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-Equal $strictResult.ExitCode 0 "Strict profile validation succeeds with registered tools and external roots; output: $($strictResult.Output.Trim())"
     Assert-True ($strictResult.Output -match 'SUMMARY.*Failed=0') 'Strict validator emits a zero-failure summary'
 
@@ -312,7 +320,7 @@ exit /b 41
     $environmentBytesWithBom[0] = 0xEF; $environmentBytesWithBom[1] = 0xBB; $environmentBytesWithBom[2] = 0xBF
     [Array]::Copy($environmentBytesWithoutBom, 0, $environmentBytesWithBom, 3, $environmentBytesWithoutBom.Length)
     [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithBom)
-    $strictBomEnvironment = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictBomEnvironment = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictBomEnvironment.ExitCode -ne 0) 'Strict validator rejects a BOM-bearing production environment JSON file'
     [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithoutBom)
 
@@ -321,7 +329,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.msdevPath = Join-Path $strictToolAlias 'MSDEV.COM'
     Write-JsonFixture $environmentPath $environment
-    $strictToolAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictToolAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictToolAliasResult.ExitCode -ne 0) 'Strict validator rejects a registered tool path through a junction component'
     Assert-True ($strictToolAliasResult.Output -match 'FAIL.*MSDEV|reparse|physical') 'Strict validator reports the tool physical-boundary failure'
     [System.IO.Directory]::Delete($strictToolAlias)
@@ -333,7 +341,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.sandboxRoot = $strictRootAlias
     Write-JsonFixture $environmentPath $environment
-    $strictRootAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictRootAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictRootAliasResult.ExitCode -ne 0) 'Strict validator rejects a sandbox root junction that aliases the source repository'
     Assert-True ($strictRootAliasResult.Output -match 'FAIL.*Sandbox|reparse|physical') 'Strict validator reports the root physical-boundary failure'
     [System.IO.Directory]::Delete($strictRootAlias)
@@ -344,7 +352,7 @@ exit /b 41
     $environment.msdevPath = 'scripts/Install-TeamBobProfile.ps1'
     $environment.msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $toolsRepoRoot 'scripts/Install-TeamBobProfile.ps1')).Hash.ToLowerInvariant()
     Write-JsonFixture $environmentPath $environment
-    $relativeToolResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $relativeToolResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($relativeToolResult.ExitCode -ne 0) 'Strict validator rejects relative tool paths even when they resolve and hash-match'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-tool validation test'
@@ -352,7 +360,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.sandboxRoot = 'tests'
     Write-JsonFixture $environmentPath $environment
-    $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($relativeRootResult.ExitCode -ne 0) 'Strict validator rejects relative sandbox and log root registrations'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-root validation test'
@@ -360,20 +368,20 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.pcId = 'different-machine'
     Write-JsonFixture $environmentPath $environment
-    $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($machineIdentityResult.ExitCode -ne 0) 'Strict validator rejects an environment registered for another machine'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after machine-identity validation test'
 
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-tampered'
-    $hashFailure = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $hashFailure = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($hashFailure.ExitCode -ne 0) 'Strict validator rejects a mismatched tool hash'
     Assert-True ($hashFailure.Output -match 'FAIL.*MSDEV hash') 'Strict validator emits a failed hash check record'
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-v1'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment hash is restored for task tests'
 
-    $missingProfileResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-BuildProfileId', 'missing-profile', '-Strict')
+    $missingProfileResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-BuildProfileId', 'missing-profile', '-Strict')
     Assert-True ($missingProfileResult.ExitCode -ne 0) 'Validator rejects a requested build profile absent from the empty catalog'
 
     $targetSchemaFixture = Get-Content -Raw -LiteralPath (Join-Path $toolsProfileRoot 'team-bob/config/vc6-build-targets.schema.json') | ConvertFrom-Json
@@ -605,7 +613,7 @@ exit /b 41
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after Start root-overlap boundary test'
 
     Remove-Item -LiteralPath $environmentPath
-    $missingEnvironmentResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $missingEnvironmentResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($missingEnvironmentResult.ExitCode -ne 0) 'Strict validator requires the fixed local environment registration'
 } finally {
     $env:LOCALAPPDATA = $originalLocalAppData

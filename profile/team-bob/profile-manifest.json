@@ -15,6 +15,13 @@
     "buildTargetSchema": "config/vc6-build-targets.schema.json",
     "buildTargets": "config/vc6-build-targets.json",
     "modes": "../.bob/custom_modes.yaml",
-    "rules": "../.bob/rules/"
+    "rules": "../.bob/rules/",
+    "governancePolicy": "../.bob/governance/policy-manifest.json",
+    "governanceGlossary": "../.bob/governance/glossary.json",
+    "governanceAuthoringChecklist": "../.bob/governance/checklists/authoring.json",
+    "governanceReviewChecklist": "../.bob/governance/checklists/review.json",
+    "governanceRoles": "../.bob/governance/roles.json",
+    "governanceSchemas": "../.bob/governance/schemas/",
+    "governanceValidator": "tools/Test-TeamBobGovernance.ps1"
   }
 }
