@@ -2,7 +2,7 @@
   "policyVersion": "0.2.0-poc",
   "checks": [
     {"id":"GOV-M-001","phase":"common","title":"Packet, profile, policy, and role-ledger integrity is current","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["sha256"]},
-    {"id":"GOV-M-002","phase":"common","title":"Phase and prerequisite state permits this operation","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["resultHash"]},
+    {"id":"GOV-M-002","phase":"common","title":"Phase and prerequisite state permits this operation","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["sha256"]},
     {"id":"GOV-M-003","phase":"common","title":"Governed paths and encodings satisfy their contracts","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path"]},
     {"id":"GOV-M-004","phase":"common","title":"Forbidden terminology is absent from governed artifacts","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
     {"id":"GOV-A-001","phase":"common","title":"Canonical glossary usage is clear and evidence-backed","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},

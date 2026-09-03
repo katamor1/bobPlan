@@ -84,7 +84,7 @@ $glossary = Get-TeamBobGovernanceJson (Join-Path $governanceRoot 'glossary.json'
 Assert-GovernanceEqual (@($glossary.terms.id) -join ',') ($expectedGlossaryIds -join ',') 'Glossary contains exactly the approved active IDs in order'
 
 $manifest = Get-TeamBobGovernanceJson (Join-Path $profileRoot 'team-bob\profile-manifest.json')
-Assert-GovernanceEqual $manifest.version '0.1.0-poc' 'Transitional profile version remains v0.1'
+Assert-GovernanceEqual $manifest.version '0.2.0-poc' 'Profile and governance policy activate atomically at v0.2'
 $expectedContractPaths = @(
     'governancePolicy', 'governanceGlossary', 'governanceAuthoringChecklist', 'governanceReviewChecklist',
     'governanceRoles', 'governanceSchemas', 'governanceValidator'

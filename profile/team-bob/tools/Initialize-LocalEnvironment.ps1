@@ -69,7 +69,7 @@ try {
     Assert-TeamBobPhysicalSeparation $logInfo.PhysicalPath $repositoryPhysical 'LogRoot and repository root' 'ENVIRONMENT_FAILED'
     Assert-TeamBobPhysicalSeparation $sandboxInfo.PhysicalPath $logInfo.PhysicalPath 'SandboxRoot and LogRoot' 'ENVIRONMENT_FAILED'
     $json = ($registration | ConvertTo-Json -Depth 5) + [Environment]::NewLine
-    $environmentParent = Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED') 'IBM/BobTeamProfile/vc6-machine-control-poc'
+    $environmentParent = Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED') 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc'
     $environmentParentInfo = Get-TeamBobProspectiveDirectory $environmentParent 'Environment registration parent' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
     $environmentPath = Join-Path $environmentParentInfo.FullPath 'environment.json'
 

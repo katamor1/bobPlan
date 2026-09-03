@@ -1,5 +1,68 @@
 $ErrorActionPreference = 'Stop'
 
+if ($null -eq (Get-Command Get-TeamBobJsonMemberScan -ErrorAction SilentlyContinue)) {
+    function Get-TeamBobJsonMemberScan {
+        param([Parameter(Mandatory = $true)][string]$Text)
+        $state = [pscustomobject]@{ Index = 0 }
+        $rootNames = New-Object 'System.Collections.Generic.List[string]'
+        $duplicates = New-Object 'System.Collections.Generic.List[string]'
+        function Skip-GovernanceJsonWhitespace { while ($state.Index -lt $Text.Length -and [char]::IsWhiteSpace($Text[$state.Index])) { $state.Index++ } }
+        function Read-GovernanceJsonString {
+            if ($state.Index -ge $Text.Length -or $Text[$state.Index] -ne '"') { throw 'JSON string expected.' }
+            $start = $state.Index; $state.Index++; $escaped = $false
+            while ($state.Index -lt $Text.Length) {
+                $character = $Text[$state.Index]; $state.Index++
+                if ($escaped) { $escaped = $false; continue }
+                if ($character -eq '\') { $escaped = $true; continue }
+                if ($character -eq '"') { return ($Text.Substring($start, $state.Index - $start) | ConvertFrom-Json) }
+                if ([int][char]$character -lt 0x20) { throw 'Unescaped control character in JSON string.' }
+            }
+            throw 'Unterminated JSON string.'
+        }
+        function Read-GovernanceJsonValue {
+            param([int]$Depth)
+            Skip-GovernanceJsonWhitespace
+            if ($state.Index -ge $Text.Length) { throw 'JSON value expected.' }
+            $character = $Text[$state.Index]
+            if ($character -eq '{') {
+                $state.Index++; $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+                Skip-GovernanceJsonWhitespace
+                if ($state.Index -lt $Text.Length -and $Text[$state.Index] -eq '}') { $state.Index++; return }
+                while ($true) {
+                    Skip-GovernanceJsonWhitespace; $name = Read-GovernanceJsonString
+                    if ($Depth -eq 0) { $rootNames.Add([string]$name) }
+                    if (-not $seen.Add([string]$name)) { $duplicates.Add([string]$name) }
+                    Skip-GovernanceJsonWhitespace
+                    if ($state.Index -ge $Text.Length -or $Text[$state.Index] -ne ':') { throw 'JSON object member colon expected.' }
+                    $state.Index++; Read-GovernanceJsonValue ($Depth + 1); Skip-GovernanceJsonWhitespace
+                    if ($state.Index -ge $Text.Length) { throw 'Unterminated JSON object.' }
+                    if ($Text[$state.Index] -eq '}') { $state.Index++; return }
+                    if ($Text[$state.Index] -ne ',') { throw 'JSON object comma expected.' }
+                    $state.Index++
+                }
+            }
+            if ($character -eq '[') {
+                $state.Index++; Skip-GovernanceJsonWhitespace
+                if ($state.Index -lt $Text.Length -and $Text[$state.Index] -eq ']') { $state.Index++; return }
+                while ($true) {
+                    Read-GovernanceJsonValue ($Depth + 1); Skip-GovernanceJsonWhitespace
+                    if ($state.Index -ge $Text.Length) { throw 'Unterminated JSON array.' }
+                    if ($Text[$state.Index] -eq ']') { $state.Index++; return }
+                    if ($Text[$state.Index] -ne ',') { throw 'JSON array comma expected.' }
+                    $state.Index++
+                }
+            }
+            if ($character -eq '"') { [void](Read-GovernanceJsonString); return }
+            $start = $state.Index
+            while ($state.Index -lt $Text.Length -and ',]}'.IndexOf($Text[$state.Index]) -lt 0 -and -not [char]::IsWhiteSpace($Text[$state.Index])) { $state.Index++ }
+            if ($state.Index -eq $start) { throw 'Invalid JSON scalar.' }
+        }
+        Read-GovernanceJsonValue 0; Skip-GovernanceJsonWhitespace
+        if ($state.Index -ne $Text.Length) { throw 'Trailing content after JSON value.' }
+        return [pscustomobject]@{ RootMemberNames = @($rootNames); DuplicateMemberNames = @($duplicates) }
+    }
+}
+
 # Closed dispatch keys, not PowerShell command names. Task 2's evaluator must
 # dispatch only through this exact registry and must not invoke policy strings.
 $script:TeamBobMachineImplementationRegistry = [ordered]@{
@@ -35,7 +98,11 @@ function Get-TeamBobGovernanceJson {
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xef -and $bytes[1] -eq 0xbb -and $bytes[2] -eq 0xbf) { throw "encoding: UTF-8 BOM is forbidden: $Path" }
     $encoding = New-Object System.Text.UTF8Encoding($false, $true)
     try { $text = $encoding.GetString($bytes) } catch { throw "encoding: invalid UTF-8: $Path" }
-    try { return ($text | ConvertFrom-Json) } catch { throw "json: invalid JSON: $Path ($($_.Exception.Message))" }
+    try {
+        $scan = Get-TeamBobJsonMemberScan $text
+        if ($scan.DuplicateMemberNames.Count -gt 0) { throw 'duplicate object member' }
+        return ($text | ConvertFrom-Json)
+    } catch { throw "json: invalid JSON: $Path ($($_.Exception.Message))" }
 }
 
 function Test-TeamBobGovernanceExactProperties {

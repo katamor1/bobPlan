@@ -130,8 +130,8 @@ $manifest = $null
 $manifestPath = Join-Path $teamBobRoot 'profile-manifest.json'
 try {
     $manifest = Read-TeamBobJsonFile $manifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
-    $manifestValid = $manifest.version -eq '0.1.0-poc' -and $manifest.profile.id -eq 'team-bob-vc6-bazaar'
-    Add-TeamBobCheck 'Manifest identity' $manifestValid 'Expected team-bob-vc6-bazaar version 0.1.0-poc'
+    $manifestValid = $manifest.version -eq '0.2.0-poc' -and $manifest.profile.id -eq 'team-bob-vc6-bazaar'
+    Add-TeamBobCheck 'Manifest identity' $manifestValid 'Expected team-bob-vc6-bazaar version 0.2.0-poc'
 } catch {
     Add-TeamBobCheck 'Manifest identity' $false $_.Exception.Message
 }
@@ -148,7 +148,8 @@ $requiredRelativePaths = @(
     'team-bob/config/vc6-build-targets.schema.json', 'team-bob/config/vc6-build-targets.json',
     'team-bob/tools/Initialize-LocalEnvironment.ps1', 'team-bob/tools/Start-TeamBobTask.ps1', 'team-bob/tools/Test-TeamBobProfile.ps1',
     'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1',
-    'team-bob/tools/TeamBob-GovernanceCommon.ps1', 'team-bob/tools/Test-TeamBobGovernance.ps1',
+    'team-bob/tools/TeamBob-GovernanceCommon.ps1', 'team-bob/tools/TeamBob-ComplianceCommon.ps1', 'team-bob/tools/Test-TeamBobGovernance.ps1',
+    'team-bob/tools/New-TeamBobApprovalRecord.ps1', 'team-bob/tools/Invoke-TeamBobComplianceCheck.ps1',
     '.bob/governance/policy-manifest.json', '.bob/governance/glossary.json', '.bob/governance/checklists/authoring.json',
     '.bob/governance/checklists/review.json', '.bob/governance/roles.json', '.bob/governance/schemas/policy-manifest.schema.json',
     '.bob/governance/schemas/glossary.schema.json', '.bob/governance/schemas/checklist.schema.json', '.bob/governance/schemas/roles.schema.json',
@@ -176,7 +177,7 @@ try {
 $workSchema = $null
 try {
     $workSchema = Read-TeamBobJsonFile (Join-Path $teamBobRoot 'config/work-packet.schema.json') 'Work-packet schema' 'ENVIRONMENT_FAILED'
-    $workShape = $workSchema.type -eq 'object' -and $workSchema.additionalProperties -eq $false -and @($workSchema.required).Count -eq 36 -and $workSchema.properties.'Max-Repair-Cycles'.const -eq 2
+    $workShape = $workSchema.type -eq 'object' -and $workSchema.additionalProperties -eq $false -and @($workSchema.required).Count -eq 38 -and $workSchema.properties.'Max-Repair-Cycles'.const -eq 2
     Add-TeamBobCheck 'Work-packet JSON schema shape' $workShape 'Closed object with required packet fields and fixed repair budget'
 } catch { Add-TeamBobCheck 'Work-packet JSON schema shape' $false $_.Exception.Message }
 
@@ -204,7 +205,7 @@ try {
 } catch { Add-TeamBobCheck 'Build-target catalog JSON shape' $false $_.Exception.Message }
 
 $environment = $null
-$environmentPath = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json' }
+$environmentPath = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json' }
 if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
     if ($Strict) { Add-TeamBobCheck 'Local environment registration' $false "Missing fixed registration: $environmentPath" }
     else { Add-TeamBobCheck 'Local environment registration' $false 'Not registered; optional outside Strict mode' -Skip }

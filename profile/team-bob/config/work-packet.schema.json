@@ -1,18 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://team-bob.example/schema/work-packet-0.1.0-poc.json",
+  "$id": "https://team-bob.example/schema/work-packet-0.2.0-poc.json",
   "title": "Team Bob Work Packet",
   "type": "object",
   "additionalProperties": false,
-  "required": ["Profile Version", "Task ID", "Difficulty", "Risk", "Customer", "ReqIDs", "Word Baseline", "QA Baseline", "Spec Baseline", "Bazaar Root", "Bazaar Branch", "Bazaar Full Revision ID", "Allowed Files", "Forbidden Areas", "RT Impact", "Safety Impact", "Board Impact", "Driver Impact", "ABI Impact", "Build Impact", "Customer Branch Impact", "RT Impact Clear", "Safety Impact Clear", "Board Impact Clear", "Driver Impact Clear", "ABI Impact Clear", "Build Impact Clear", "Customer Branch Impact Clear", "Clean Working Copy", "Open QA", "Build Profile ID", "Autonomous-Edit-Build-Approved", "Soft-Execute-Risk-Accepted", "Max-Repair-Cycles", "Specification Approver", "Implementation Approver"],
+  "required": ["Profile Version", "Policy Version", "Policy Bundle SHA256", "Role Ledger SHA256", "Task ID", "Difficulty", "Risk", "Customer", "ReqIDs", "Word Baseline", "QA Baseline", "Spec Baseline", "Bazaar Root", "Bazaar Branch", "Bazaar Full Revision ID", "Allowed Files", "Forbidden Areas", "RT Impact", "Safety Impact", "Board Impact", "Driver Impact", "ABI Impact", "Build Impact", "Customer Branch Impact", "RT Impact Clear", "Safety Impact Clear", "Board Impact Clear", "Driver Impact Clear", "ABI Impact Clear", "Build Impact Clear", "Customer Branch Impact Clear", "Clean Working Copy", "Open QA", "Build Profile ID", "Max-Repair-Cycles", "Specification Assignment ID", "Implementation Assignment ID", "Independent Reviewer Assignment ID"],
   "properties": {
-    "Profile Version": {"const": "0.1.0-poc"}, "Task ID": {"type": "string", "minLength": 1}, "Difficulty": {"type": "string", "minLength": 1}, "Risk": {"enum": ["Green", "Amber", "Red"]}, "Customer": {"type": "string", "minLength": 1},
-    "ReqIDs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "Word Baseline": {"type": "string", "minLength": 1}, "QA Baseline": {"type": "string", "minLength": 1}, "Spec Baseline": {"type": "string", "minLength": 1},
+    "Profile Version": {"const": "0.2.0-poc"}, "Policy Version": {"const": "0.2.0-poc"},
+    "Policy Bundle SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "Role Ledger SHA256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "Task ID": {"type": "string", "minLength": 1}, "Difficulty": {"type": "string", "minLength": 1}, "Risk": {"enum": ["Green", "Amber", "Red"]}, "Customer": {"type": "string", "minLength": 1},
+    "ReqIDs": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "Word Baseline": {"type": "string", "minLength": 1}, "QA Baseline": {"type": "string", "minLength": 1}, "Spec Baseline": {"type": "string", "minLength": 1},
     "Bazaar Root": {"type": "string", "minLength": 1}, "Bazaar Branch": {"type": "string", "minLength": 1}, "Bazaar Full Revision ID": {"type": "string", "minLength": 1},
     "Allowed Files": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "Forbidden Areas": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
     "RT Impact": {"type": "string", "minLength": 1}, "Safety Impact": {"type": "string", "minLength": 1}, "Board Impact": {"type": "string", "minLength": 1}, "Driver Impact": {"type": "string", "minLength": 1}, "ABI Impact": {"type": "string", "minLength": 1}, "Build Impact": {"type": "string", "minLength": 1}, "Customer Branch Impact": {"type": "string", "minLength": 1},
     "RT Impact Clear": {"enum": ["YES", "NO"]}, "Safety Impact Clear": {"enum": ["YES", "NO"]}, "Board Impact Clear": {"enum": ["YES", "NO"]}, "Driver Impact Clear": {"enum": ["YES", "NO"]}, "ABI Impact Clear": {"enum": ["YES", "NO"]}, "Build Impact Clear": {"enum": ["YES", "NO"]}, "Customer Branch Impact Clear": {"enum": ["YES", "NO"]}, "Clean Working Copy": {"enum": ["YES", "NO"]},
-    "Open QA": {"type": "array", "items": {"type": "string", "minLength": 1}}, "Build Profile ID": {"type": "string", "minLength": 1}, "Autonomous-Edit-Build-Approved": {"const": "YES"}, "Soft-Execute-Risk-Accepted": {"const": "YES"}, "Max-Repair-Cycles": {"type": "integer", "const": 2}, "Specification Approver": {"type": "string", "minLength": 1}, "Implementation Approver": {"type": "string", "minLength": 1}
+    "Open QA": {"type": "array", "items": {"type": "string", "minLength": 1}}, "Build Profile ID": {"type": "string", "minLength": 1}, "Max-Repair-Cycles": {"type": "integer", "const": 2},
+    "Specification Assignment ID": {"type": "string", "pattern": "^ASSIGN-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}, "Implementation Assignment ID": {"type": "string", "pattern": "^ASSIGN-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}, "Independent Reviewer Assignment ID": {"type": "string", "pattern": "^ASSIGN-[A-Z0-9]+(?:-[A-Z0-9]+)*$"}
   },
   "allOf": [{
     "if": {"properties": {"Risk": {"const": "Green"}}},

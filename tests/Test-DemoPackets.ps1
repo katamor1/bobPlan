@@ -183,7 +183,15 @@ exit /b 91
     })
 
     $localAppData = Join-Path $FixtureRoot 'local-app-data'
-    $environmentPath = Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    Write-DemoPacketJson (Join-Path $workspace '.bob\governance\roles.json') ([ordered]@{
+        policyVersion = '0.2.0-poc'
+        assignments = @(
+            [ordered]@{ assignmentId='ASSIGN-DEMO-SPECIFICATION'; role='SPECIFICATION_APPROVER'; principalId='demo-specification-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('specification','test')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' },
+            [ordered]@{ assignmentId='ASSIGN-DEMO-IMPLEMENTATION'; role='IMPLEMENTATION_APPROVER'; principalId='demo-implementation-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('impact')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' },
+            [ordered]@{ assignmentId='ASSIGN-DEMO-INDEPENDENT-REVIEW'; role='INDEPENDENT_REVIEWER'; principalId='demo-independent-review-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('review')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' }
+        )
+    })
+    $environmentPath = Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
     $manifest = Get-DemoPacketJson (Join-Path $workspace 'team-bob\profile-manifest.json')
     $workSchema = Get-DemoPacketJson (Join-Path $workspace 'team-bob\config\work-packet.schema.json')
     $buildSchema = Get-DemoPacketJson (Join-Path $workspace 'team-bob\config\vc6-build-targets.schema.json')
@@ -442,7 +450,7 @@ $dotSourceLine
     $requirementsPacket = Get-DemoCanonicalPacket $requirementsPacketPath
     Assert-Equal $requirementsPacket.'Task ID' 'DEMO-REQUIREMENTS-001' 'Requirements uses the fixed task ID'
     Assert-Equal $requirementsPacket.Risk 'Amber' 'Requirements is a non-Green drafting task'
-    Assert-Equal $requirementsPacket.'Specification Approver' 'DEMO-SPEC-APPROVER-ROLE' 'Requirements records only the specification role'
+    Assert-Equal $requirementsPacket.'Specification Assignment ID' 'ASSIGN-DEMO-SPECIFICATION' 'Requirements records the specification assignment'
     $requirementsChainPath = Join-Path $fixture.Workspace 'team-bob-work\DEMO-REQUIREMENTS-001\results\demo-phase-chain.json'
     $requirementsChain = Get-DemoPacketJson $requirementsChainPath
     Assert-Equal $requirementsChain.currentPhase 'Requirements' 'Requirements chain records the current phase'
@@ -506,8 +514,8 @@ $dotSourceLine
     Assert-Equal @($greenPacket.'Open QA').Count 0 'Green packet has no Open QA'
     Assert-DemoPacketSequence @($greenPacket.'Allowed Files') @('demo/CycleWatch/src/CycleWatch.cpp') 'Green packet allows exactly one C++ file'
     Assert-Equal $greenPacket.'Build Profile ID' 'demo-msbuild-protocol-v1-not-vc6' 'Green packet uses only the demo build profile'
-    Assert-Equal $greenPacket.'Autonomous-Edit-Build-Approved' 'YES' 'Green packet records the explicit edit/build approval'
-    Assert-Equal $greenPacket.'Soft-Execute-Risk-Accepted' 'YES' 'Green packet records the soft Execute risk acceptance'
+    Assert-Equal $greenPacket.'Implementation Assignment ID' 'ASSIGN-DEMO-IMPLEMENTATION' 'Green packet records the implementation assignment'
+    Assert-Equal $greenPacket.'Independent Reviewer Assignment ID' 'ASSIGN-DEMO-INDEPENDENT-REVIEW' 'Green packet records the independent reviewer assignment'
     Assert-Equal $greenPacket.'Max-Repair-Cycles' 2 'Green packet fixes the repair limit at two'
     foreach ($field in @('RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy')) {
         Assert-Equal $greenPacket.$field 'YES' "Green packet gate '$field' is YES"
@@ -603,7 +611,7 @@ $dotSourceLine
     Assert-Equal $testPacket.'Task ID' 'DEMO-TEST-001' 'Test uses a task distinct from Green'
     Assert-Equal $testPacket.Risk 'Amber' 'Test is a non-Green drafting task'
     Assert-Equal $testPacket.'Bazaar Full Revision ID' 'demo-fixture-revision-002-after-human-commit' 'Test records the new full revision ID'
-    Assert-Equal $testPacket.'Implementation Approver' 'DEMO-INDEPENDENT-REVIEWER-ROLE' 'Test records the independent-review role'
+    Assert-Equal $testPacket.'Independent Reviewer Assignment ID' 'ASSIGN-DEMO-INDEPENDENT-REVIEW' 'Test records the independent-review assignment'
     $testChain = Get-DemoPacketJson (Join-Path $fixture.Workspace 'team-bob-work\DEMO-TEST-001\results\demo-phase-chain.json')
     Assert-Equal @($testChain.entries).Count 4 'Test chain contains all four phases'
     Assert-DemoPacketSequence @($testChain.entries.phase) @('Requirements', 'Impact', 'Green', 'Test') 'Phase chain order is fixed'

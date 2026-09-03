@@ -61,15 +61,14 @@ function Write-Task3PacketFixture {
         [string[]]$ForbiddenAreas = @('actual-machine', 'control-network', 'mainline', 'secrets')
     )
     $packet = [ordered]@{
-        'Profile Version' = '0.1.0-poc'; 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Fixture Customer'
+        'Profile Version' = '0.2.0-poc'; 'Policy Version' = '0.2.0-poc'; 'Policy Bundle SHA256' = ('0' * 64); 'Role Ledger SHA256' = ('1' * 64); 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Fixture Customer'
         'ReqIDs' = @('REQ-TASK3-001'); 'Word Baseline' = 'WORD-1'; 'QA Baseline' = 'QA-1'; 'Spec Baseline' = 'SPEC-1'
         'Bazaar Root' = [System.IO.Path]::GetFullPath($BazaarRoot); 'Bazaar Branch' = 'fixture-branch'; 'Bazaar Full Revision ID' = 'fixture-revision-id-full-123'
         'Allowed Files' = @($AllowedFiles); 'Forbidden Areas' = @($ForbiddenAreas)
         'RT Impact' = 'None'; 'Safety Impact' = 'None'; 'Board Impact' = 'None'; 'Driver Impact' = 'None'; 'ABI Impact' = 'None'; 'Build Impact' = 'Fixture'; 'Customer Branch Impact' = 'None'
         'RT Impact Clear' = 'YES'; 'Safety Impact Clear' = 'YES'; 'Board Impact Clear' = 'YES'; 'Driver Impact Clear' = 'YES'; 'ABI Impact Clear' = 'YES'; 'Build Impact Clear' = 'YES'; 'Customer Branch Impact Clear' = 'YES'
-        'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $BuildProfileId
-        'Autonomous-Edit-Build-Approved' = 'YES'; 'Soft-Execute-Risk-Accepted' = 'YES'; 'Max-Repair-Cycles' = 2
-        'Specification Approver' = 'Spec Approver'; 'Implementation Approver' = 'Implementation Approver'
+        'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $BuildProfileId; 'Max-Repair-Cycles' = 2
+        'Specification Assignment ID' = 'ASSIGN-SPEC'; 'Implementation Assignment ID' = 'ASSIGN-IMPL'; 'Independent Reviewer Assignment ID' = 'ASSIGN-REVIEW'
     }
     $json = $packet | ConvertTo-Json -Depth 20
     Write-Utf8NoBomFixture $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")
@@ -392,7 +391,7 @@ try {
     $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workingTree 'src/example.cpp')).Hash
     $bzrFingerprint = Get-TreeFingerprintFixture (Join-Path $workingTree '.bzr')
 
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
     $registeredEnvironment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 
     $toolJunctionAlias = Join-Path $task3FixtureRoot 'registered-tool-junction-alias'
@@ -528,8 +527,8 @@ try {
         [pscustomobject]@{ Name = 'Open QA type'; Field = 'Open QA'; Value = 'QA-OPEN' },
         [pscustomobject]@{ Name = 'Build Profile ID empty'; Field = 'Build Profile ID'; Value = '' },
         [pscustomobject]@{ Name = 'repair cycles type'; Field = 'Max-Repair-Cycles'; Value = '2' },
-        [pscustomobject]@{ Name = 'specification approver empty'; Field = 'Specification Approver'; Value = '' },
-        [pscustomobject]@{ Name = 'implementation approver type'; Field = 'Implementation Approver'; Value = 7 },
+        [pscustomobject]@{ Name = 'specification assignment empty'; Field = 'Specification Assignment ID'; Value = '' },
+        [pscustomobject]@{ Name = 'implementation assignment type'; Field = 'Implementation Assignment ID'; Value = 7 },
         [pscustomobject]@{ Name = 'additional property'; Extra = $true }
     )
     $validPacketText = [System.IO.File]::ReadAllText($workPacketPath, [System.Text.Encoding]::UTF8)

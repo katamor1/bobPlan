@@ -205,7 +205,7 @@ function Get-DemoRestoreEnvironmentPath {
     }
     $localAppData = Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'INTEGRITY_FAILED'
     [void](Get-TeamBobPhysicalPath $localAppData 'LOCALAPPDATA' 'Container' 'INTEGRITY_FAILED')
-    return Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    return Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
 }
 
 function Get-DemoRestoreBackupContext {

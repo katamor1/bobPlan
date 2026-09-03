@@ -5,7 +5,10 @@ Commands and tools must parse the canonical JSON object below and validate it ag
 <!-- canonical-work-packet-json:start -->
 ```json
 {
-  "Profile Version": "0.1.0-poc",
+  "Profile Version": "0.2.0-poc",
+  "Policy Version": "0.2.0-poc",
+  "Policy Bundle SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "Role Ledger SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
   "Task ID": "EXAMPLE-0001",
   "Difficulty": "Example",
   "Risk": "Amber",
@@ -36,13 +39,12 @@ Commands and tools must parse the canonical JSON object below and validate it ag
   "Clean Working Copy": "NO",
   "Open QA": ["QA-EXAMPLE-001"],
   "Build Profile ID": "example-local-vc6",
-  "Autonomous-Edit-Build-Approved": "YES",
-  "Soft-Execute-Risk-Accepted": "YES",
   "Max-Repair-Cycles": 2,
-  "Specification Approver": "Example Specification Approver",
-  "Implementation Approver": "Example Implementation Approver"
+  "Specification Assignment ID": "ASSIGN-SPEC-EXAMPLE",
+  "Implementation Assignment ID": "ASSIGN-IMPL-EXAMPLE",
+  "Independent Reviewer Assignment ID": "ASSIGN-REVIEW-EXAMPLE"
 }
 ```
 <!-- canonical-work-packet-json:end -->
 
-Green requires Risk `Green`, an empty `Open QA` array, YES for every `* Impact Clear` field and `Clean Working Copy`, plus both approvals and both explicit YES acceptances. Amber and Red packets may retain Open QA while awaiting human disposition.
+Green requires Risk `Green`, an empty `Open QA` array, and YES for every `* Impact Clear` field and `Clean Working Copy`. Human authority is bound by the three role-ledger assignment IDs and separate immutable approval records.

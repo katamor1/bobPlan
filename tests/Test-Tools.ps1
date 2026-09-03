@@ -224,14 +224,17 @@ exit /b 41
     $sandboxRoot = Join-Path $fixtureRoot 'サンドボックス-日本'
     $logRoot = Join-Path $fixtureRoot 'ログ-日本'
     $initializeArguments = @('-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot)
+    $legacyEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    Write-Utf8NoBomFixture $legacyEnvironmentPath 'LEGACY-V0.1-SENTINEL'
     $initializeResult = Invoke-TestScript $initializePath $initializeArguments
     Assert-Equal $initializeResult.ExitCode 0 'Environment initializer writes a valid fixed local registration'
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
-    Assert-True (Test-Path -LiteralPath $environmentPath -PathType Leaf) 'Environment registration uses the fixed LOCALAPPDATA path'
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
+    Assert-True (Test-Path -LiteralPath $environmentPath -PathType Leaf) 'Environment registration uses the isolated v0.2 LOCALAPPDATA path'
+    Assert-Equal ([System.IO.File]::ReadAllText($legacyEnvironmentPath)) 'LEGACY-V0.1-SENTINEL' 'v0.2 initialization does not reuse or overwrite the v0.1 registration'
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.schemaVersion '1.0' 'Environment registration has a stable schema version'
     Assert-Equal $environment.profileId 'team-bob-vc6-bazaar' 'Environment registration records profile identity'
-    Assert-Equal $environment.profileVersion '0.1.0-poc' 'Environment registration records profile version'
+    Assert-Equal $environment.profileVersion '0.2.0-poc' 'Environment registration records profile version'
     Assert-Equal $environment.pcId ([Environment]::MachineName) 'Environment registration records stable machine identity'
     Assert-Equal $environment.msdevSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $msdevPath).Hash.ToLowerInvariant() 'Environment registration hashes MSDEV'
     Assert-Equal $environment.bazaarSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $bazaarPath).Hash.ToLowerInvariant() 'Environment registration hashes Bazaar'
@@ -417,6 +420,13 @@ exit /b 41
     Assert-Equal $qualifiedProfileResult.ExitCode 0 "Validator accepts one complete enabled qualification for the registered PC; output: $($qualifiedProfileResult.Output.Trim())"
 
     # Start task: fake Bazaar observes only the allowed read-only command set.
+    $startTaskPath = Join-Path $catalogProfileRoot 'team-bob/tools/Start-TeamBobTask.ps1'
+    $roleNow = [DateTimeOffset]::UtcNow
+    Write-JsonFixture (Join-Path $catalogProfileRoot '.bob/governance/roles.json') ([ordered]@{policyVersion='0.2.0-poc';assignments=@(
+        [ordered]@{assignmentId='ASSIGN-SPEC';role='SPECIFICATION_APPROVER';principalId='principal-spec';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('specification','test')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')},
+        [ordered]@{assignmentId='ASSIGN-IMPL';role='IMPLEMENTATION_APPROVER';principalId='principal-impl';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('impact')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')},
+        [ordered]@{assignmentId='ASSIGN-REVIEW';role='INDEPENDENT_REVIEWER';principalId='principal-review';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('review')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')}
+    )})
     $bazaarRoot = Join-Path $fixtureRoot 'working-tree'
     New-Item -ItemType Directory -Path (Join-Path $bazaarRoot '.bzr') -Force | Out-Null
     Write-Utf8NoBomFixture (Join-Path $bazaarRoot '.bzr/branch.conf') 'working-tree-metadata'
@@ -427,16 +437,17 @@ exit /b 41
         '-TaskId', 'GREEN-0001', '-BazaarRoot', $bazaarRoot, '-Difficulty', 'Small', '-Classification', 'Green',
         '-Customer', 'Fixture Customer', '-ReqIds', 'REQ-100', '-WordBaseline', 'WORD-1', '-QaBaseline', 'QA-1',
         '-SpecBaseline', 'SPEC-1', '-AllowedFiles', 'src/example.cpp', '-BuildProfileId', 'fixture-vc6',
-        '-SpecificationApprover', 'Spec Approver', '-ImplementationApprover', 'Implementation Approver',
+        '-SpecificationAssignmentId', 'ASSIGN-SPEC', '-ImplementationAssignmentId', 'ASSIGN-IMPL', '-IndependentReviewerAssignmentId', 'ASSIGN-REVIEW',
         '-RTImpactClear', 'YES', '-SafetyImpactClear', 'YES', '-BoardImpactClear', 'YES', '-DriverImpactClear', 'YES',
-        '-ABIImpactClear', 'YES', '-BuildImpactClear', 'YES', '-CustomerBranchImpactClear', 'YES',
-        '-AutonomousEditBuildApproved', 'YES', '-SoftExecuteRiskAccepted', 'YES'
+        '-ABIImpactClear', 'YES', '-BuildImpactClear', 'YES', '-CustomerBranchImpactClear', 'YES'
     )
     $startResult = Invoke-TestScript $startTaskPath $greenArguments
     Assert-Equal $startResult.ExitCode 0 'Start task creates a work packet for a clean fully approved Green task'
     $workPacketPath = Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/work-packet.md'
     Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/drafts') -PathType Container) 'Start task creates drafts directory'
     Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/results') -PathType Container) 'Start task creates results directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/approvals') -PathType Container) 'Start task creates approvals directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/state/phase-state.json') -PathType Leaf) 'Start task atomically publishes initial phase state'
     $createdPacket = Get-CanonicalPacketFixture $workPacketPath
     Assert-Equal $createdPacket.'Task ID' 'GREEN-0001' 'Created work packet records Task ID'
     Assert-Equal $createdPacket.Risk 'Green' 'Created work packet records Green classification'
@@ -512,11 +523,14 @@ exit /b 41
     Assert-True ($openQaResult.ExitCode -ne 0) 'Start task refuses Green classification with open QA'
 
     $missingApprovalArguments = @($greenArguments)
-    $missingApprovalArguments[1] = 'GREEN-NO-APPROVAL'
-    $approvalIndex = [array]::IndexOf($missingApprovalArguments, '-AutonomousEditBuildApproved')
-    $missingApprovalArguments[$approvalIndex + 1] = 'NO'
+    $missingApprovalArguments[1] = 'GREEN-NO-ASSIGNMENT'
+    $approvalIndex = [array]::IndexOf($missingApprovalArguments, '-SpecificationAssignmentId')
+    $missingApprovalArguments[$approvalIndex + 1] = 'ASSIGN-MISSING'
+    [System.IO.File]::WriteAllText($env:BOB_TEST_BZR_LOG, '')
     $missingApprovalResult = Invoke-TestScript $startTaskPath $missingApprovalArguments
-    Assert-True ($missingApprovalResult.ExitCode -ne 0) 'Start task refuses Green classification without explicit YES approval'
+    Assert-True ($missingApprovalResult.ExitCode -ne 0) 'Start task refuses an absent selected assignment'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB_TEST_BZR_LOG)) '' 'Role rejection occurs before every Bazaar command'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-NO-ASSIGNMENT'))) 'Role rejection creates no task tree'
 
     $outsideArguments = @($greenArguments)
     $outsideArguments[1] = 'GREEN-OUTSIDE'

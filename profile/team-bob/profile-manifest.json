@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0-poc",
+  "version": "0.2.0-poc",
   "profile": {
     "id": "team-bob-vc6-bazaar",
     "name": "Team Bob VC6 Bazaar Profile"
@@ -22,6 +22,8 @@
     "governanceReviewChecklist": "../.bob/governance/checklists/review.json",
     "governanceRoles": "../.bob/governance/roles.json",
     "governanceSchemas": "../.bob/governance/schemas/",
-    "governanceValidator": "tools/Test-TeamBobGovernance.ps1"
+    "governanceValidator": "tools/Test-TeamBobGovernance.ps1",
+    "approvalGenerator": "tools/New-TeamBobApprovalRecord.ps1",
+    "complianceCheck": "tools/Invoke-TeamBobComplianceCheck.ps1"
   }
 }

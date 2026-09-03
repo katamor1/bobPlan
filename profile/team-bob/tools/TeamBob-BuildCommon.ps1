@@ -320,9 +320,96 @@ function ConvertTo-TeamBobRelativePath {
 function Assert-TeamBobExactProperties {
     param([object]$Object, [string[]]$Names, [string]$Label, [string]$FailureStatus = 'ENVIRONMENT_FAILED')
     if ($null -eq $Object -or -not ($Object -is [System.Management.Automation.PSCustomObject])) { throw (New-TeamBobFailure $FailureStatus "$Label must be a JSON object.") }
-    $actual = @($Object.PSObject.Properties.Name | Sort-Object)
-    $expected = @($Names | Sort-Object)
-    if (($actual -join "`n") -ne ($expected -join "`n")) { throw (New-TeamBobFailure $FailureStatus "$Label has missing or unsupported fields.") }
+    $actual = @($Object.PSObject.Properties.Name)
+    if ($actual.Count -ne $Names.Count) { throw (New-TeamBobFailure $FailureStatus "$Label has missing or unsupported fields.") }
+    foreach ($expectedName in $Names) {
+        if (@($actual | Where-Object { [string]::Equals($_, $expectedName, [System.StringComparison]::Ordinal) }).Count -ne 1) {
+            throw (New-TeamBobFailure $FailureStatus "$Label has missing or unsupported fields.")
+        }
+    }
+    foreach ($actualName in $actual) {
+        if (@($Names | Where-Object { [string]::Equals($_, $actualName, [System.StringComparison]::Ordinal) }).Count -ne 1) {
+            throw (New-TeamBobFailure $FailureStatus "$Label has missing or unsupported fields.")
+        }
+    }
+}
+
+function Get-TeamBobJsonMemberScan {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $state = [pscustomobject]@{ Index = 0 }
+    $rootNames = New-Object 'System.Collections.Generic.List[string]'
+    $duplicates = New-Object 'System.Collections.Generic.List[string]'
+
+    function Skip-TeamBobJsonWhitespace {
+        while ($state.Index -lt $Text.Length -and [char]::IsWhiteSpace($Text[$state.Index])) { $state.Index++ }
+    }
+    function Read-TeamBobJsonStringToken {
+        if ($state.Index -ge $Text.Length -or $Text[$state.Index] -ne '"') { throw 'JSON string expected.' }
+        $start = $state.Index
+        $state.Index++
+        $escaped = $false
+        while ($state.Index -lt $Text.Length) {
+            $character = $Text[$state.Index]
+            $state.Index++
+            if ($escaped) { $escaped = $false; continue }
+            if ($character -eq '\') { $escaped = $true; continue }
+            if ($character -eq '"') {
+                $literal = $Text.Substring($start, $state.Index - $start)
+                return ($literal | ConvertFrom-Json)
+            }
+            if ([int][char]$character -lt 0x20) { throw 'Unescaped control character in JSON string.' }
+        }
+        throw 'Unterminated JSON string.'
+    }
+    function Read-TeamBobJsonValue {
+        param([int]$Depth)
+        Skip-TeamBobJsonWhitespace
+        if ($state.Index -ge $Text.Length) { throw 'JSON value expected.' }
+        $character = $Text[$state.Index]
+        if ($character -eq '{') {
+            $state.Index++
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+            Skip-TeamBobJsonWhitespace
+            if ($state.Index -lt $Text.Length -and $Text[$state.Index] -eq '}') { $state.Index++; return }
+            while ($true) {
+                Skip-TeamBobJsonWhitespace
+                $name = Read-TeamBobJsonStringToken
+                if ($Depth -eq 0) { $rootNames.Add([string]$name) }
+                if (-not $seen.Add([string]$name)) { $duplicates.Add([string]$name) }
+                Skip-TeamBobJsonWhitespace
+                if ($state.Index -ge $Text.Length -or $Text[$state.Index] -ne ':') { throw 'JSON object member colon expected.' }
+                $state.Index++
+                Read-TeamBobJsonValue ($Depth + 1)
+                Skip-TeamBobJsonWhitespace
+                if ($state.Index -ge $Text.Length) { throw 'Unterminated JSON object.' }
+                if ($Text[$state.Index] -eq '}') { $state.Index++; return }
+                if ($Text[$state.Index] -ne ',') { throw 'JSON object comma expected.' }
+                $state.Index++
+            }
+        }
+        if ($character -eq '[') {
+            $state.Index++
+            Skip-TeamBobJsonWhitespace
+            if ($state.Index -lt $Text.Length -and $Text[$state.Index] -eq ']') { $state.Index++; return }
+            while ($true) {
+                Read-TeamBobJsonValue ($Depth + 1)
+                Skip-TeamBobJsonWhitespace
+                if ($state.Index -ge $Text.Length) { throw 'Unterminated JSON array.' }
+                if ($Text[$state.Index] -eq ']') { $state.Index++; return }
+                if ($Text[$state.Index] -ne ',') { throw 'JSON array comma expected.' }
+                $state.Index++
+            }
+        }
+        if ($character -eq '"') { [void](Read-TeamBobJsonStringToken); return }
+        $start = $state.Index
+        while ($state.Index -lt $Text.Length -and ',]}'.IndexOf($Text[$state.Index]) -lt 0 -and -not [char]::IsWhiteSpace($Text[$state.Index])) { $state.Index++ }
+        if ($state.Index -eq $start) { throw 'Invalid JSON scalar.' }
+    }
+
+    Read-TeamBobJsonValue 0
+    Skip-TeamBobJsonWhitespace
+    if ($state.Index -ne $Text.Length) { throw 'Trailing content after JSON value.' }
+    return [pscustomobject]@{ RootMemberNames = @($rootNames); DuplicateMemberNames = @($duplicates) }
 }
 
 function Test-TeamBobInteger {
@@ -333,12 +420,12 @@ function Test-TeamBobInteger {
 
 function Assert-TeamBobWorkPacketContract {
     param([object]$Packet)
-    $failureStatus = 'INTEGRITY_FAILED'
-    if (-not ($Packet.'Profile Version' -is [string]) -or $Packet.'Profile Version' -cne '0.1.0-poc') { throw (New-TeamBobFailure $failureStatus 'Work packet Profile Version must be the supported string constant.') }
+    $failureStatus = 'PACKET_SCHEMA_INVALID'
+    if (-not ($Packet.'Profile Version' -is [string]) -or $Packet.'Profile Version' -cne '0.2.0-poc') { throw (New-TeamBobFailure 'PACKET_VERSION_UNSUPPORTED' 'PACKET_VERSION_UNSUPPORTED: Work packet Profile Version is missing, malformed, or unsupported.') }
     foreach ($field in @(
-        'Task ID', 'Difficulty', 'Customer', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch',
+        'Policy Version', 'Task ID', 'Difficulty', 'Customer', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch',
         'Bazaar Full Revision ID', 'RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact',
-        'Customer Branch Impact', 'Build Profile ID', 'Specification Approver', 'Implementation Approver'
+        'Customer Branch Impact', 'Build Profile ID', 'Specification Assignment ID', 'Implementation Assignment ID', 'Independent Reviewer Assignment ID'
     )) {
         $value = $Packet.PSObject.Properties[$field].Value
         if (-not ($value -is [string]) -or [string]::IsNullOrWhiteSpace($value)) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be a non-empty string.") }
@@ -356,9 +443,15 @@ function Assert-TeamBobWorkPacketContract {
         $value = $Packet.PSObject.Properties[$field].Value
         if (-not ($value -is [string]) -or @('YES', 'NO') -notcontains $value) { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be the string YES or NO.") }
     }
-    foreach ($field in @('Autonomous-Edit-Build-Approved', 'Soft-Execute-Risk-Accepted')) {
+    if ($Packet.'Policy Version' -cne '0.2.0-poc') { throw (New-TeamBobFailure $failureStatus "Work packet Policy Version must be '0.2.0-poc'.") }
+    foreach ($field in @('Policy Bundle SHA256', 'Role Ledger SHA256')) {
         $value = $Packet.PSObject.Properties[$field].Value
-        if (-not ($value -is [string]) -or $value -cne 'YES') { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be the string constant YES.") }
+        if (-not ($value -is [string]) -or $value -cnotmatch '^[0-9a-f]{64}$') { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be a lowercase SHA-256 hash.") }
+    }
+    $reqIdSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($reqId in @($Packet.ReqIDs)) { if (-not $reqIdSet.Add([string]$reqId)) { throw (New-TeamBobFailure $failureStatus 'Work packet ReqIDs must be ordinally unique.') } }
+    foreach ($field in @('Specification Assignment ID', 'Implementation Assignment ID', 'Independent Reviewer Assignment ID')) {
+        if ([string]$Packet.PSObject.Properties[$field].Value -cnotmatch '^ASSIGN-[A-Z0-9]+(?:-[A-Z0-9]+)*$') { throw (New-TeamBobFailure $failureStatus "Work packet field '$field' must be an assignment ID.") }
     }
     if (-not (Test-TeamBobInteger $Packet.'Max-Repair-Cycles') -or [int64]$Packet.'Max-Repair-Cycles' -ne 2) { throw (New-TeamBobFailure $failureStatus 'Work packet Max-Repair-Cycles must be the integer constant 2.') }
     if ($Packet.Risk -eq 'Green') {
@@ -375,16 +468,27 @@ function Read-TeamBobCanonicalPacket {
     $text = Read-TeamBobUtf8File $Path 'Work packet' 'INTEGRITY_FAILED'
     $match = [regex]::Match($text, '(?s)<!-- canonical-work-packet-json:start -->\s*```json\s*(?<json>\{.*?\})\s*```\s*<!-- canonical-work-packet-json:end -->')
     if (-not $match.Success) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Work packet canonical JSON block is missing or malformed.') }
-    try { $packet = $match.Groups['json'].Value | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'INTEGRITY_FAILED' ('Work packet canonical JSON is invalid: ' + $_.Exception.Message)) }
+    $json = $match.Groups['json'].Value
+    try { $scan = Get-TeamBobJsonMemberScan $json } catch { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' ('Work packet canonical JSON is invalid: ' + $_.Exception.Message)) }
+    $versionNames = @($scan.RootMemberNames | Where-Object { [string]::Equals($_, 'Profile Version', [System.StringComparison]::OrdinalIgnoreCase) })
+    if ($versionNames.Count -ne 1 -or -not [string]::Equals($versionNames[0], 'Profile Version', [System.StringComparison]::Ordinal) -or @($scan.DuplicateMemberNames | Where-Object { [string]::Equals($_, 'Profile Version', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
+        throw (New-TeamBobFailure 'PACKET_VERSION_UNSUPPORTED' 'PACKET_VERSION_UNSUPPORTED: Work packet Profile Version is missing, malformed, duplicated, ambiguous, or unsupported.')
+    }
+    if ($scan.DuplicateMemberNames.Count -gt 0) { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' 'Work packet JSON contains a duplicate object member.') }
+    try { $packet = $json | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' ('Work packet canonical JSON is invalid: ' + $_.Exception.Message)) }
+    $versionProperty = @($packet.PSObject.Properties | Where-Object { [string]::Equals($_.Name, 'Profile Version', [System.StringComparison]::Ordinal) })
+    if ($versionProperty.Count -ne 1 -or -not ($versionProperty[0].Value -is [string]) -or $versionProperty[0].Value -cne '0.2.0-poc') {
+        throw (New-TeamBobFailure 'PACKET_VERSION_UNSUPPORTED' 'PACKET_VERSION_UNSUPPORTED: Work packet Profile Version is missing, malformed, or unsupported.')
+    }
     $fields = @(
-        'Profile Version', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline',
+        'Profile Version', 'Policy Version', 'Policy Bundle SHA256', 'Role Ledger SHA256', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline',
         'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Allowed Files', 'Forbidden Areas', 'RT Impact', 'Safety Impact',
         'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact', 'Customer Branch Impact', 'RT Impact Clear', 'Safety Impact Clear',
         'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy',
-        'Open QA', 'Build Profile ID', 'Autonomous-Edit-Build-Approved', 'Soft-Execute-Risk-Accepted', 'Max-Repair-Cycles',
-        'Specification Approver', 'Implementation Approver'
+        'Open QA', 'Build Profile ID', 'Max-Repair-Cycles', 'Specification Assignment ID', 'Implementation Assignment ID',
+        'Independent Reviewer Assignment ID'
     )
-    Assert-TeamBobExactProperties $packet $fields 'Work packet' 'INTEGRITY_FAILED'
+    Assert-TeamBobExactProperties $packet $fields 'Work packet' 'PACKET_SCHEMA_INVALID'
     Assert-TeamBobWorkPacketContract $packet
     return $packet
 }
@@ -620,7 +724,7 @@ function Get-TeamBobLocalEnvironment {
     )
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -or -not (Test-TeamBobAbsolutePath $env:LOCALAPPDATA)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' 'LOCALAPPDATA must be an absolute path.') }
     $localAppData = Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED'
-    $path = Join-Path $localAppData 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $path = Join-Path $localAppData 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-TeamBobFailure 'ENVIRONMENT_FAILED' "Local environment registration is missing: $path") }
     [void](Get-TeamBobPhysicalPath $path 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
     $environment = Read-TeamBobJsonFile $path 'Local environment registration' 'ENVIRONMENT_FAILED'
