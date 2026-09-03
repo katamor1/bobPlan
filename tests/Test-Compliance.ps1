@@ -170,6 +170,8 @@ try {
     $task = New-ComplianceTaskFixture 'CHAIN-1' $bazaarRoot $policyHash $roleHash
     $approvalPath = Join-Path $fixtureProfile "team-bob/tools/$approvalScriptName"
     $compliancePath = Join-Path $fixtureProfile "team-bob/tools/$complianceScriptName"
+    . (Join-Path $fixtureProfile 'team-bob/tools/TeamBob-BuildCommon.ps1')
+    . (Join-Path $fixtureProfile 'team-bob/tools/TeamBob-ComplianceCommon.ps1')
 
     $phaseData = @(
         [pscustomobject]@{ Phase='requirements'; Artifact='drafts/requirement-ledger.csv'; Text="ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State`r`nREQ-100,WORD-1#1,Interpretation,Acceptance,QA-1,CLOSED,Evidence,N/A`r`n"; Ai=@('GOV-A-001','REQ-A-001'); Assignment=$null },
@@ -214,10 +216,22 @@ try {
     $finalState = Get-Content -Raw -LiteralPath (Join-Path $task.Root 'state/phase-state.json') | ConvertFrom-Json
     Assert-ComplianceEqual $finalState.currentPhase 'complete' 'Six successful phases advance state to complete'
     Assert-ComplianceEqual @($finalState.completedPhases).Count 6 'Six successful phases are recorded once and in order'
+    for($bindingIndex=0;$bindingIndex -lt $phaseData.Count;$bindingIndex++){
+        $bindingPhase=$phaseData[$bindingIndex].Phase;$bindingResultFile=Get-LatestComplianceResult $task.Root $bindingPhase;$bindingResult=Get-Content -Raw -LiteralPath $bindingResultFile.FullName|ConvertFrom-Json
+        $semanticState=[pscustomobject]@{profileVersion='0.2.0-poc';policyVersion='0.2.0-poc';taskId='CHAIN-1';currentPhase=$bindingPhase;completedPhases=@($script:TeamBobPhaseOrder|Select-Object -First $bindingIndex);workPacketPath=$task.Packet;workPacketSha256=$bindingResult.workPacketSha256;policyBundleSha256=$policyHash;roleLedgerSha256=$roleHash;latestResultPath=$bindingResult.prerequisiteResultPath;latestResultSha256=$bindingResult.prerequisiteResultSha256}
+        $semanticBinding=Get-TeamBobSemanticStateBinding $semanticState
+        $storedBinding=(@($bindingResult.checks|Where-Object{$_.id -ceq 'GOV-M-002'})[0]).evidence[0].value
+        Assert-ComplianceEqual $storedBinding $semanticBinding "Live and historical semantic state bindings agree for $bindingPhase"
+        if($bindingIndex -eq 1){
+            foreach($bindingMutation in @('phase','prefix','predecessor')){
+                $changedState=$semanticState|ConvertTo-Json -Depth 10|ConvertFrom-Json
+                if($bindingMutation -ceq 'phase'){$changedState.currentPhase='impact'}elseif($bindingMutation -ceq 'prefix'){$changedState.completedPhases=@()}else{$changedState.latestResultSha256=('b'*64)}
+                Assert-ComplianceTrue ((Get-TeamBobSemanticStateBinding $changedState) -cne $semanticBinding) "Semantic state binding covers $bindingMutation"
+            }
+        }
+    }
 
     # Named machine checks enforce semantics, not only headings.
-    . (Join-Path $fixtureProfile 'team-bob/tools/TeamBob-BuildCommon.ps1')
-    . (Join-Path $fixtureProfile 'team-bob/tools/TeamBob-ComplianceCommon.ps1')
     $chainPacket = Get-CanonicalPacketObject $task.Packet
     $chainContext = Get-TeamBobTaskGovernanceContext $task.Packet $chainPacket
     $chainGovernance = Get-TeamBobCurrentGovernance (Join-Path $fixtureProfile 'team-bob/tools') $chainPacket
@@ -329,21 +343,40 @@ try {
 
     $validPriorAccepted=$true;try{Assert-TeamBobPriorComplianceResult $ledgerResult $chainContext $chainGovernance 'requirements'}catch{$validPriorAccepted=$false}
     Assert-ComplianceTrue $validPriorAccepted 'Unmodified historical machine output remains valid'
-    foreach($machineMutation in @('path','line','message','status','order','duplicate','missing')){
+    foreach($machineMutation in @('path','line','message','status','state-sha','order','duplicate','missing')){
         $mutatedPrior=$ledgerResult|ConvertTo-Json -Depth 30|ConvertFrom-Json
         switch($machineMutation){
             'path' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-004'})[0]).evidence[0].value='work-packet.md'}
             'line' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-004'})[0]).evidence[1].value='2'}
             'message' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-003'})[0]).message='Forged machine message.'}
             'status' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-003'})[0]).status='FAIL'}
+            'state-sha' {(@($mutatedPrior.checks|Where-Object{$_.id -ceq 'GOV-M-002'})[0]).evidence[0].value=('a'*64)}
             'order' {$temporary=$mutatedPrior.checks[0];$mutatedPrior.checks[0]=$mutatedPrior.checks[1];$mutatedPrior.checks[1]=$temporary}
             'duplicate' {$mutatedPrior.checks[1]=$mutatedPrior.checks[0]}
             'missing' {$mutatedPrior.checks=@($mutatedPrior.checks|Select-Object -Skip 1)}
         }
         $mutationCode=$null;try{Assert-TeamBobPriorComplianceResult $mutatedPrior $chainContext $chainGovernance 'requirements'}catch{$mutationCode=$_.Exception.Data['NativeExitCode']}
-        $expectedMutationCode=if(@('path','line','message','status') -ccontains $machineMutation){30}else{20}
-        Assert-ComplianceEqual $mutationCode $expectedMutationCode "Historical machine $machineMutation mutation is classified correctly"
+        $expectedMutationCode=if(@('path','line','message','status','state-sha') -ccontains $machineMutation){30}else{20}
+        if($machineMutation -ceq 'state-sha'){$stateShaMutationCode=$mutationCode}else{Assert-ComplianceEqual $mutationCode $expectedMutationCode "Historical machine $machineMutation mutation is classified correctly"}
     }
+
+    $ledgerBytesBefore=[System.IO.File]::ReadAllBytes((Join-Path $task.Root 'drafts/requirement-ledger.csv'))
+    $ledgerAssessmentPath=Join-Path $task.Root 'drafts/assessment-requirements.json';$ledgerAssessmentBytesBefore=[System.IO.File]::ReadAllBytes($ledgerAssessmentPath)
+    Write-ComplianceUtf8 (Join-Path $task.Root 'drafts/requirement-ledger.csv') "ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State`r`nREQ-100,WORD-1#1,Forbidden WorkPacket terminology,Acceptance,QA-1,CLOSED,Evidence,N/A`r`n"
+    $machineFailPrior=$ledgerResult|ConvertTo-Json -Depth 30|ConvertFrom-Json;$machineFailPrior.artifactSha256=Get-ComplianceHash (Join-Path $task.Root 'drafts/requirement-ledger.csv')
+    $machineFailAssessment=Get-Content -Raw -LiteralPath $ledgerAssessmentPath|ConvertFrom-Json;$machineFailAssessment.artifactSha256=$machineFailPrior.artifactSha256;Write-ComplianceJson $ledgerAssessmentPath $machineFailAssessment;$machineFailPrior.assessmentSha256=Get-ComplianceHash $ledgerAssessmentPath
+    $machineFailArtifact=[pscustomobject]@{FullPath=(Join-Path $task.Root 'drafts/requirement-ledger.csv');PhysicalPath=(Join-Path $task.Root 'drafts/requirement-ledger.csv');RelativePath='drafts/requirement-ledger.csv';Hash=$machineFailPrior.artifactSha256}
+    $requirementsPolicy=Get-TeamBobPhasePolicy $chainGovernance.Policy 'requirements'
+    foreach($machineDefinition in @(Get-TeamBobChecklistDefinitions $chainGovernance $requirementsPolicy|Where-Object{$_.kind -ceq 'machine'})){
+        if($machineDefinition.id -ceq 'GOV-M-002'){continue}
+        $derivedMachine=Invoke-TeamBobMachineCheck $machineDefinition $chainPacket $chainContext $machineFailArtifact $null $chainGovernance
+        $derivedMachine=$derivedMachine|ConvertTo-Json -Depth 20|ConvertFrom-Json
+        $storedIndex=[array]::IndexOf(@($machineFailPrior.checks|ForEach-Object{[string]$_.id}),[string]$machineDefinition.id);$machineFailPrior.checks[$storedIndex]=$derivedMachine
+    }
+    $overallPassMachineFailCode=$null;try{Assert-TeamBobPriorComplianceResult $machineFailPrior $chainContext $chainGovernance 'requirements'}catch{$overallPassMachineFailCode=$_.Exception.Data['NativeExitCode']}
+    [System.IO.File]::WriteAllBytes((Join-Path $task.Root 'drafts/requirement-ledger.csv'),$ledgerBytesBefore);[System.IO.File]::WriteAllBytes($ledgerAssessmentPath,$ledgerAssessmentBytesBefore)
+    Assert-ComplianceEqual $overallPassMachineFailCode 30 'Historical overall PASS cannot contain a correctly re-derived blocker machine FAIL'
+    Assert-ComplianceEqual $stateShaMutationCode 30 'Historical machine state-sha mutation is classified correctly'
 
     # A hash-consistent chain still fails when stored machine facts contradict deterministic re-evaluation.
     $machineHistoryTask=New-ComplianceTaskFixture 'MACHINE-HISTORY-1' $bazaarRoot $policyHash $roleHash

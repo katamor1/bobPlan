@@ -237,6 +237,26 @@ function New-TeamBobCheckResult {
     return [ordered]@{ id = [string]$Definition.id; kind = [string]$Definition.kind; status = $Status; evidence = @($Evidence); message = $Message }
 }
 
+function Get-TeamBobSemanticStateBinding {
+    param([object]$State)
+    $semantic=[ordered]@{
+        profileVersion=[string]$State.profileVersion
+        policyVersion=[string]$State.policyVersion
+        taskId=[string]$State.taskId
+        currentPhase=[string]$State.currentPhase
+        completedPhases=@($State.completedPhases|ForEach-Object{[string]$_})
+        workPacketPath=[string]$State.workPacketPath
+        workPacketSha256=[string]$State.workPacketSha256
+        policyBundleSha256=[string]$State.policyBundleSha256
+        roleLedgerSha256=[string]$State.roleLedgerSha256
+        latestResultPath=$(if($State.latestResultPath -is [string]){[string]$State.latestResultPath}else{$null})
+        latestResultSha256=$(if($State.latestResultSha256 -is [string]){[string]$State.latestResultSha256}else{$null})
+    }
+    $bytes=(New-Object System.Text.UTF8Encoding($false)).GetBytes(($semantic|ConvertTo-Json -Compress -Depth 10))
+    $sha=[System.Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
+}
+
 function Get-TeamBobJsonStringValues {
     param([object]$Value)
     $values=@()
@@ -328,12 +348,12 @@ function Invoke-TeamBobMachineCheck {
     $pathEvidence = [ordered]@{ type='path'; value=$Artifact.RelativePath }
     $lineEvidence = [ordered]@{ type='line'; value='1' }
     $shaEvidence = [ordered]@{ type='sha256'; value=$Artifact.Hash }
-    $resultEvidence = [ordered]@{ type='resultHash'; value=$(if ($null -eq $Prerequisite) { $Context.StateHash } else { $Prerequisite.Hash }) }
+    $resultEvidence = [ordered]@{ type='resultHash'; value=$(if ($null -eq $Prerequisite) { $Context.StateBinding } else { $Prerequisite.Hash }) }
     $status = 'PASS'; $message = 'Machine check passed.'; $evidence = @()
     $text = $null
     switch ([string]$Definition.id) {
         'GOV-M-001' { $evidence = @($shaEvidence) }
-        'GOV-M-002' { $evidence = @([ordered]@{type='sha256';value=$Context.StateHash});if($null -ne $Prerequisite){$evidence += $resultEvidence} }
+        'GOV-M-002' { $evidence = @([ordered]@{type='sha256';value=$Context.StateBinding});if($null -ne $Prerequisite){$evidence += $resultEvidence} }
         'GOV-M-003' {
             try { $text = Read-TeamBobUtf8File $Artifact.FullPath 'Governed artifact' 'INTEGRITY_FAILED' } catch { $status='FAIL'; $message=$_.Exception.Message }
             $evidence = @($pathEvidence)
@@ -575,13 +595,15 @@ function Assert-TeamBobPriorReferencedContracts {
     if($assessment.Info.Hash -cne $Result.assessmentSha256){throw(New-TeamBobComplianceFailure 30 'Prior PASS assessment hash changed.')}
     $definitions=@(Get-TeamBobChecklistDefinitions $Governance $phasePolicy)
     $derivedContext=$Context|Select-Object *
-    $storedStateCheck=@($Result.checks|Where-Object{$_.id -ceq 'GOV-M-002'})[0]
-    if($null -ne $storedStateCheck -and @($storedStateCheck.evidence).Count -gt 0 -and $storedStateCheck.evidence[0].type -ceq 'sha256'){$derivedContext.StateHash=[string]$storedStateCheck.evidence[0].value}
+    $phaseIndex=[array]::IndexOf($script:TeamBobPhaseOrder,$Phase)
+    $historicalState=[pscustomobject]@{profileVersion=$Result.profileVersion;policyVersion=$Result.policyVersion;taskId=$Result.taskId;currentPhase=$Phase;completedPhases=@($script:TeamBobPhaseOrder|Select-Object -First $phaseIndex);workPacketPath=$Result.workPacketPath;workPacketSha256=$Result.workPacketSha256;policyBundleSha256=$Result.policyBundleSha256;roleLedgerSha256=$Result.roleLedgerSha256;latestResultPath=$Result.prerequisiteResultPath;latestResultSha256=$Result.prerequisiteResultSha256}
+    $derivedContext|Add-Member -NotePropertyName StateBinding -NotePropertyValue (Get-TeamBobSemanticStateBinding $historicalState) -Force
     foreach($definition in $definitions){
         $resultCheck=@($Result.checks|Where-Object{$_.id -ceq $definition.id})[0]
         if($definition.kind -ceq 'machine'){
             $derivedCheck=Invoke-TeamBobMachineCheck $definition $packet $derivedContext $artifact $prerequisite $Governance
             if(($resultCheck|ConvertTo-Json -Compress -Depth 20) -cne ($derivedCheck|ConvertTo-Json -Compress -Depth 20)){throw(New-TeamBobComplianceFailure 30 "Historical machine result contradicts re-derived facts: $($definition.id)")}
+            if($derivedCheck.status -cne 'PASS'){throw(New-TeamBobComplianceFailure 30 "Historical overall PASS contains a blocker machine failure: $($definition.id)")}
         } elseif($definition.kind -ceq 'ai'){
             $assessmentCheck=$assessment.Checks[[string]$definition.id]
             if($resultCheck.status -cne $assessmentCheck.status -or $resultCheck.message -cne $assessmentCheck.message -or ((@($resultCheck.evidence)|ConvertTo-Json -Compress -Depth 10) -cne (@($assessmentCheck.evidence)|ConvertTo-Json -Compress -Depth 10))){throw(New-TeamBobComplianceFailure 20 "Prior PASS AI result does not match its bound assessment: $($definition.id)")}
