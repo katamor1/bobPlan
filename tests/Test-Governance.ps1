@@ -233,6 +233,51 @@ try {
     Write-GovernanceJson $scalarAssignmentsPath $scalarAssignments
     Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $scalarAssignmentsRoot).Count -gt 0) 'Package validation requires assignments to remain an array'
 
+    $misCasedAssignmentRoot = Copy-GovernanceFixture $governanceRoot 'mis-cased-assignment'
+    $misCasedAssignmentPath = Join-Path $misCasedAssignmentRoot 'roles.json'
+    $misCasedAssignmentRoles = Get-TeamBobGovernanceJson $strictRolesPath
+    $sourceAssignment = $misCasedAssignmentRoles.assignments[0]
+    $misCasedAssignmentRoles.assignments[0] = [pscustomobject][ordered]@{
+        AssignmentId = $sourceAssignment.assignmentId; Role = $sourceAssignment.role; PrincipalId = $sourceAssignment.principalId
+        scope = $sourceAssignment.scope; enabled = $sourceAssignment.enabled
+        validFromUtc = $sourceAssignment.validFromUtc; validUntilUtc = $sourceAssignment.validUntilUtc
+    }
+    Write-GovernanceJson $misCasedAssignmentPath $misCasedAssignmentRoles
+    Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $misCasedAssignmentRoot).Count -gt 0) 'Package validation rejects mis-cased assignment field names'
+    Assert-GovernanceTrue (@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $misCasedAssignmentRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')).Count -gt 0) 'Strict readiness rejects mis-cased assignment field names'
+
+    $misCasedScopeRoot = Copy-GovernanceFixture $governanceRoot 'mis-cased-scope'
+    $misCasedScopePath = Join-Path $misCasedScopeRoot 'roles.json'
+    $misCasedScopeRoles = Get-TeamBobGovernanceJson $strictRolesPath
+    $sourceScope = $misCasedScopeRoles.assignments[0].scope
+    $misCasedScopeRoles.assignments[0].scope = [pscustomobject][ordered]@{
+        AllTasks = $sourceScope.allTasks; TaskIds = @($sourceScope.taskIds); Phases = @($sourceScope.phases)
+    }
+    Write-GovernanceJson $misCasedScopePath $misCasedScopeRoles
+    Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $misCasedScopeRoot).Count -gt 0) 'Package validation rejects mis-cased scope field names'
+    Assert-GovernanceTrue (@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $misCasedScopeRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')).Count -gt 0) 'Strict readiness rejects mis-cased scope field names'
+
+    $duplicateTaskIdsRoot = Copy-GovernanceFixture $governanceRoot 'duplicate-taskids'
+    $duplicateTaskIdsPath = Join-Path $duplicateTaskIdsRoot 'roles.json'
+    $duplicateTaskIdsRoles = Get-TeamBobGovernanceJson $strictRolesPath
+    $duplicateTaskIdsRoles.assignments[0].scope.allTasks = $false
+    $duplicateTaskIdsRoles.assignments[0].scope.taskIds = @('TASK-1', 'TASK-1')
+    Write-GovernanceJson $duplicateTaskIdsPath $duplicateTaskIdsRoles
+    Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $duplicateTaskIdsRoot).Count -gt 0) 'Package validation rejects duplicate taskIds'
+    Assert-GovernanceTrue (@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $duplicateTaskIdsRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z') -TaskId 'TASK-1').Count -gt 0) 'Strict readiness does not count an assignment with duplicate taskIds'
+
+    $duplicatePhasesRoot = Copy-GovernanceFixture $governanceRoot 'duplicate-phases'
+    $duplicatePhasesPath = Join-Path $duplicatePhasesRoot 'roles.json'
+    $duplicatePhasesRoles = Get-TeamBobGovernanceJson $strictRolesPath
+    $duplicatePhasesRoles.assignments[0].scope.phases = @('specification', 'specification')
+    Write-GovernanceJson $duplicatePhasesPath $duplicatePhasesRoles
+    Assert-GovernanceTrue (@(Test-TeamBobGovernancePackage -GovernanceRoot $duplicatePhasesRoot).Count -gt 0) 'Package validation rejects duplicate phases'
+    Assert-GovernanceTrue (@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $duplicatePhasesRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z') -Phase 'specification').Count -gt 0) 'Strict readiness does not count an assignment with duplicate phases'
+
+    $rolesSchema = Get-TeamBobGovernanceJson (Join-Path $governanceRoot 'schemas/roles.schema.json')
+    Assert-GovernanceEqual $rolesSchema.properties.assignments.items.properties.scope.properties.taskIds.uniqueItems $true 'Role schema rejects duplicate taskIds'
+    Assert-GovernanceEqual $rolesSchema.properties.assignments.items.properties.scope.properties.phases.uniqueItems $true 'Role schema rejects duplicate phases'
+
     $strictRoles.assignments[2].principalId = 'principal-spec'
     Write-GovernanceJson $strictRolesPath $strictRoles
     Assert-GovernanceTrue (@(@(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot $strictRoot -NowUtc ([datetime]'2026-09-03T00:00:00Z')) -match 'distinct').Count -gt 0) 'Strict readiness rejects the same principal in two roles'

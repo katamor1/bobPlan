@@ -41,10 +41,23 @@ function Get-TeamBobGovernanceJson {
 function Test-TeamBobGovernanceExactProperties {
     param([object]$Value, [string[]]$Required, [string[]]$Optional = @())
     if (-not ($Value -is [System.Management.Automation.PSCustomObject])) { return $false }
-    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
-    $allowed = @($Required + $Optional | Sort-Object)
-    foreach ($name in $Required) { if ($actual -notcontains $name) { return $false } }
-    foreach ($name in $actual) { if ($allowed -notcontains $name) { return $false } }
+    $actual = @($Value.PSObject.Properties.Name)
+    $allowed = @($Required + $Optional)
+    if ($actual.Count -lt $Required.Count -or $actual.Count -gt $allowed.Count) { return $false }
+    foreach ($requiredName in $Required) {
+        $found = $false
+        foreach ($actualName in $actual) {
+            if ([string]::Equals($actualName, $requiredName, [System.StringComparison]::Ordinal)) { $found = $true; break }
+        }
+        if (-not $found) { return $false }
+    }
+    foreach ($actualName in $actual) {
+        $found = $false
+        foreach ($allowedName in $allowed) {
+            if ([string]::Equals($actualName, $allowedName, [System.StringComparison]::Ordinal)) { $found = $true; break }
+        }
+        if (-not $found) { return $false }
+    }
     return $true
 }
 
@@ -91,6 +104,16 @@ function ConvertFrom-TeamBobGovernanceUtcInstant {
     return $parsed
 }
 
+function Test-TeamBobGovernanceUniqueStrings {
+    param([object[]]$Values)
+    for ($left = 0; $left -lt $Values.Count; $left++) {
+        for ($right = $left + 1; $right -lt $Values.Count; $right++) {
+            if ([string]::Equals([string]$Values[$left], [string]$Values[$right], [System.StringComparison]::Ordinal)) { return $false }
+        }
+    }
+    return $true
+}
+
 function Test-TeamBobGovernanceRoleAssignment {
     param([object]$Assignment)
     $errors = @()
@@ -110,6 +133,7 @@ function Test-TeamBobGovernanceRoleAssignment {
             foreach ($taskId in @($Assignment.scope.taskIds)) {
                 if (-not ($taskId -is [string]) -or [string]::IsNullOrWhiteSpace($taskId)) { $errors += 'shape: role scope taskId' }
             }
+            if (-not (Test-TeamBobGovernanceUniqueStrings @($Assignment.scope.taskIds))) { $errors += 'shape: duplicate role scope taskId' }
             if ($Assignment.scope.allTasks -eq $true -and @($Assignment.scope.taskIds).Count -ne 0) { $errors += 'shape: role scope allTasks/taskIds consistency' }
             if ($Assignment.scope.allTasks -eq $false -and @($Assignment.scope.taskIds).Count -eq 0) { $errors += 'shape: role scope allTasks/taskIds consistency' }
         }
@@ -120,7 +144,7 @@ function Test-TeamBobGovernanceRoleAssignment {
             foreach ($phase in @($Assignment.scope.phases)) {
                 if (-not ($phase -is [string]) -or $phaseIds -cnotcontains $phase) { $errors += 'shape: role scope phase' }
             }
-            if (@($Assignment.scope.phases | Sort-Object -Unique).Count -ne @($Assignment.scope.phases).Count) { $errors += 'shape: duplicate role scope phase' }
+            if (-not (Test-TeamBobGovernanceUniqueStrings @($Assignment.scope.phases))) { $errors += 'shape: duplicate role scope phase' }
         }
     }
     $validFrom = ConvertFrom-TeamBobGovernanceUtcInstant $Assignment.validFromUtc
@@ -273,8 +297,10 @@ function Test-TeamBobGovernancePackage {
     $assignmentIds = @{}
     foreach ($assignment in @($roles.assignments)) {
         $assignmentErrors = @(Test-TeamBobGovernanceRoleAssignment $assignment)
-        foreach ($assignmentError in $assignmentErrors) { $errors += "$assignmentError $($assignment.assignmentId)" }
-        if ($assignmentIds.ContainsKey([string]$assignment.assignmentId)) { $errors += 'ids: duplicate role assignment' } else { $assignmentIds[[string]$assignment.assignmentId] = $true }
+        foreach ($assignmentError in $assignmentErrors) { $errors += $assignmentError }
+        if ($assignmentErrors.Count -eq 0) {
+            if ($assignmentIds.ContainsKey([string]$assignment.assignmentId)) { $errors += 'ids: duplicate role assignment' } else { $assignmentIds[[string]$assignment.assignmentId] = $true }
+        }
     }
 
     foreach ($relativePath in @($expectedFiles | Where-Object { $_ -like 'schemas/*' })) {
