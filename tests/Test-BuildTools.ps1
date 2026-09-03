@@ -736,6 +736,10 @@ try {
     [System.IO.File]::WriteAllText($env:BOB3_BZR_COMMAND_LOG, '')
     $rebuild = Invoke-Task3BuildFixture $buildPath $workPacketPath 'Rebuild' 1
     Assert-Task3BuildOutcome $rebuild 'SUCCEEDED' 0 'Successful Rebuild'
+    . $buildCommonPath
+    $producerShapeAccepted=$true
+    try { Assert-TeamBobBuildResultContract $rebuild.Json 'INTEGRITY_FAILED' } catch { $producerShapeAccepted=$false }
+    Assert-True $producerShapeAccepted 'The shared build-result contract accepts the exact real Invoke-Vc6Build producer shape'
     $rebuildCommand = @(Read-Utf8LinesFixture $env:BOB3_MSDEV_COMMAND_LOG)[0] -split "`t"
     Assert-Equal $rebuildCommand[1] '/REBUILD' 'Rebuild performs exactly the requested /REBUILD action'
 

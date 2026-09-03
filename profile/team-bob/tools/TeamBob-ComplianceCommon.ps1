@@ -176,6 +176,9 @@ function Assert-TeamBobPriorComplianceResult {
     }
     $hasPreviousPath=$Result.prerequisiteResultPath -is [string];$hasPreviousHash=$Result.prerequisiteResultSha256 -is [string]
     if($hasPreviousPath -ne $hasPreviousHash -or ($hasPreviousHash -and $Result.prerequisiteResultSha256 -cnotmatch '^[0-9a-f]{64}$')){throw (New-TeamBobComplianceFailure 20 'Prior result prerequisite reference is invalid.')}
+    $phaseIndex=[array]::IndexOf($script:TeamBobPhaseOrder,$ExpectedPhase)
+    if($phaseIndex -eq 0 -and ($null -ne $Result.prerequisiteResultPath -or $null -ne $Result.prerequisiteResultSha256)){throw(New-TeamBobComplianceFailure 20 'Requirements result must have a null predecessor.')}
+    if($phaseIndex -gt 0 -and (-not $hasPreviousPath -or -not $hasPreviousHash)){throw(New-TeamBobComplianceFailure 20 'Non-requirements result must reference its exact predecessor.')}
 }
 
 function Assert-TeamBobPhaseState {
@@ -200,7 +203,9 @@ function Assert-TeamBobPhaseState {
     $previous = Read-TeamBobComplianceJson $previousPath 'Prerequisite compliance result'
     Assert-TeamBobPriorComplianceResult $previous $Context $Governance $expectedPrefix[-1]
     if ($previous.taskId -cne $Context.TaskId -or $previous.phase -cne $expectedPrefix[-1] -or $previous.status -cne 'PASS' -or $previous.workPacketSha256 -cne $Context.PacketHash -or $previous.policyBundleSha256 -cne $Governance.PolicyHash -or $previous.roleLedgerSha256 -cne $Governance.RoleHash) { throw (New-TeamBobComplianceFailure 20 'Prerequisite result is not the exact prior PASS result.') }
-    return [pscustomobject]@{ Path = [string]$State.latestResultPath; Hash = [string]$State.latestResultSha256; Document = $previous }
+    $prerequisite=[pscustomobject]@{ Path = [string]$State.latestResultPath; Hash = [string]$State.latestResultSha256; Phase=$expectedPrefix[-1]; Document = $previous }
+    [void](Get-TeamBobBoundPriorResult $prerequisite 'requirements' $Context $Governance)
+    return $prerequisite
 }
 
 function Get-TeamBobPhasePolicy {
@@ -230,6 +235,15 @@ function New-TeamBobCheckResult {
     return [ordered]@{ id = [string]$Definition.id; kind = [string]$Definition.kind; status = $Status; evidence = @($Evidence); message = $Message }
 }
 
+function Get-TeamBobJsonStringValues {
+    param([object]$Value)
+    $values=@()
+    if($Value -is [string]){return @([string]$Value)}
+    if($Value -is [System.Array]){foreach($item in @($Value)){$values+=@(Get-TeamBobJsonStringValues $item)};return @($values)}
+    if($Value -is [System.Management.Automation.PSCustomObject]){foreach($property in @($Value.PSObject.Properties)){$values+=@(Get-TeamBobJsonStringValues $property.Value)};return @($values)}
+    return @()
+}
+
 function Get-TeamBobChecklistDefinitions {
     param([object]$Governance, [object]$PhasePolicy)
     $all = @()
@@ -247,30 +261,63 @@ function Get-TeamBobChecklistDefinitions {
     return @($definitions)
 }
 
+function Get-TeamBobMarkdownH2Section {
+    param([string]$Text,[string]$Heading)
+    $pattern='(?ms)^## '+[regex]::Escape($Heading)+'[ \t]*\r?\n(?<body>.*?)(?=^## |\z)'
+    $matches=@([regex]::Matches($Text,$pattern))
+    if($matches.Count -ne 1){return $null}
+    return $matches[0].Groups['body'].Value
+}
+
+function Get-TeamBobRequirementLedgerRows {
+    param([string]$Text)
+    $header='ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State'
+    $lines=@($Text -split "`r?`n")
+    if($lines.Count -eq 0 -or $lines[0] -cne $header){return $null}
+    try{$rows=@(($Text|ConvertFrom-Csv))}catch{return $null}
+    return @($rows)
+}
+
 function Get-TeamBobBoundPriorResult {
     param([object]$Prerequisite,[string]$TargetPhase,[object]$Context,[object]$Governance)
     if($null -eq $Prerequisite){return $null}
-    $current=$Prerequisite.Document;$depth=0
+    $current=$Prerequisite.Document;$expectedPhase=[string]$Prerequisite.Phase;$depth=0
+    if([string]::IsNullOrWhiteSpace($expectedPhase)){$expectedPhase=[string]$current.phase}
+    $visited=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    if($Prerequisite.Path -is [string]){[void]$visited.Add([string]$Prerequisite.Path)}
     while($null -ne $current){
         $depth++;if($depth -gt $script:TeamBobPhaseOrder.Count){throw (New-TeamBobComplianceFailure 20 'Prior result chain exceeds the six-phase bound.')}
-        Assert-TeamBobPriorComplianceResult $current $Context $Governance ([string]$current.phase)
+        Assert-TeamBobPriorComplianceResult $current $Context $Governance $expectedPhase
         if($current.taskId -cne $Context.TaskId -or $current.workPacketSha256 -cne $Context.PacketHash -or $current.policyBundleSha256 -cne $Governance.PolicyHash -or $current.roleLedgerSha256 -cne $Governance.RoleHash -or $current.status -cne 'PASS'){throw (New-TeamBobComplianceFailure 20 'Prior result chain identity is invalid.')}
-        if($current.phase -ceq $TargetPhase){return $current}
-        if($null -eq $current.prerequisiteResultPath -or $null -eq $current.prerequisiteResultSha256){return $null}
+        if($expectedPhase -ceq $TargetPhase){return $current}
+        $expectedIndex=[array]::IndexOf($script:TeamBobPhaseOrder,$expectedPhase)
+        if($expectedIndex -le 0){return $null}
         $path=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$current.prerequisiteResultPath)) 'Prior result chain' 'INTEGRITY_FAILED'
+        $relative=Get-TeamBobRelativePath $Context.TaskRoot $path
+        if(-not $visited.Add($relative)){throw(New-TeamBobComplianceFailure 20 'Prior result chain contains a cycle.')}
         $physical=Get-TeamBobPhysicalPath $path 'Prior result chain' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $physical $Context.ResultsPhysical 'Prior result chain' 'INTEGRITY_FAILED'
         if((Get-TeamBobGovernanceFileHash $path) -cne $current.prerequisiteResultSha256){throw (New-TeamBobComplianceFailure 30 'Prior result chain hash changed.')}
         $current=Read-TeamBobComplianceJson $path 'Prior result chain'
+        $expectedPhase=$script:TeamBobPhaseOrder[$expectedIndex-1]
     }
     return $null
 }
 
 function Get-TeamBobTask2BuildResult {
-    param([object]$Artifact)
+    param([object]$Artifact,[object]$Packet,[object]$Context)
     $build=Read-TeamBobComplianceJson $Artifact.FullPath 'Build result'
-    Assert-TeamBobComplianceExactProperties $build @('schemaVersion','status','action','preSourceInventory','postSourceInventory','preBzrInventory','postBzrInventory','preAllowedHashes','postAllowedHashes') 'Task 2 build result'
-    if($build.schemaVersion -cne '1.0' -or @('SUCCEEDED','CODE_FAILED_RETRYABLE','CODE_FAILED_STOP','ENVIRONMENT_FAILED','TIMED_OUT','INTEGRITY_FAILED') -cnotcontains $build.status -or @('Make','Rebuild') -cnotcontains $build.action){throw (New-TeamBobComplianceFailure 20 'Build result identity or status is invalid.')}
-    foreach($field in @('preSourceInventory','postSourceInventory','preBzrInventory','postBzrInventory','preAllowedHashes','postAllowedHashes')){if(-not($build.$field -is [System.Array])){throw (New-TeamBobComplianceFailure 20 "Build result $field must be an array.")}}
+    try{Assert-TeamBobBuildResultContract $build 'CONTRACT_INVALID'}catch{throw(New-TeamBobComplianceFailure 20 $_.Exception.Message)}
+    if($build.taskId -cne $Context.TaskId -or $build.action -cne 'Rebuild' -or $build.status -cne 'SUCCEEDED' -or [int]$build.exitCode -ne 0 -or $build.workPacket -cne $Context.PacketPath -or $build.buildProfileId -cne $Packet.'Build Profile ID' -or -not([string]$build.resultPath).Equals($Artifact.FullPath,[System.StringComparison]::OrdinalIgnoreCase)){throw(New-TeamBobComplianceFailure 20 'Build result does not identify the current task successful Rebuild artifact.')}
+    if(-not(Test-TeamBobInteger $build.processId) -or [int64]$build.processId -le 0 -or -not(Test-TeamBobInteger $build.processExitCode) -or [int]$build.processExitCode -ne 0 -or $build.captureComplete -ne $true){throw(New-TeamBobComplianceFailure 20 'Successful Rebuild process evidence is invalid.')}
+    $started=ConvertFrom-TeamBobGovernanceUtcInstant $build.processStartedAt;$finished=ConvertFrom-TeamBobGovernanceUtcInstant $build.processFinishedAt
+    if($null -eq $started -or $null -eq $finished -or $finished -lt $started){throw(New-TeamBobComplianceFailure 20 'Successful Rebuild timestamps are invalid.')}
+    if($build.preBazaarStatus -cne $build.postBazaarStatus -or $build.preBazaarBranch -cne $build.postBazaarBranch -or $build.preBazaarRevision -cne $build.postBazaarRevision -or $build.preBazaarBranch -cne $Packet.'Bazaar Branch' -or $build.preBazaarRevision -cne $Packet.'Bazaar Full Revision ID'){throw(New-TeamBobComplianceFailure 20 'Build result Bazaar pre/post identity is inconsistent.')}
+    foreach($field in @('preSourceInventory','preBzrInventory','preAllowedHashes')){$postField='post'+$field.Substring(3);if((@($build.$field)-join "`n") -cne (@($build.$postField)-join "`n")){throw(New-TeamBobComplianceFailure 20 "Build result $field integrity pair differs.")}}
+    $expectedAllowed=@()
+    foreach($relative in @($Packet.'Allowed Files')){$source=Get-TeamBobCanonicalPath (Join-Path ([string]$Packet.'Bazaar Root') $relative) 'Allowed file' 'INTEGRITY_FAILED';$physical=Get-TeamBobPhysicalPath $source 'Allowed file' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $physical $Context.BazaarPhysical 'Allowed file' 'INTEGRITY_FAILED';$expectedAllowed+=([string]$relative+'|'+(Get-TeamBobGovernanceFileHash $source))}
+    $expectedAllowed=@($expectedAllowed|Sort-Object)
+    if((@($build.preAllowedHashes)-join "`n") -cne ($expectedAllowed-join "`n")){throw(New-TeamBobComplianceFailure 30 'Build result Allowed File hashes do not match current bound bytes.')}
+    if(@($build.invokedArguments) -cnotcontains '/REBUILD' -or @($build.invokedArguments) -ccontains '/MAKE'){throw(New-TeamBobComplianceFailure 20 'Build result arguments do not identify exactly a Rebuild action.')}
     return $build
 }
 
@@ -293,7 +340,9 @@ function Invoke-TeamBobMachineCheck {
             if ($null -eq $text) { try { $text = Read-TeamBobUtf8File $Artifact.FullPath 'Governed artifact' 'INTEGRITY_FAILED' } catch { $text = '' } }
             $glossary = Read-TeamBobComplianceJson (Join-Path $Governance.Roots.GovernanceRoot 'glossary.json') 'Glossary'
             $foundLine = 0
-            $lines = @($text -split "`r?`n")
+            $lines = if([System.IO.Path]::GetExtension($Artifact.FullPath) -ceq '.json'){
+                try{@(Get-TeamBobJsonStringValues ($text|ConvertFrom-Json))}catch{@($text -split "`r?`n")}
+            } else {@($text -split "`r?`n")}
             foreach ($term in @($glossary.terms)) {
                 foreach ($forbidden in @($term.forbidden)) {
                     for ($index=0; $index -lt $lines.Count; $index++) {
@@ -309,21 +358,20 @@ function Invoke-TeamBobMachineCheck {
         }
         'REQ-M-001' {
             if ($null -eq $text) { $text = Read-TeamBobUtf8File $Artifact.FullPath 'Requirement ledger' 'INTEGRITY_FAILED' }
-            $rows = @($text -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            $header = $rows[0]
-            if ($header -cne 'ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State') { $status='FAIL'; $message='Requirement ledger header is invalid.' }
+            $rows = @(Get-TeamBobRequirementLedgerRows $text)
+            if ($rows.Count -eq 0) { $status='FAIL'; $message='Requirement ledger header or CSV encoding is invalid.';$rows=@() }
             $seenReqIds=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-            for ($rowIndex=1;$rowIndex -lt $rows.Count;$rowIndex++) {
-                $columns=@($rows[$rowIndex].Split(','))
-                if ($columns.Count -ne 8 -or [string]::IsNullOrWhiteSpace($columns[0]) -or [string]::IsNullOrWhiteSpace($columns[1])) { $status='FAIL';$message="Requirement ledger row $($rowIndex+1) has a blank ReqID/source anchor or invalid shape.";continue }
-                if (-not $seenReqIds.Add($columns[0])) { $status='FAIL';$message="Requirement ledger duplicates ReqID $($columns[0])." }
+            for ($rowIndex=0;$rowIndex -lt $rows.Count;$rowIndex++) {
+                $row=$rows[$rowIndex]
+                if ([string]::IsNullOrWhiteSpace($row.ReqID) -or [string]::IsNullOrWhiteSpace($row.'Immutable Source Anchor')) { $status='FAIL';$message="Requirement ledger row $($rowIndex+2) has a blank ReqID/source anchor.";continue }
+                if (-not $seenReqIds.Add([string]$row.ReqID)) { $status='FAIL';$message="Requirement ledger duplicates ReqID $($row.ReqID)." }
             }
             foreach ($reqId in @($Packet.ReqIDs)) { if (-not $seenReqIds.Contains([string]$reqId)) { $status='FAIL'; $message="Requirement ledger is missing ReqID $reqId" } }
             $evidence=@($pathEvidence,$lineEvidence)
         }
         'SPEC-M-001' {
             if ($null -eq $text) { $text=Read-TeamBobUtf8File $Artifact.FullPath 'Specification' 'INTEGRITY_FAILED' }
-            foreach ($heading in @('## ReqIDs','## Scope','## Acceptance Criteria','## Evidence','## Human Approval')) { if ($text.IndexOf($heading,[System.StringComparison]::Ordinal) -lt 0) { $status='FAIL'; $message="Specification is missing $heading" } }
+            foreach ($heading in @('ReqIDs','Scope','Acceptance Criteria','Evidence','Human Approval')) { if ($null -eq (Get-TeamBobMarkdownH2Section $text $heading)) { $status='FAIL'; $message="Specification is missing exact H2 $heading" } }
             $evidence=@($pathEvidence,$lineEvidence)
         }
         'SPEC-M-002' {
@@ -336,8 +384,10 @@ function Invoke-TeamBobMachineCheck {
                 if((Get-TeamBobGovernanceFileHash $ledgerPath) -cne $requirementsResult.artifactSha256){throw (New-TeamBobComplianceFailure 30 'Requirement ledger hash changed after its PASS result.')}
                 $ledgerText=Read-TeamBobUtf8File $ledgerPath 'Requirement ledger' 'INTEGRITY_FAILED'
                 $ledgerIds=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
-                foreach ($row in @($ledgerText -split "`r?`n" | Select-Object -Skip 1 | Where-Object {-not [string]::IsNullOrWhiteSpace($_)})) { $columns=$row.Split(',');if($columns.Count -gt 0){[void]$ledgerIds.Add($columns[0])} }
-                $reqSection=[regex]::Match($text,'(?ms)^## ReqIDs\s*\r?\n(?<body>.*?)(?=^## |\z)').Groups['body'].Value
+                $ledgerRows=@(Get-TeamBobRequirementLedgerRows $ledgerText)
+                if($ledgerRows.Count -eq 0){throw(New-TeamBobComplianceFailure 20 'Bound requirement ledger CSV is invalid.')}
+                foreach ($row in @($ledgerRows)) {[void]$ledgerIds.Add([string]$row.ReqID)}
+                $reqSection=Get-TeamBobMarkdownH2Section $text 'ReqIDs'
                 $specIds=@([regex]::Matches($reqSection,'(?m)^\s*(REQ-[A-Za-z0-9_-]+)\s*$')|ForEach-Object{$_.Groups[1].Value})
                 if ($specIds.Count -eq 0) { $status='FAIL';$message='Specification ReqIDs section is empty.' }
                 foreach ($reqId in $specIds) { if (-not $ledgerIds.Contains([string]$reqId)) { $status='FAIL';$message="Specification ReqID is absent from requirement ledger: $reqId" } }
@@ -356,7 +406,7 @@ function Invoke-TeamBobMachineCheck {
             $evidence=@($resultEvidence)
         }
         'IMPL-M-002' {
-            $build=Get-TeamBobTask2BuildResult $Artifact
+            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context
             if ((@($build.preSourceInventory) -join "`n") -cne (@($build.postSourceInventory) -join "`n") -or (@($build.preBzrInventory) -join "`n") -cne (@($build.postBzrInventory) -join "`n") -or (@($build.preAllowedHashes) -join "`n") -cne (@($build.postAllowedHashes) -join "`n")) { $status='FAIL'; $message='Build result records post-build source, allowed-file, or Bazaar integrity drift.' }
             $evidence=@($pathEvidence,$shaEvidence)
         }
@@ -372,24 +422,35 @@ function Invoke-TeamBobMachineCheck {
             try{Assert-TeamBobAllowedEncoding $allowedObjects}catch{$status='FAIL';$message=$_.Exception.Message}
         }
         'IMPL-M-004' {
-            $build=Get-TeamBobTask2BuildResult $Artifact
+            $build=Get-TeamBobTask2BuildResult $Artifact $Packet $Context
             if ($build.status -cne 'SUCCEEDED' -or $build.action -cne 'Rebuild') { $status='FAIL'; $message='Implementation requires a successful final Rebuild result.' }
             $evidence=@([ordered]@{type='command';value='Rebuild'},$resultEvidence)
         }
         'REV-M-001' {
             if ($null -eq $text) { $text=Read-TeamBobUtf8File $Artifact.FullPath 'Code review' 'INTEGRITY_FAILED' }
-            foreach ($heading in @('## ReqIDs','## Allowed Files','## Findings','## Evidence','## Human Disposition')) { if ($text.IndexOf($heading,[System.StringComparison]::Ordinal) -lt 0) { $status='FAIL'; $message="Code review is missing $heading" } }
-            $findings=[regex]::Match($text,'(?ms)^## Findings\s*\r?\n(?<body>.*?)(?=^## |\z)').Groups['body'].Value.Trim()
+            foreach ($heading in @('ReqIDs','Allowed Files','Findings','Evidence','Human Disposition')) { if ($null -eq (Get-TeamBobMarkdownH2Section $text $heading)) { $status='FAIL'; $message="Code review is missing exact H2 $heading" } }
+            $findingSection=Get-TeamBobMarkdownH2Section $text 'Findings'
+            $findings=if($null -eq $findingSection){''}else{$findingSection.Trim()}
             if ($findings -cne 'No findings.') {
                 $findingLines=@($findings -split "`r?`n" | Where-Object {-not [string]::IsNullOrWhiteSpace($_)})
                 if ($findingLines.Count -eq 0) { $status='FAIL';$message='Review must contain structured findings or the exact clean declaration.' }
-                foreach ($findingLine in $findingLines) { if ($findingLine -cnotmatch '^\[(?:BLOCKER|WARNING)\]\s+ReqID=[A-Za-z0-9_-]+;\s+Path=.+;\s+Line=[0-9]+;\s+Message=.+$') { $status='FAIL';$message='Review finding is not in the required structured form.' } }
+                $knownIds=@();foreach($policyPhase in @($Governance.Policy.phases)){$knownIds+=@(Get-TeamBobChecklistDefinitions $Governance $policyPhase|ForEach-Object{[string]$_.id})}
+                foreach ($findingLine in $findingLines) {
+                    $match=[regex]::Match($findingLine,'^\[(?<severity>BLOCKER|WARNING)\] CheckId=(?<check>[A-Z]+-[AMH]-[0-9]{3}); ReqID=(?<req>REQ-[A-Za-z0-9_-]+); Path=(?<path>[^;]+); Line=(?<line>[1-9][0-9]*); Evidence=(?<evidence>[^;]+); Rationale=(?<rationale>[^;]+); Action=(?<action>[^;]+); Disposition=(?<disposition>OPEN|RESOLVED|ACCEPTED)$')
+                    if(-not $match.Success){$status='FAIL';$message='Review finding is not in the required structured form.';continue}
+                    $relative=$match.Groups['path'].Value.Replace('\','/')
+                    if($knownIds -cnotcontains $match.Groups['check'].Value -or @($Packet.ReqIDs) -cnotcontains $match.Groups['req'].Value -or @($Packet.'Allowed Files') -cnotcontains $relative){$status='FAIL';$message='Review finding references an unknown check, requirement, or Allowed File.';continue}
+                    if($relative -match '(^|/)\.\.?(/|$)|(^|/)\.bzr(/|$)' -or [System.IO.Path]::IsPathRooted($relative)){$status='FAIL';$message='Review finding path is not a normalized Allowed File.';continue}
+                    $source=Get-TeamBobCanonicalPath (Join-Path ([string]$Packet.'Bazaar Root') $relative) 'Review finding source' 'INTEGRITY_FAILED'
+                    $sourceText=Read-TeamBobUtf8File $source 'Review finding source' 'INTEGRITY_FAILED'
+                    if([int]$match.Groups['line'].Value -gt @($sourceText -split "`r?`n").Count){$status='FAIL';$message='Review finding source line is out of range.'}
+                }
             }
             $evidence=@($pathEvidence,$lineEvidence)
         }
         'TEST-M-001' {
             if ($null -eq $text) { $text=Read-TeamBobUtf8File $Artifact.FullPath 'Test specification' 'INTEGRITY_FAILED' }
-            $cases=[regex]::Match($text,'(?ms)^## Test Cases\s*\r?\n(?<body>.*?)(?=^## |\z)').Groups['body'].Value
+            $cases=Get-TeamBobMarkdownH2Section $text 'Test Cases';if($null -eq $cases){$cases='';$status='FAIL';$message='Test specification is missing exact Test Cases H2.'}
             foreach ($reqId in @($Packet.ReqIDs)) {
                 $tokenPattern='(?<![A-Za-z0-9_-])'+[regex]::Escape([string]$reqId)+'(?![A-Za-z0-9_-])'
                 if (-not [regex]::IsMatch($cases,$tokenPattern)) { $status='FAIL'; $message="Test cases do not map ReqID $reqId" }
@@ -399,7 +460,7 @@ function Invoke-TeamBobMachineCheck {
             else{
                 $specPath=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot 'drafts/external-spec.md') 'Specification' 'INTEGRITY_FAILED';$specPhysical=Get-TeamBobPhysicalPath $specPath 'Specification' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $specPhysical $Context.DraftsPhysical 'Specification' 'INTEGRITY_FAILED'
                 if((Get-TeamBobGovernanceFileHash $specPath) -cne $specificationResult.artifactSha256){throw (New-TeamBobComplianceFailure 30 'Specification hash changed after its PASS result.')}
-                $specText=Read-TeamBobUtf8File $specPath 'Specification' 'INTEGRITY_FAILED';$acceptance=[regex]::Match($specText,'(?ms)^## Acceptance Criteria\s*\r?\n(?<body>.*?)(?=^## |\z)').Groups['body'].Value
+                $specText=Read-TeamBobUtf8File $specPath 'Specification' 'INTEGRITY_FAILED';$acceptance=Get-TeamBobMarkdownH2Section $specText 'Acceptance Criteria'
                 $acceptanceIds=@([regex]::Matches($acceptance,'(?m)^\s*([A-Za-z0-9_-]+):\s*.+$')|ForEach-Object{$_.Groups[1].Value})
                 if($acceptanceIds.Count -eq 0){$status='FAIL';$message='Bound specification has no identified acceptance criteria.'}
             }
@@ -415,7 +476,7 @@ function Invoke-TeamBobMachineCheck {
 }
 
 function Read-TeamBobAssessment {
-    param([object]$Context,[object]$Governance,[object]$Artifact,[object]$PhasePolicy,[string]$Phase,[string]$Path)
+    param([object]$Context,[object]$Governance,[object]$Artifact,[object]$PhasePolicy,[string]$Phase,[string]$Path,[object]$Prerequisite,[object]$Approval)
     $info=Get-TeamBobGovernedRelativeFile $Context $Path 'Assessment'
     $document=Read-TeamBobComplianceJson $info.FullPath 'Compliance assessment'
     Assert-TeamBobComplianceExactProperties $document @('schemaVersion','profileVersion','policyVersion','taskId','phase','workPacketSha256','policyBundleSha256','roleLedgerSha256','artifactPath','artifactSha256','checks') 'Compliance assessment'
@@ -429,19 +490,23 @@ function Read-TeamBobAssessment {
     $validated=@{}
     for ($index=0;$index -lt @($document.checks).Count;$index++) {
         $check=$document.checks[$index]
+        $definition=@($definitions|Where-Object{$_.id -ceq $check.id})[0]
+        $supportValid=$true
         Assert-TeamBobComplianceExactProperties $check @('id','status','evidence','message') "Assessment check $index"
         if (@('PASS','FAIL','NOT_APPLICABLE','NEEDS_HUMAN_REVIEW') -cnotcontains $check.status -or -not ($check.message -is [string]) -or [string]::IsNullOrWhiteSpace($check.message) -or -not ($check.evidence -is [System.Array])) { throw (New-TeamBobComplianceFailure 20 "Assessment check has invalid values: $($check.id)") }
         foreach ($item in @($check.evidence)) {
             Assert-TeamBobComplianceExactProperties $item @('type','value') "Assessment evidence $($check.id)"
             if (@('path','line','sha256','rationale','command','approvalRecord','resultHash') -cnotcontains $item.type -or -not ($item.value -is [string]) -or [string]::IsNullOrWhiteSpace($item.value)) { throw (New-TeamBobComplianceFailure 20 "Assessment evidence is invalid: $($check.id)") }
             switch([string]$item.type){
-                'path' {$evidenceFull=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$item.value)) 'Assessment evidence path' 'INTEGRITY_FAILED';if((-not (Test-TeamBobPathAtOrBelow $evidenceFull $Context.TaskRoot)) -or (-not (Test-Path -LiteralPath $evidenceFull -PathType Leaf))){throw(New-TeamBobComplianceFailure 20 'Assessment path evidence is not a governed task file.')} $evidencePhysical=Get-TeamBobPhysicalPath $evidenceFull 'Assessment evidence path' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $evidencePhysical $Context.TaskPhysical 'Assessment evidence path' 'INTEGRITY_FAILED'}
-                'line' {if($item.value -cnotmatch '^[1-9][0-9]*$'){throw(New-TeamBobComplianceFailure 20 'Assessment line evidence must be a positive integer.')}}
-                'sha256' {if($item.value -cnotmatch '^[0-9a-f]{64}$'){throw(New-TeamBobComplianceFailure 20 'Assessment SHA-256 evidence is malformed.')}}
-                'resultHash' {if($item.value -cnotmatch '^[0-9a-f]{64}$'){throw(New-TeamBobComplianceFailure 20 'Assessment result-hash evidence is malformed.')}}
+                'path' {$evidenceFull=Get-TeamBobCanonicalPath (Join-Path $Context.TaskRoot ([string]$item.value)) 'Assessment evidence path' 'INTEGRITY_FAILED';if((-not (Test-TeamBobPathAtOrBelow $evidenceFull $Context.TaskRoot)) -or (-not (Test-Path -LiteralPath $evidenceFull -PathType Leaf))){throw(New-TeamBobComplianceFailure 30 'Assessment path evidence escapes governed task files or is missing.')} $evidencePhysical=Get-TeamBobPhysicalPath $evidenceFull 'Assessment evidence path' 'Leaf' 'INTEGRITY_FAILED';Assert-TeamBobPhysicalChild $evidencePhysical $Context.TaskPhysical 'Assessment evidence path' 'INTEGRITY_FAILED';if((Get-TeamBobRelativePath $Context.TaskRoot $evidenceFull) -cne $Artifact.RelativePath){$supportValid=$false}}
+                'line' {if($item.value -cnotmatch '^[1-9][0-9]*$'){throw(New-TeamBobComplianceFailure 20 'Assessment line evidence must be a positive integer.')} $artifactText=Read-TeamBobUtf8File $Artifact.FullPath 'Assessed artifact' 'INTEGRITY_FAILED';if([int64]$item.value -gt @($artifactText -split "`r?`n").Count){$supportValid=$false}}
+                'sha256' {if($item.value -cnotmatch '^[0-9a-f]{64}$'){throw(New-TeamBobComplianceFailure 20 'Assessment SHA-256 evidence is malformed.')}if($item.value -cne $Artifact.Hash){throw(New-TeamBobComplianceFailure 30 'Assessment SHA-256 evidence does not match assessed artifact bytes.')}}
+                'resultHash' {if($item.value -cnotmatch '^[0-9a-f]{64}$'){throw(New-TeamBobComplianceFailure 20 'Assessment result-hash evidence is malformed.')}if($null -eq $Prerequisite -or $item.value -cne $Prerequisite.Hash){throw(New-TeamBobComplianceFailure 30 'Assessment result-hash evidence does not match its bound predecessor.')}}
+                'approvalRecord' {if($null -eq $Approval -or $item.value -cne $Approval.Info.RelativePath){$supportValid=$false}}
                 'command' {if(@('Make','Rebuild') -cnotcontains $item.value){throw(New-TeamBobComplianceFailure 20 'Assessment command evidence is not a fixed command.')}}
             }
         }
+        if($check.status -ceq 'PASS' -and ((-not $supportValid) -or (-not (Test-TeamBobEvidenceTypes @($check.evidence) @($definition.requiredEvidence))))){$check.status='NEEDS_HUMAN_REVIEW';$check.message='Assessment PASS evidence is missing or cannot be verified against the assessed artifact.'}
         $validated[[string]$check.id]=$check
     }
     return [pscustomobject]@{ Info=$info; Document=$document; Checks=$validated }

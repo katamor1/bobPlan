@@ -24,11 +24,11 @@ try {
     if (-not ($artifact.RelativePath -clike ([string]$phasePolicy.artifact).Replace('\','/'))) { throw (New-TeamBobComplianceFailure 20 'Artifact does not match the policy phase artifact.') }
     $state=Read-TeamBobComplianceJson $context.StatePath 'Phase state'
     $prerequisite=Assert-TeamBobPhaseState $state $context $governance $Phase
-    $assessment=Read-TeamBobAssessment $context $governance $artifact $phasePolicy $Phase $AssessmentPath
     $now=[datetimeoffset]::UtcNow
     $approval=$null
     if ($null -ne $phasePolicy.completionApprovalRole) { $approval=Read-TeamBobApprovalForPhase $context $governance $artifact $prerequisite $phasePolicy $assignments $Phase $ApprovalRecordPath $now }
     elseif (-not [string]::IsNullOrWhiteSpace($ApprovalRecordPath)) { throw (New-TeamBobComplianceFailure 20 'ApprovalRecordPath is not permitted for this phase.') }
+    $assessment=Read-TeamBobAssessment $context $governance $artifact $phasePolicy $Phase $AssessmentPath $prerequisite $approval
 
     $definitions=Get-TeamBobChecklistDefinitions $governance $phasePolicy
     $checks=@()

@@ -106,6 +106,18 @@ function Get-LatestComplianceResult {
     param([string]$TaskRoot, [string]$Phase)
     return Get-ChildItem -LiteralPath (Join-Path $TaskRoot 'results') -Filter "compliance-$Phase-*.json" -File | Sort-Object Name | Select-Object -Last 1
 }
+function New-ComplianceBuildResult {
+    param([string]$Path,[string]$TaskId,[string]$WorkPacket,[string]$BuildProfileId,[string]$BazaarBranch,[string]$BazaarRevision,[string]$AllowedPath,[string]$AllowedHash)
+    $root=Split-Path -Parent (Split-Path -Parent $Path)
+    return [ordered]@{
+        schemaVersion='1.0';status='SUCCEEDED';exitCode=0;message='Fixture producer-shaped successful Rebuild.';taskId=$TaskId;action='Rebuild';attempt=1
+        workPacket=$WorkPacket;buildProfileId=$BuildProfileId;sandboxPath=(Join-Path $root 'sandbox');logDirectory=(Join-Path $root 'logs');stdoutPath=(Join-Path $root 'logs/stdout.log');stderrPath=(Join-Path $root 'logs/stderr.log')
+        outputLogPath=(Join-Path $root 'logs/build.log');processId=1234;processExitCode=0;processStartedAt='2026-09-04T00:00:00.0000000Z';processFinishedAt='2026-09-04T00:00:01.0000000Z'
+        terminationComplete=$true;captureComplete=$true;preBazaarStatus='';postBazaarStatus='';preBazaarBranch=$BazaarBranch;postBazaarBranch=$BazaarBranch;preBazaarRevision=$BazaarRevision;postBazaarRevision=$BazaarRevision
+        preSourceInventory=@('F|src/example.cpp|1|'+$AllowedHash);postSourceInventory=@('F|src/example.cpp|1|'+$AllowedHash);preBzrInventory=@('F|branch.conf|1|'+('1'*64));postBzrInventory=@('F|branch.conf|1|'+('1'*64))
+        preAllowedHashes=@($AllowedPath+'|'+$AllowedHash);postAllowedHashes=@($AllowedPath+'|'+$AllowedHash);expectedArtifacts=@('bin/fixture.exe');invokedArguments=@('fixture.dsp','/REBUILD','Fixture - Win32 Release','/OUT',(Join-Path $root 'logs/build.log'));resultPath=$Path
+    }
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $profileRoot = Join-Path $repoRoot 'profile'
@@ -163,14 +175,17 @@ try {
         [pscustomobject]@{ Phase='requirements'; Artifact='drafts/requirement-ledger.csv'; Text="ReqID,Immutable Source Anchor,Interpretation,Acceptance Criteria,QA Links,QA Status,Evidence,Human Approval State`r`nREQ-100,WORD-1#1,Interpretation,Acceptance,QA-1,CLOSED,Evidence,N/A`r`n"; Ai=@('GOV-A-001','REQ-A-001'); Assignment=$null },
         [pscustomobject]@{ Phase='specification'; Artifact='drafts/external-spec.md'; Text="# External Specification`r`n## ReqIDs`r`nREQ-100`r`n## Scope`r`nScope.`r`n## Acceptance Criteria`r`nAC-1: Acceptance.`r`n## Evidence`r`nEvidence.`r`n## Human Approval`r`nPending.`r`n"; Ai=@('GOV-A-001','SPEC-A-001'); Assignment='ASSIGN-SPEC' },
         [pscustomobject]@{ Phase='impact'; Artifact='drafts/impact-analysis.md'; Text="# Impact Analysis`r`n| Area | Impact | Evidence | Disposition |`r`n| RT | none | x | clear |`r`n| Safety | none | x | clear |`r`n| Board | none | x | clear |`r`n| Driver | none | x | clear |`r`n| ABI | none | x | clear |`r`n| Build | none | x | clear |`r`n| Customer Branch | none | x | clear |`r`n"; Ai=@('GOV-A-001','IMP-A-001'); Assignment='ASSIGN-IMPL' },
-        [pscustomobject]@{ Phase='implementation'; Artifact='results/build-result-fixture.json'; Text=('{"schemaVersion":"1.0","status":"SUCCEEDED","action":"Rebuild","preSourceInventory":[],"postSourceInventory":[],"preBzrInventory":[],"postBzrInventory":[],"preAllowedHashes":[],"postAllowedHashes":[]}' + [Environment]::NewLine); Ai=@('GOV-A-001','IMPL-A-001'); Assignment=$null },
+        [pscustomobject]@{ Phase='implementation'; Artifact='results/build-result-fixture.json'; Text=$null; Ai=@('GOV-A-001','IMPL-A-001'); Assignment=$null },
         [pscustomobject]@{ Phase='review'; Artifact='drafts/code-review.md'; Text="# Code Review`r`n## ReqIDs`r`nREQ-100`r`n## Allowed Files`r`nsrc/example.cpp`r`n## Findings`r`nNo findings.`r`n## Evidence`r`nEvidence.`r`n## Human Disposition`r`nPending.`r`n"; Ai=@('GOV-A-001','REV-A-001'); Assignment='ASSIGN-REVIEW' },
         [pscustomobject]@{ Phase='test'; Artifact='drafts/test-spec.md'; Text="# Test Specification`r`n## ReqIDs`r`nREQ-100`r`n## Acceptance Criteria`r`nAC-1: Acceptance.`r`n## Test Cases`r`nTEST-1: REQ-100; AC-1.`r`n## Build Evidence`r`nEvidence.`r`n## Human Approval`r`nPending.`r`n"; Ai=@('GOV-A-001','TEST-A-001'); Assignment='ASSIGN-SPEC' }
     )
 
     foreach ($phase in $phaseData) {
         $artifactPath = Join-Path $task.Root $phase.Artifact
-        Write-ComplianceUtf8 $artifactPath $phase.Text
+        if($phase.Phase -ceq 'implementation'){
+            $allowedHash=Get-ComplianceHash (Join-Path $bazaarRoot 'src/example.cpp')
+            Write-ComplianceJson $artifactPath (New-ComplianceBuildResult $artifactPath 'CHAIN-1' $task.Packet 'fixture-vc6' 'fixture-branch' 'fixture-revision' 'src/example.cpp' $allowedHash)
+        } else { Write-ComplianceUtf8 $artifactPath $phase.Text }
         $packetHash = Get-ComplianceHash $task.Packet
         $artifactHash = Get-ComplianceHash $artifactPath
         $assessmentPath = Join-Path $task.Root ("drafts/assessment-" + $phase.Phase + '.json')
@@ -206,6 +221,18 @@ try {
     $chainPacket = Get-CanonicalPacketObject $task.Packet
     $chainContext = Get-TeamBobTaskGovernanceContext $task.Packet $chainPacket
     $chainGovernance = Get-TeamBobCurrentGovernance (Join-Path $fixtureProfile 'team-bob/tools') $chainPacket
+    $producerBuildPath=Join-Path $task.Root 'results/build-result-fixture.json'
+    $producerBuild=Get-Content -Raw -LiteralPath $producerBuildPath|ConvertFrom-Json
+    foreach($invalidBuildCase in @('missing','extra','bad-exit')){
+        $invalidBuild=$producerBuild|ConvertTo-Json -Depth 30|ConvertFrom-Json
+        if($invalidBuildCase -ceq 'missing'){$invalidBuild.PSObject.Properties.Remove('taskId')}
+        elseif($invalidBuildCase -ceq 'extra'){$invalidBuild|Add-Member -NotePropertyName unsupported -NotePropertyValue $true}
+        else{$invalidBuild.exitCode=10}
+        $invalidBuildPath=Join-Path $task.Root ("results/build-result-invalid-$invalidBuildCase.json");Write-ComplianceJson $invalidBuildPath $invalidBuild
+        $invalidInfo=[pscustomobject]@{FullPath=$invalidBuildPath;RelativePath=("results/build-result-invalid-$invalidBuildCase.json");Hash=(Get-ComplianceHash $invalidBuildPath)}
+        $invalidRejected=$false;try{[void](Get-TeamBobTask2BuildResult $invalidInfo $chainPacket $chainContext)}catch{$invalidRejected=$true}
+        Assert-ComplianceTrue $invalidRejected "Build-result contract rejects the $invalidBuildCase producer-shape violation"
+    }
     $allDefinitions = @()
     foreach ($checklistName in @('checklists/authoring.json','checklists/review.json')) { $allDefinitions += @((Get-Content -Raw -LiteralPath (Join-Path $governanceRoot $checklistName) | ConvertFrom-Json).checks) }
     $badLedgerPath = Join-Path $task.Root 'drafts/bad-ledger.csv'
@@ -218,7 +245,7 @@ try {
     Write-ComplianceUtf8 $badSpecPath "# External Specification`r`n## ReqIDs`r`nREQ-100`r`nREQ-UNKNOWN`r`n## Scope`r`nScope`r`n## Acceptance Criteria`r`nAcceptance`r`n## Evidence`r`nEvidence`r`n## Human Approval`r`nPending`r`n"
     $badSpecInfo=[pscustomobject]@{FullPath=$badSpecPath;RelativePath='drafts/bad-spec.md';Hash=(Get-ComplianceHash $badSpecPath)}
     $ledgerResult=Get-Content -Raw -LiteralPath (Get-LatestComplianceResult $task.Root 'requirements').FullName|ConvertFrom-Json
-    $ledgerPrerequisite=[pscustomobject]@{Hash=(Get-ComplianceHash (Get-LatestComplianceResult $task.Root 'requirements').FullName);Document=$ledgerResult}
+    $ledgerPrerequisite=[pscustomobject]@{Path=(Get-TeamBobRelativePath $task.Root (Get-LatestComplianceResult $task.Root 'requirements').FullName);Hash=(Get-ComplianceHash (Get-LatestComplianceResult $task.Root 'requirements').FullName);Phase='requirements';Document=$ledgerResult}
     $specSemantic=Invoke-TeamBobMachineCheck (@($allDefinitions | Where-Object {$_.id -ceq 'SPEC-M-002'})[0]) $chainPacket $chainContext $badSpecInfo $ledgerPrerequisite $chainGovernance
     Assert-ComplianceEqual $specSemantic.status 'FAIL' 'SPEC-M-002 rejects specification ReqIDs absent from the requirement ledger'
 
@@ -227,6 +254,11 @@ try {
     $badReviewInfo=[pscustomobject]@{FullPath=$badReviewPath;RelativePath='drafts/bad-review.md';Hash=(Get-ComplianceHash $badReviewPath)}
     $reviewSemantic=Invoke-TeamBobMachineCheck (@($allDefinitions | Where-Object {$_.id -ceq 'REV-M-001'})[0]) $chainPacket $chainContext $badReviewInfo $null $chainGovernance
     Assert-ComplianceEqual $reviewSemantic.status 'FAIL' 'REV-M-001 rejects unstructured findings without an explicit clean declaration'
+    $unsafeReviewPath=Join-Path $task.Root 'drafts/unsafe-review.md'
+    Write-ComplianceUtf8 $unsafeReviewPath "# Code Review`r`n## ReqIDs`r`nREQ-100`r`n## Allowed Files`r`nsrc/example.cpp`r`n## Findings`r`n[BLOCKER] ReqID=REQ-100; Path=../.bzr/branch.conf; Line=0; Message=unsafe`r`n## Evidence`r`nEvidence`r`n## Human Disposition`r`nPending`r`n"
+    $unsafeReviewInfo=[pscustomobject]@{FullPath=$unsafeReviewPath;RelativePath='drafts/unsafe-review.md';Hash=(Get-ComplianceHash $unsafeReviewPath)}
+    $unsafeReview=Invoke-TeamBobMachineCheck (@($allDefinitions | Where-Object {$_.id -ceq 'REV-M-001'})[0]) $chainPacket $chainContext $unsafeReviewInfo $null $chainGovernance
+    Assert-ComplianceEqual $unsafeReview.status 'FAIL' 'REV-M-001 rejects traversal, line zero, and the legacy open finding shape'
 
     $badTestPath=Join-Path $task.Root 'drafts/bad-test.md'
     Write-ComplianceUtf8 $badTestPath "# Test Specification`r`n## ReqIDs`r`nREQ-100`r`n## Acceptance Criteria`r`nAC-1: Required behavior.`r`n## Test Cases`r`nGeneric smoke test only.`r`n## Build Evidence`r`nEvidence`r`n## Human Approval`r`nPending`r`n"
@@ -238,9 +270,27 @@ try {
     Write-ComplianceUtf8 $collisionTestPath "# Test Specification`r`n## Test Cases`r`nTEST-1: REQ-1000; AC-10.`r`n"
     $collisionTestInfo=[pscustomobject]@{FullPath=$collisionTestPath;RelativePath='drafts/collision-test.md';Hash=(Get-ComplianceHash $collisionTestPath)}
     $reviewResultFile=Get-LatestComplianceResult $task.Root 'review'
-    $reviewPrerequisite=[pscustomobject]@{Hash=(Get-ComplianceHash $reviewResultFile.FullName);Document=(Get-Content -Raw -LiteralPath $reviewResultFile.FullName|ConvertFrom-Json)}
+    $reviewPrerequisite=[pscustomobject]@{Path=(Get-TeamBobRelativePath $task.Root $reviewResultFile.FullName);Hash=(Get-ComplianceHash $reviewResultFile.FullName);Phase='review';Document=(Get-Content -Raw -LiteralPath $reviewResultFile.FullName|ConvertFrom-Json)}
     $collisionSemantic=Invoke-TeamBobMachineCheck (@($allDefinitions | Where-Object {$_.id -ceq 'TEST-M-001'})[0]) $chainPacket $chainContext $collisionTestInfo $reviewPrerequisite $chainGovernance
     Assert-ComplianceEqual $collisionSemantic.status 'FAIL' 'TEST-M-001 requires exact ReqID and acceptance-ID tokens, not prefix collisions'
+
+    # A result may not skip or backtrack in the predecessor chain merely by self-declaring a phase.
+    $skippedReview=$reviewPrerequisite.Document|ConvertTo-Json -Depth 30|ConvertFrom-Json
+    $skippedReview.prerequisiteResultPath=$ledgerPrerequisite.Path
+    $skippedReview.prerequisiteResultSha256=$ledgerPrerequisite.Hash
+    $skipWrapper=[pscustomobject]@{Path=$reviewPrerequisite.Path;Hash=$reviewPrerequisite.Hash;Phase='review';Document=$skippedReview}
+    $skipRejected=$false;try{[void](Get-TeamBobBoundPriorResult $skipWrapper 'requirements' $chainContext $chainGovernance)}catch{$skipRejected=$true}
+    Assert-ComplianceTrue $skipRejected 'Prior result traversal rejects review-to-requirements phase skips'
+    $badRequirements=$ledgerResult|ConvertTo-Json -Depth 30|ConvertFrom-Json;$badRequirements.prerequisiteResultPath=$ledgerPrerequisite.Path;$badRequirements.prerequisiteResultSha256=$ledgerPrerequisite.Hash
+    $requirementsPredecessorRejected=$false;try{Assert-TeamBobPriorComplianceResult $badRequirements $chainContext $chainGovernance 'requirements'}catch{$requirementsPredecessorRejected=$true}
+    Assert-ComplianceTrue $requirementsPredecessorRejected 'Requirements result requires a null predecessor'
+    $nullReview=$reviewPrerequisite.Document|ConvertTo-Json -Depth 30|ConvertFrom-Json;$nullReview.prerequisiteResultPath=$null;$nullReview.prerequisiteResultSha256=$null
+    $nullReviewRejected=$false;try{Assert-TeamBobPriorComplianceResult $nullReview $chainContext $chainGovernance 'review'}catch{$nullReviewRejected=$true}
+    Assert-ComplianceTrue $nullReviewRejected 'Later results require a non-null predecessor'
+    $specResultFile=Get-LatestComplianceResult $task.Root 'specification';$crossReview=$reviewPrerequisite.Document|ConvertTo-Json -Depth 30|ConvertFrom-Json;$crossReview.prerequisiteResultPath=(Get-TeamBobRelativePath $task.Root $specResultFile.FullName);$crossReview.prerequisiteResultSha256=(Get-ComplianceHash $specResultFile.FullName)
+    $crossWrapper=[pscustomobject]@{Path=$reviewPrerequisite.Path;Hash=$reviewPrerequisite.Hash;Phase='review';Document=$crossReview}
+    $crossRejected=$false;try{[void](Get-TeamBobBoundPriorResult $crossWrapper 'requirements' $chainContext $chainGovernance)}catch{$crossRejected=$true}
+    Assert-ComplianceTrue $crossRejected 'Prior result traversal rejects cross-phase backtracking'
 
     foreach ($entryViolation in @(
         [pscustomobject]@{Field='Risk';Value='Amber'},
@@ -300,6 +350,31 @@ try {
     Assert-ComplianceEqual $unresolvedResult.ExitCode 11 'Missing required evidence uses exit code 11'
     Assert-ComplianceEqual ((Get-Content -Raw -LiteralPath (Get-LatestComplianceResult $unresolvedTask.Root 'requirements').FullName | ConvertFrom-Json).status) 'UNRESOLVED' 'Trusted unresolved input emits a result'
 
+    $unsupportedEvidenceTask=New-ComplianceTaskFixture 'UNSUPPORTED-EVIDENCE-1' $bazaarRoot $policyHash $roleHash
+    $unsupportedEvidenceArtifact=Join-Path $unsupportedEvidenceTask.Root 'drafts/requirement-ledger.csv';Write-ComplianceUtf8 $unsupportedEvidenceArtifact $phaseData[0].Text
+    $unsupportedEvidenceAssessment=Join-Path $unsupportedEvidenceTask.Root 'drafts/assessment-requirements.json'
+    New-ComplianceAssessment $unsupportedEvidenceAssessment 'UNSUPPORTED-EVIDENCE-1' 'requirements' (Get-ComplianceHash $unsupportedEvidenceTask.Packet) $policyHash $roleHash 'drafts/requirement-ledger.csv' (Get-ComplianceHash $unsupportedEvidenceArtifact) $phaseData[0].Ai
+    $unsupportedDocument=Get-Content -Raw -LiteralPath $unsupportedEvidenceAssessment|ConvertFrom-Json
+    foreach($check in @($unsupportedDocument.checks)){$check.evidence[0].value='work-packet.md';$check.evidence[1].value='999'}
+    Write-ComplianceJson $unsupportedEvidenceAssessment $unsupportedDocument
+    $unsupportedEvidenceResult=Invoke-ComplianceScript $compliancePath @('-WorkPacket',$unsupportedEvidenceTask.Packet,'-Phase','requirements','-ArtifactPath',$unsupportedEvidenceArtifact,'-AssessmentPath',$unsupportedEvidenceAssessment)
+    Assert-ComplianceEqual $unsupportedEvidenceResult.ExitCode 11 'Safe but unverifiable AI path/line support yields NEEDS_HUMAN_REVIEW'
+    Assert-ComplianceEqual @(Get-ChildItem -LiteralPath (Join-Path $unsupportedEvidenceTask.Root 'results') -File).Count 1 'Unverifiable AI support still writes one audit result'
+
+    foreach($evidenceAttack in @('line-zero','sha-mismatch','path-traversal')){
+        $attackId=('AI-'+$evidenceAttack.ToUpperInvariant().Replace('-','')+'-1');$attackTask=New-ComplianceTaskFixture $attackId $bazaarRoot $policyHash $roleHash
+        $attackArtifact=Join-Path $attackTask.Root 'drafts/requirement-ledger.csv';Write-ComplianceUtf8 $attackArtifact $phaseData[0].Text
+        $attackAssessment=Join-Path $attackTask.Root 'drafts/assessment-requirements.json';New-ComplianceAssessment $attackAssessment $attackId 'requirements' (Get-ComplianceHash $attackTask.Packet) $policyHash $roleHash 'drafts/requirement-ledger.csv' (Get-ComplianceHash $attackArtifact) $phaseData[0].Ai
+        $attackDocument=Get-Content -Raw -LiteralPath $attackAssessment|ConvertFrom-Json
+        if($evidenceAttack -ceq 'line-zero'){$attackDocument.checks[0].evidence[1].value='0';$expectedAttackCode=20}
+        elseif($evidenceAttack -ceq 'sha-mismatch'){$attackDocument.checks[0].evidence+=@([pscustomobject]@{type='sha256';value=('0'*64)});$expectedAttackCode=30}
+        else{$escapePath=Join-Path (Split-Path -Parent $attackTask.Root) 'escape.txt';Write-ComplianceUtf8 $escapePath 'escape';$attackDocument.checks[0].evidence[0].value='../escape.txt';$expectedAttackCode=30}
+        Write-ComplianceJson $attackAssessment $attackDocument
+        $attackResult=Invoke-ComplianceScript $compliancePath @('-WorkPacket',$attackTask.Packet,'-Phase','requirements','-ArtifactPath',$attackArtifact,'-AssessmentPath',$attackAssessment)
+        Assert-ComplianceEqual $attackResult.ExitCode $expectedAttackCode "AI evidence $evidenceAttack is classified fail-closed"
+        Assert-ComplianceEqual @(Get-ChildItem -LiteralPath (Join-Path $attackTask.Root 'results') -File).Count 0 "AI evidence $evidenceAttack creates no audit result"
+    }
+
     $naTask=New-ComplianceTaskFixture 'NA-1' $bazaarRoot $policyHash $roleHash;$naArtifact=Join-Path $naTask.Root 'drafts/requirement-ledger.csv';Write-ComplianceUtf8 $naArtifact $phaseData[0].Text;$naAssessment=Join-Path $naTask.Root 'drafts/assessment-requirements.json'
     New-ComplianceAssessment $naAssessment 'NA-1' 'requirements' (Get-ComplianceHash $naTask.Packet) $policyHash $roleHash 'drafts/requirement-ledger.csv' (Get-ComplianceHash $naArtifact) $phaseData[0].Ai 'NOT_APPLICABLE'
     $naResult=Invoke-ComplianceScript $compliancePath @('-WorkPacket',$naTask.Packet,'-Phase','requirements','-ArtifactPath',$naArtifact,'-AssessmentPath',$naAssessment)
@@ -352,6 +427,20 @@ try {
     Assert-ComplianceEqual $duplicateOtherResult.ExitCode 20 'Duplicate non-version JSON member is contract-invalid'
     Assert-ComplianceTrue ($duplicateOtherResult.Output -notmatch 'PACKET_VERSION_UNSUPPORTED') 'Non-version duplicate is not misreported as packet version failure'
     Assert-ComplianceEqual @(Get-ChildItem -LiteralPath (Join-Path $duplicateOtherTask.Root 'results') -File).Count 0 'Duplicate governed JSON creates no result'
+
+    $versionPrecedenceTask=New-ComplianceTaskFixture 'VERSION-PRECEDENCE-1' $bazaarRoot $policyHash $roleHash
+    $versionPrecedenceText=[System.IO.File]::ReadAllText($versionPrecedenceTask.Packet)
+    $versionPrecedenceText=[regex]::Replace($versionPrecedenceText,'("Profile Version"\s*:\s*)"0\.2\.0-poc"','$1"9.9.9"',1)
+    $versionPrecedenceText=[regex]::Replace($versionPrecedenceText,'("Task ID"\s*:\s*"VERSION-PRECEDENCE-1"\s*,)','$1 "Task ID": "OTHER",',1)
+    Assert-ComplianceEqual ([regex]::Matches($versionPrecedenceText,'"Task ID"').Count) 2 'Version-precedence fixture injects exactly one duplicate non-version member'
+    Assert-ComplianceEqual ([regex]::Matches($versionPrecedenceText,'"9\.9\.9"').Count) 1 'Version-precedence fixture replaces the profile version exactly once'
+    Write-ComplianceUtf8 $versionPrecedenceTask.Packet $versionPrecedenceText
+    $readerStatus=$null;try{[void](Read-TeamBobCanonicalPacket $versionPrecedenceTask.Packet)}catch{$readerStatus=$_.Exception.Data['TeamBobStatus']}
+    Assert-ComplianceEqual $readerStatus 'PACKET_VERSION_UNSUPPORTED' 'Shared packet reader gives version failure precedence over a duplicate non-version member'
+    $versionPrecedenceResult=Invoke-ComplianceScript $compliancePath @('-WorkPacket',$versionPrecedenceTask.Packet,'-Phase','requirements','-ArtifactPath',(Join-Path $versionPrecedenceTask.Root 'drafts/missing.csv'),'-AssessmentPath',(Join-Path $versionPrecedenceTask.Root 'drafts/missing.json'))
+    Assert-ComplianceEqual $versionPrecedenceResult.ExitCode 20 'Consumer returns exit 20 for unknown version plus duplicate other member'
+    Assert-ComplianceTrue ($versionPrecedenceResult.Output -match 'PACKET_VERSION_UNSUPPORTED') 'Consumer preserves version-first diagnostic with duplicate other member'
+    Assert-ComplianceEqual @(Get-ChildItem -LiteralPath (Join-Path $versionPrecedenceTask.Root 'results') -File).Count 0 'Version-first rejection creates no result'
 
     $duplicateAssessmentTask=New-ComplianceTaskFixture 'DUPASSESS-1' $bazaarRoot $policyHash $roleHash;$duplicateAssessmentArtifact=Join-Path $duplicateAssessmentTask.Root 'drafts/requirement-ledger.csv';Write-ComplianceUtf8 $duplicateAssessmentArtifact $phaseData[0].Text;$duplicateAssessmentPath=Join-Path $duplicateAssessmentTask.Root 'drafts/assessment-requirements.json'
     New-ComplianceAssessment $duplicateAssessmentPath 'DUPASSESS-1' 'requirements' (Get-ComplianceHash $duplicateAssessmentTask.Packet) $policyHash $roleHash 'drafts/requirement-ledger.csv' (Get-ComplianceHash $duplicateAssessmentArtifact) $phaseData[0].Ai

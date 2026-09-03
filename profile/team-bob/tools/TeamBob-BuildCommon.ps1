@@ -418,6 +418,31 @@ function Test-TeamBobInteger {
         $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Get-TeamBobBuildResultContractFields {
+    return @(
+        'schemaVersion','status','exitCode','message','taskId','action','attempt','workPacket','buildProfileId','sandboxPath','logDirectory','stdoutPath','stderrPath',
+        'outputLogPath','processId','processExitCode','processStartedAt','processFinishedAt','terminationComplete','captureComplete','preBazaarStatus','postBazaarStatus',
+        'preBazaarBranch','postBazaarBranch','preBazaarRevision','postBazaarRevision','preSourceInventory','postSourceInventory','preBzrInventory','postBzrInventory',
+        'preAllowedHashes','postAllowedHashes','expectedArtifacts','invokedArguments','resultPath'
+    )
+}
+
+function Assert-TeamBobBuildResultContract {
+    param([object]$Result,[string]$FailureStatus='INTEGRITY_FAILED')
+    Assert-TeamBobExactProperties $Result (Get-TeamBobBuildResultContractFields) 'Build result' $FailureStatus
+    $exitCodes=@{SUCCEEDED=0;CODE_FAILED_RETRYABLE=10;CODE_FAILED_STOP=11;ENVIRONMENT_FAILED=20;TIMED_OUT=21;INTEGRITY_FAILED=30}
+    if($Result.schemaVersion -cne '1.0' -or -not($Result.status -is [string]) -or -not $exitCodes.ContainsKey([string]$Result.status) -or -not(Test-TeamBobInteger $Result.exitCode) -or [int]$Result.exitCode -ne [int]$exitCodes[[string]$Result.status]){throw(New-TeamBobFailure $FailureStatus 'Build result status/exitCode contract is invalid.')}
+    if(-not($Result.message -is [string]) -or [string]::IsNullOrWhiteSpace($Result.message) -or -not($Result.taskId -is [string]) -or [string]::IsNullOrWhiteSpace($Result.taskId) -or @('Make','Rebuild') -cnotcontains $Result.action -or -not(Test-TeamBobInteger $Result.attempt) -or [int]$Result.attempt -lt 0 -or [int]$Result.attempt -gt 2){throw(New-TeamBobFailure $FailureStatus 'Build result identity fields are invalid.')}
+    foreach($name in @('workPacket','buildProfileId','resultPath')){if(-not($Result.$name -is [string]) -or [string]::IsNullOrWhiteSpace([string]$Result.$name)){throw(New-TeamBobFailure $FailureStatus "Build result $name is invalid.")}}
+    foreach($name in @('sandboxPath','logDirectory','stdoutPath','stderrPath','outputLogPath','preBazaarStatus','postBazaarStatus','preBazaarBranch','postBazaarBranch','preBazaarRevision','postBazaarRevision','processStartedAt','processFinishedAt')){if($null -ne $Result.$name -and -not($Result.$name -is [string])){throw(New-TeamBobFailure $FailureStatus "Build result $name must be a string or null.")}}
+    foreach($name in @('processId','processExitCode')){if($null -ne $Result.$name -and -not(Test-TeamBobInteger $Result.$name)){throw(New-TeamBobFailure $FailureStatus "Build result $name must be an integer or null.")}}
+    foreach($name in @('terminationComplete','captureComplete')){if($null -ne $Result.$name -and -not($Result.$name -is [bool])){throw(New-TeamBobFailure $FailureStatus "Build result $name must be a Boolean or null.")}}
+    foreach($name in @('preSourceInventory','postSourceInventory','preBzrInventory','postBzrInventory','preAllowedHashes','postAllowedHashes','expectedArtifacts','invokedArguments')){
+        if(-not($Result.$name -is [System.Array])){throw(New-TeamBobFailure $FailureStatus "Build result $name must be an array.")}
+        foreach($item in @($Result.$name)){if(-not($item -is [string]) -or [string]::IsNullOrWhiteSpace($item)){throw(New-TeamBobFailure $FailureStatus "Build result $name must contain non-empty strings only.")}}
+    }
+}
+
 function Assert-TeamBobWorkPacketContract {
     param([object]$Packet)
     $failureStatus = 'PACKET_SCHEMA_INVALID'
@@ -474,12 +499,12 @@ function Read-TeamBobCanonicalPacket {
     if ($versionNames.Count -ne 1 -or -not [string]::Equals($versionNames[0], 'Profile Version', [System.StringComparison]::Ordinal) -or @($scan.DuplicateMemberNames | Where-Object { [string]::Equals($_, 'Profile Version', [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) {
         throw (New-TeamBobFailure 'PACKET_VERSION_UNSUPPORTED' 'PACKET_VERSION_UNSUPPORTED: Work packet Profile Version is missing, malformed, duplicated, ambiguous, or unsupported.')
     }
-    if ($scan.DuplicateMemberNames.Count -gt 0) { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' 'Work packet JSON contains a duplicate object member.') }
     try { $packet = $json | ConvertFrom-Json } catch { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' ('Work packet canonical JSON is invalid: ' + $_.Exception.Message)) }
     $versionProperty = @($packet.PSObject.Properties | Where-Object { [string]::Equals($_.Name, 'Profile Version', [System.StringComparison]::Ordinal) })
     if ($versionProperty.Count -ne 1 -or -not ($versionProperty[0].Value -is [string]) -or $versionProperty[0].Value -cne '0.2.0-poc') {
         throw (New-TeamBobFailure 'PACKET_VERSION_UNSUPPORTED' 'PACKET_VERSION_UNSUPPORTED: Work packet Profile Version is missing, malformed, or unsupported.')
     }
+    if ($scan.DuplicateMemberNames.Count -gt 0) { throw (New-TeamBobFailure 'PACKET_SCHEMA_INVALID' 'Work packet JSON contains a duplicate object member.') }
     $fields = @(
         'Profile Version', 'Policy Version', 'Policy Bundle SHA256', 'Role Ledger SHA256', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline',
         'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Allowed Files', 'Forbidden Areas', 'RT Impact', 'Safety Impact',
