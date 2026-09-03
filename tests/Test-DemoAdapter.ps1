@@ -84,11 +84,34 @@ function Invoke-DemoAdapterScript {
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $output }
 }
 
+function ConvertTo-DemoAdapterCommandLineArgument {
+    param([AllowNull()][string]$Argument)
+    if ([string]::IsNullOrEmpty($Argument)) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    $escaped = New-Object System.Text.StringBuilder
+    [void]$escaped.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            for ($index = 0; $index -lt (($backslashes * 2) + 1); $index++) { [void]$escaped.Append('\') }
+        } else {
+            for ($index = 0; $index -lt $backslashes; $index++) { [void]$escaped.Append('\') }
+        }
+        [void]$escaped.Append($character)
+        $backslashes = 0
+    }
+    for ($index = 0; $index -lt ($backslashes * 2); $index++) { [void]$escaped.Append('\') }
+    [void]$escaped.Append('"')
+    return $escaped.ToString()
+}
+
 function Invoke-DemoAdapterExecutable {
     param([string]$Path, [string[]]$Arguments = @())
-    $argumentText = @($Arguments | ForEach-Object {
-        if ($_ -notmatch '[\s"]') { $_ } else { '"' + $_.Replace('\\', '\\').Replace('"', '\\"') + '"' }
-    }) -join ' '
+    $argumentText = @($Arguments | ForEach-Object { ConvertTo-DemoAdapterCommandLineArgument $_ }) -join ' '
     $start = New-Object System.Diagnostics.ProcessStartInfo
     $start.FileName = $Path
     $start.Arguments = $argumentText
@@ -100,9 +123,11 @@ function Invoke-DemoAdapterExecutable {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $start
     [void]$process.Start()
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
     $process.WaitForExit()
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
     $exitCode = $process.ExitCode
     $process.Dispose()
     return [pscustomobject]@{ ExitCode = $exitCode; Output = ($stdout + $stderr) }
@@ -292,6 +317,62 @@ public static class ManifestCollisionCsc {
     return [pscustomobject]@{ MsBuildPath = $msBuildPath; CscPath = $cscPath }
 }
 
+function New-DemoAdapterCaptureFixture {
+    param([string]$Directory, [string]$CscPath)
+    [void][System.IO.Directory]::CreateDirectory($Directory)
+    $sourcePath = Join-Path $Directory 'CaptureFixture.cs'
+    $executablePath = Join-Path $Directory 'CaptureFixture.exe'
+    Write-DemoAdapterUtf8NoBom $sourcePath @'
+using System;
+using System.Text;
+using System.Threading;
+
+public static class CaptureFixture {
+    public static int Main(string[] args) {
+        if (args.Length == 1 && String.Equals(args[0], "--flood", StringComparison.Ordinal)) {
+            Thread stdout = new Thread(delegate() { Console.Out.Write(new string('O', 131072)); });
+            Thread stderr = new Thread(delegate() { Console.Error.Write(new string('E', 131072)); });
+            stdout.Start(); stderr.Start(); stdout.Join(); stderr.Join();
+            return 37;
+        }
+        foreach (string argument in args) {
+            Console.Out.WriteLine("ARG=" + Convert.ToBase64String(Encoding.UTF8.GetBytes(argument)));
+        }
+        return 41;
+    }
+}
+'@
+    & $CscPath /nologo /noconfig /target:exe /reference:System.dll ('/out:' + $executablePath) $sourcePath
+    if ($LASTEXITCODE -ne 0) { throw "Capture fixture compilation failed with exit code $LASTEXITCODE." }
+    return $executablePath
+}
+
+function Assert-DemoAdapterCaptureFloodCompletes {
+    param([string]$Path)
+    $helperText = 'function ConvertTo-DemoAdapterCommandLineArgument {' + (Get-Command ConvertTo-DemoAdapterCommandLineArgument -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() + '}' +
+        'function Invoke-DemoAdapterExecutable {' + (Get-Command Invoke-DemoAdapterExecutable -CommandType Function -ErrorAction Stop).ScriptBlock.ToString() + '}'
+    $job = Start-Job -ScriptBlock {
+        param([string]$FunctionText, [string]$ExecutablePath)
+        Invoke-Expression $FunctionText
+        Invoke-DemoAdapterExecutable $ExecutablePath @('--flood')
+    } -ArgumentList @($helperText, $Path)
+    try {
+        $result = Wait-Job -Job $job -Timeout 5
+        Assert-True ($null -ne $result) 'Capture helper drains simultaneous large stdout and stderr without deadlock'
+        $captured = @(Receive-Job -Job $job)
+        Assert-Equal $captured.Count 1 'Capture helper returns one completed flood result'
+        Assert-Equal $captured[0].ExitCode 37 'Capture helper preserves flood process exit code'
+        Assert-Equal $captured[0].Output.Length 262144 'Capture helper preserves both flood streams'
+    } finally {
+        $escapedPath = [regex]::Escape($Path)
+        foreach ($child in @(Get-CimInstance Win32_Process -Filter "Name='CaptureFixture.exe'" | Where-Object { $_.CommandLine -match $escapedPath })) {
+            Stop-Process -Id $child.ProcessId -Force
+        }
+        if ($job.State -eq 'Running') { Stop-Job -Job $job }
+        Remove-Job -Job $job -Force
+    }
+}
+
 function ConvertFrom-DemoAdapterTraceValue {
     param([string]$Value)
     if ($Value -eq '~') { return $null }
@@ -462,6 +543,18 @@ try {
     Copy-Item -LiteralPath $adapterSourcePath -Destination (Join-Path $distributionRoot 'demo\adapter\DemoMsdevAdapter.cs')
     $distributionFingerprint = Get-DemoAdapterTreeFingerprint $distributionRoot
     $fakeTools = New-DemoAdapterFakeTools $fakeToolsRoot
+    $captureFixturePath = New-DemoAdapterCaptureFixture (Join-Path $demoAdapterFixtureFull 'capture-fixture') $fakeTools.CscPath
+    Assert-DemoAdapterCaptureFloodCompletes $captureFixturePath
+    $trickyArguments = @('', 'plain', 'space value', 'quote"value', 'trailing\', 'space trailing\')
+    $trickyCapture = Invoke-DemoAdapterExecutable $captureFixturePath $trickyArguments
+    Assert-Equal $trickyCapture.ExitCode 41 'Capture helper preserves the exact native exit code for tricky argv'
+    $capturedArgumentLines = @($trickyCapture.Output -split "`r?`n" | Where-Object { $_.Length -gt 0 })
+    Assert-Equal $capturedArgumentLines.Count $trickyArguments.Count 'Capture helper preserves the exact tricky argv count'
+    Assert-True (@($capturedArgumentLines | Where-Object { -not $_.StartsWith('ARG=', [System.StringComparison]::Ordinal) }).Count -eq 0) 'Capture helper preserves the exact tricky argv framing'
+    $capturedArguments = @($capturedArgumentLines | ForEach-Object {
+        [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($_.Substring(4)))
+    })
+    Assert-Equal ($capturedArguments -join "`0") ($trickyArguments -join "`0") 'Capture helper preserves empty, quoted, spaced, and trailing-backslash argv values'
     $tracePath = Join-Path $demoAdapterFixtureFull 'msbuild-trace.log'
     Clear-DemoAdapterTrace $tracePath
     $env:TEAM_BOB_FAKE_MSBUILD_TRACE = $tracePath
