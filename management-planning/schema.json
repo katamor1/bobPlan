@@ -1,0 +1,541 @@
+{
+  "version": "1.0",
+  "hoursUnit": "person-hours",
+  "listSeparator": ";",
+  "headerRow": 4,
+  "dataRow": 5,
+  "tables": [
+    {
+      "key": "Project",
+      "sheet": "案件条件",
+      "role": "input",
+      "table": "mp_Project",
+      "columns": [
+        {
+          "name": "Key",
+          "label": "項目",
+          "type": "text"
+        },
+        {
+          "name": "Value",
+          "label": "設定値",
+          "type": "text"
+        },
+        {
+          "name": "Notes",
+          "label": "説明",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Sources",
+      "sheet": "入力資料",
+      "role": "input",
+      "table": "mp_Sources",
+      "columns": [
+        {
+          "name": "SourceID",
+          "label": "資料ID",
+          "type": "text"
+        },
+        {
+          "name": "Path",
+          "label": "資料パス",
+          "type": "text"
+        },
+        {
+          "name": "Kind",
+          "label": "形式",
+          "type": "text"
+        },
+        {
+          "name": "Sheet",
+          "label": "シート",
+          "type": "text"
+        },
+        {
+          "name": "Range",
+          "label": "範囲",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Standards",
+      "sheet": "見積基準",
+      "role": "input",
+      "table": "mp_Standards",
+      "columns": [
+        {
+          "name": "RuleID",
+          "label": "基準ID",
+          "type": "text"
+        },
+        {
+          "name": "Phase",
+          "label": "工程",
+          "type": "text"
+        },
+        {
+          "name": "UnitHours",
+          "label": "単位工数（人時）",
+          "type": "number"
+        },
+        {
+          "name": "Basis",
+          "label": "根拠",
+          "type": "text"
+        },
+        {
+          "name": "Provisional",
+          "label": "暫定",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Requirements",
+      "sheet": "要求台帳",
+      "role": "input",
+      "table": "mp_Requirements",
+      "columns": [
+        {
+          "name": "ReqID",
+          "label": "要求ID",
+          "type": "text"
+        },
+        {
+          "name": "SourceID",
+          "label": "資料ID",
+          "type": "text"
+        },
+        {
+          "name": "SourceAnchor",
+          "label": "出典位置",
+          "type": "text"
+        },
+        {
+          "name": "Interpretation",
+          "label": "要求の解釈",
+          "type": "text"
+        },
+        {
+          "name": "AcceptanceCriteria",
+          "label": "受入条件",
+          "type": "text"
+        },
+        {
+          "name": "QAStatus",
+          "label": "確認状況",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "People",
+      "sheet": "要員",
+      "role": "input",
+      "table": "mp_People",
+      "columns": [
+        {
+          "name": "MemberID",
+          "label": "要員ID",
+          "type": "text"
+        },
+        {
+          "name": "Name",
+          "label": "表示名",
+          "type": "text"
+        },
+        {
+          "name": "Phases",
+          "label": "担当可能工程",
+          "type": "text"
+        },
+        {
+          "name": "Skills",
+          "label": "スキル",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Capacity",
+      "sheet": "日別稼働",
+      "role": "input",
+      "table": "mp_Capacity",
+      "columns": [
+        {
+          "name": "MemberID",
+          "label": "要員ID",
+          "type": "text"
+        },
+        {
+          "name": "Date",
+          "label": "日付",
+          "type": "date"
+        },
+        {
+          "name": "AvailableHours",
+          "label": "利用可能時間",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "key": "Tasks",
+      "sheet": "作業台帳",
+      "role": "input",
+      "table": "mp_Tasks",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "作業ID",
+          "type": "text"
+        },
+        {
+          "name": "ParentTaskID",
+          "label": "親作業ID",
+          "type": "text"
+        },
+        {
+          "name": "ReqIDs",
+          "label": "要求ID一覧",
+          "type": "text"
+        },
+        {
+          "name": "Title",
+          "label": "作業名",
+          "type": "text"
+        },
+        {
+          "name": "Phase",
+          "label": "工程",
+          "type": "text"
+        },
+        {
+          "name": "Deliverable",
+          "label": "成果物",
+          "type": "text"
+        },
+        {
+          "name": "AcceptanceCriteria",
+          "label": "完了条件",
+          "type": "text"
+        },
+        {
+          "name": "EstimatedHours",
+          "label": "見積工数（人時）",
+          "type": "number"
+        },
+        {
+          "name": "EstimateBasis",
+          "label": "見積根拠",
+          "type": "text"
+        },
+        {
+          "name": "AssigneeID",
+          "label": "担当要員ID",
+          "type": "text"
+        },
+        {
+          "name": "StartDate",
+          "label": "開始日",
+          "type": "date"
+        },
+        {
+          "name": "EndDate",
+          "label": "終了日",
+          "type": "date"
+        },
+        {
+          "name": "PredecessorIDs",
+          "label": "先行作業ID一覧",
+          "type": "text"
+        },
+        {
+          "name": "Status",
+          "label": "確認状況",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Allocations",
+      "sheet": "日別配分",
+      "role": "input",
+      "table": "mp_Allocations",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "作業ID",
+          "type": "text"
+        },
+        {
+          "name": "Date",
+          "label": "日付",
+          "type": "date"
+        },
+        {
+          "name": "Hours",
+          "label": "配分時間",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "key": "Questions",
+      "sheet": "確認事項",
+      "role": "input",
+      "table": "mp_Questions",
+      "columns": [
+        {
+          "name": "QuestionID",
+          "label": "確認ID",
+          "type": "text"
+        },
+        {
+          "name": "EntityID",
+          "label": "要求・作業ID",
+          "type": "text"
+        },
+        {
+          "name": "Question",
+          "label": "確認内容",
+          "type": "text"
+        },
+        {
+          "name": "Status",
+          "label": "状態",
+          "type": "text"
+        },
+        {
+          "name": "Resolution",
+          "label": "対応内容",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "EstimateView",
+      "sheet": "見積表",
+      "role": "output",
+      "table": "mp_EstimateView",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "作業ID",
+          "type": "text"
+        },
+        {
+          "name": "Title",
+          "label": "作業名",
+          "type": "text"
+        },
+        {
+          "name": "Phase",
+          "label": "工程",
+          "type": "text"
+        },
+        {
+          "name": "Hours",
+          "label": "工数（人時）",
+          "type": "number"
+        },
+        {
+          "name": "Basis",
+          "label": "根拠",
+          "type": "text"
+        },
+        {
+          "name": "Rollup",
+          "label": "集計行",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "WbsView",
+      "sheet": "WBS",
+      "role": "output",
+      "table": "mp_WbsView",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "作業ID",
+          "type": "text"
+        },
+        {
+          "name": "ParentTaskID",
+          "label": "親作業ID",
+          "type": "text"
+        },
+        {
+          "name": "ReqIDs",
+          "label": "要求ID一覧",
+          "type": "text"
+        },
+        {
+          "name": "Title",
+          "label": "作業名",
+          "type": "text"
+        },
+        {
+          "name": "Deliverable",
+          "label": "成果物",
+          "type": "text"
+        },
+        {
+          "name": "Hours",
+          "label": "工数（人時）",
+          "type": "number"
+        },
+        {
+          "name": "AssigneeID",
+          "label": "担当要員ID",
+          "type": "text"
+        },
+        {
+          "name": "StartDate",
+          "label": "開始日",
+          "type": "date"
+        },
+        {
+          "name": "EndDate",
+          "label": "終了日",
+          "type": "date"
+        },
+        {
+          "name": "PredecessorIDs",
+          "label": "先行作業ID一覧",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "ScheduleView",
+      "sheet": "要員スケジュール",
+      "role": "output",
+      "table": "mp_ScheduleView",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "作業ID",
+          "type": "text"
+        },
+        {
+          "name": "AssigneeID",
+          "label": "担当要員ID",
+          "type": "text"
+        },
+        {
+          "name": "Date",
+          "label": "日付",
+          "type": "date"
+        },
+        {
+          "name": "Hours",
+          "label": "配分時間",
+          "type": "number"
+        },
+        {
+          "name": "DailyTotal",
+          "label": "担当者の日計",
+          "type": "number"
+        },
+        {
+          "name": "AvailableHours",
+          "label": "利用可能時間",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "key": "RedmineView",
+      "sheet": "Redmine転記",
+      "role": "output",
+      "table": "mp_RedmineView",
+      "columns": [
+        {
+          "name": "TaskID",
+          "label": "内部作業ID",
+          "type": "text"
+        },
+        {
+          "name": "ParentTaskID",
+          "label": "内部親作業ID",
+          "type": "text"
+        },
+        {
+          "name": "Subject",
+          "label": "件名",
+          "type": "text"
+        },
+        {
+          "name": "Description",
+          "label": "説明・完了条件",
+          "type": "text"
+        },
+        {
+          "name": "EstimatedHours",
+          "label": "予定工数（人時）",
+          "type": "number"
+        },
+        {
+          "name": "AssigneeID",
+          "label": "担当要員ID",
+          "type": "text"
+        },
+        {
+          "name": "StartDate",
+          "label": "開始日",
+          "type": "date"
+        },
+        {
+          "name": "DueDate",
+          "label": "期日",
+          "type": "date"
+        },
+        {
+          "name": "ReqIDs",
+          "label": "要求ID一覧",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "key": "Checks",
+      "sheet": "点検結果",
+      "role": "output",
+      "table": "mp_Checks",
+      "columns": [
+        {
+          "name": "Severity",
+          "label": "重要度",
+          "type": "text"
+        },
+        {
+          "name": "Code",
+          "label": "検出内容",
+          "type": "text"
+        },
+        {
+          "name": "Entity",
+          "label": "対象",
+          "type": "text"
+        },
+        {
+          "name": "Field",
+          "label": "項目",
+          "type": "text"
+        },
+        {
+          "name": "Message",
+          "label": "説明",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

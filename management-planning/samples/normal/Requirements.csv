@@ -1,0 +1,4 @@
+"ReqID","SourceID","SourceAnchor","Interpretation","AcceptanceCriteria","QAStatus"
+"REQ-001","DOC-001","paragraph:3","warm-up中のWarning抑止と連続超過回数リセット","warm-up中はWarningにならず回数がリセットされる","Resolved"
+"REQ-002","DOC-001","paragraph:4","8,000μs以上が3周期連続した場合にWarningへ遷移","8,000を含み3周期で遷移する","Resolved"
+"REQ-003","DOC-001","paragraph:5","8,000μs未満で直ちにNormalへ戻し回数をリセット","7,999でNormalとなり回数が0になる","Resolved"

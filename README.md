@@ -1,5 +1,7 @@
 # Team Bob VC6/Bazaar Profile v0.1.0-poc
 
+要求書から見積・WBS・要員計画・Redmine転記用一覧を作る独立パッケージは [管理業務支援セット](management-planning/README.md) を参照してください。Windows PowerShell 5.1とExcelで動作し、既存の開発・ビルド用プロファイルには依存しません。
+
 これは Windows 上の IBM Bob IDE 2.1.x、Visual C++ 6.0、Bazaar 2.5.1 向けの限定 PoC profile です。Bob Shell 1.0.1 は対象外です。Bob は commit、merge、tag を行わず、実機、制御ネットワーク、mainline、secrets には決して接続しません。
 
 実 VC6 の qualification は未完了です。そのため同梱の **build catalog** (`vc6-build-targets.json`) は空で disabled です。Green custom mode 自体は技術的には同梱・存在しますが、PC ID が一致する profile を人が qualification して enabled にするまで、選択も auto-approve もしてはいけません。これは mode を無効にした、という意味ではありません。

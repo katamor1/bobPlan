@@ -1,0 +1,3 @@
+"QuestionID","EntityID","Question","Status","Resolution"
+"Q-001","REQ-002","warm-up の開始条件・終了条件（期間・トリガー）が sources.md に明示されていない。warm-up をどのように検出・判定するか？","Open",""
+"Q-002","REQ-003","3 consecutive cycles のカウントは Warning 遷移後もリセットされずに継続するか、それとも Warning 遷移時点でリセットするか？","Open",""

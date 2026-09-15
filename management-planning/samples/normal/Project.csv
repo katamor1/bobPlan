@@ -1,0 +1,7 @@
+"Key","Value","Notes"
+"ProjectID","SYNTHETIC-001","合成データによる操作試行"
+"Scope","Customer-AのWarning判定変更","実機への接続・実装作業は行わない"
+"StartDate","2026-09-07","計画開始可能日"
+"DueDate","2026-09-25","計画納期"
+"HoursPerDay","8","人日表示時の換算条件"
+"Synthetic","Yes","工数・要員・日程は検証用の架空値"

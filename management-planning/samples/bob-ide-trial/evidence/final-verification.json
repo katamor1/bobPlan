@@ -1,0 +1,11 @@
+﻿{
+    "InputCellComparisons":  431,
+    "CapacityRows":  57,
+    "Requirements":  5,
+    "Tasks":  9,
+    "Allocations":  8,
+    "TicketRows":  9,
+    "LeafHours":  26,
+    "SourceAndBaselineHashes":  "Unchanged",
+    "WorkbookSha256":  "709F7F2DCE6BC63BE8A793A7FEC5A780CD69BF5F443E9C3F129EFAAA254B98AB"
+}

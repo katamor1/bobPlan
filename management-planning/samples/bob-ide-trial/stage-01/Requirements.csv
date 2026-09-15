@@ -1,0 +1,6 @@
+"ReqID","SourceID","SourceAnchor","Interpretation","AcceptanceCriteria","QAStatus"
+"REQ-001","DOC-001","paragraph:2","サイクル監視改善の対象は合成ケースの Customer-A のみとする","Customer-A 以外には本変更が適用されないこと","Resolved"
+"REQ-002","DOC-001","paragraph:3","warm-up 中は cycle-overrun の Warning を抑止し、連続超過回数を reset する","warm-up 期間中に Warning が発生しないこと、および連続超過カウンターが 0 にリセットされること","Resolved"
+"REQ-003","DOC-001","paragraph:4","warm-up 後、cycle time が 8,000 microseconds 以上（inclusive）の状態が 3 consecutive cycles 続いた場合にのみ Warning へ遷移する","cycle time >= 8,000 µs が 3 サイクル連続したときのみ Warning に遷移し、2 サイクル以下では遷移しないこと","Resolved"
+"REQ-004","DOC-001","paragraph:5","cycle time が 8,000 microseconds 未満になった場合、直ちに Normal へ戻し連続超過回数を reset する","cycle time < 8,000 µs になった瞬間に状態が Normal に戻り、連続カウンターが 0 にリセットされること","Resolved"
+"REQ-005","DOC-001","paragraph:7","board、driver、ABI、control period は変更しない","これら 4 項目に対する変更差分がないこと","Resolved"
