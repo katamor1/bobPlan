@@ -1,0 +1,27 @@
+{
+  "policyVersion": "0.2.0-poc",
+  "checks": [
+    {"id":"GOV-M-001","phase":"common","title":"Packet, profile, policy, and role-ledger integrity is current","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["sha256"]},
+    {"id":"GOV-M-002","phase":"common","title":"Phase and prerequisite state permits this operation","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["sha256"]},
+    {"id":"GOV-M-003","phase":"common","title":"Governed paths and encodings satisfy their contracts","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path"]},
+    {"id":"GOV-M-004","phase":"common","title":"Forbidden terminology is absent from governed artifacts","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"GOV-A-001","phase":"common","title":"Canonical glossary usage is clear and evidence-backed","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"REQ-M-001","phase":"requirements","title":"ReqIDs are unique and have immutable source anchors","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"REQ-A-001","phase":"requirements","title":"Interpretation, acceptance criteria, QA, and evidence are sufficient","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"SPEC-M-001","phase":"specification","title":"The specification contains every required section","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"SPEC-M-002","phase":"specification","title":"Every specification ReqID exists in the requirement ledger","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"SPEC-A-001","phase":"specification","title":"Scope, acceptance, and evidence are clear","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"SPEC-H-001","phase":"specification","title":"Specification approval is recorded","kind":"human","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["approvalRecord"],"requiredRole":"SPECIFICATION_APPROVER"},
+    {"id":"IMP-M-001","phase":"impact","title":"All seven impact areas are present","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"IMP-A-001","phase":"impact","title":"Impact evidence and disposition are sufficient","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"IMP-H-001","phase":"impact","title":"Implementation authorization is recorded","kind":"human","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["approvalRecord"],"requiredRole":"IMPLEMENTATION_APPROVER"},
+    {"id":"IMPL-M-001","phase":"implementation","title":"Green, Open QA, and impact gates pass","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["resultHash"]},
+    {"id":"IMPL-M-002","phase":"implementation","title":"Only Allowed Files changed","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","sha256"]},
+    {"id":"IMPL-M-003","phase":"implementation","title":"Legacy edits preserve CP932, no BOM, and CRLF","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","sha256"]},
+    {"id":"IMPL-M-004","phase":"implementation","title":"Make, Rebuild, and final integrity evidence pass","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["command","resultHash"]},
+    {"id":"IMPL-A-001","phase":"implementation","title":"Every change aligns to a ReqID","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"TEST-M-001","phase":"test","title":"Every ReqID and acceptance criterion maps to a test","kind":"machine","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line"]},
+    {"id":"TEST-A-001","phase":"test","title":"Preconditions, steps, expected results, and build evidence are sufficient","kind":"ai","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["path","line","rationale"]},
+    {"id":"TEST-H-001","phase":"test","title":"Specification approval is recorded for the test specification","kind":"human","severity":"blocker","allowNotApplicable":false,"requiredEvidence":["approvalRecord"],"requiredRole":"SPECIFICATION_APPROVER"}
+  ]
+}

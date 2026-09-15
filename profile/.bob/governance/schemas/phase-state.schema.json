@@ -1,0 +1,11 @@
+{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "$id":"https://team-bob.local/schemas/phase-state.schema.json",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schemaVersion","profileVersion","policyVersion","taskId","currentPhase","completedPhases","workPacketPath","workPacketSha256","policyBundleSha256","roleLedgerSha256","latestResultPath","latestResultSha256","updatedAtUtc"],
+  "properties":{
+    "schemaVersion":{"type":"string","const":"1.0"},"profileVersion":{"type":"string","const":"0.2.0-poc"},"policyVersion":{"type":"string","const":"0.2.0-poc"},"taskId":{"type":"string","minLength":1},"currentPhase":{"type":"string","enum":["requirements","specification","impact","implementation","review","test","complete"]},"completedPhases":{"type":"array","items":{"type":"string","enum":["requirements","specification","impact","implementation","review","test"]}},
+    "workPacketPath":{"type":"string","minLength":1},"workPacketSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"policyBundleSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"roleLedgerSha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},"latestResultPath":{"type":["string","null"]},"latestResultSha256":{"type":["string","null"],"pattern":"^[0-9a-f]{64}$"},"updatedAtUtc":{"type":"string","pattern":"^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,7})?Z$"}
+  }
+}

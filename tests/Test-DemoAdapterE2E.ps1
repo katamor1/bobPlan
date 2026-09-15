@@ -124,15 +124,14 @@ public static class FakeBazaar {
 function Write-DemoE2EWorkPacket {
     param([string]$Path, [string]$BazaarRoot, [string]$TaskId, [string]$ProfileId)
     $packet = [ordered]@{
-        'Profile Version' = '0.1.0-poc'; 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Demo fixture'
+        'Profile Version' = '0.2.0-poc'; 'Policy Version' = '0.2.0-poc'; 'Policy Bundle SHA256' = ('0' * 64); 'Role Ledger SHA256' = ('1' * 64); 'Task ID' = $TaskId; 'Difficulty' = 'Small'; 'Risk' = 'Green'; 'Customer' = 'Demo fixture'
         'ReqIDs' = @('REQ-DEMO-ADAPTER-E2E'); 'Word Baseline' = 'WORD-1'; 'QA Baseline' = 'QA-1'; 'Spec Baseline' = 'SPEC-1'
         'Bazaar Root' = [System.IO.Path]::GetFullPath($BazaarRoot); 'Bazaar Branch' = 'fixture-branch'; 'Bazaar Full Revision ID' = 'fixture-revision-id-full-123'
         'Allowed Files' = @('demo/CycleWatch/src/CycleWatch.cpp'); 'Forbidden Areas' = @('actual-machine', 'control-network', 'mainline', 'secrets')
         'RT Impact' = 'None'; 'Safety Impact' = 'None'; 'Board Impact' = 'None'; 'Driver Impact' = 'None'; 'ABI Impact' = 'None'; 'Build Impact' = 'Fixture'; 'Customer Branch Impact' = 'None'
         'RT Impact Clear' = 'YES'; 'Safety Impact Clear' = 'YES'; 'Board Impact Clear' = 'YES'; 'Driver Impact Clear' = 'YES'; 'ABI Impact Clear' = 'YES'; 'Build Impact Clear' = 'YES'; 'Customer Branch Impact Clear' = 'YES'
-        'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $ProfileId
-        'Autonomous-Edit-Build-Approved' = 'YES'; 'Soft-Execute-Risk-Accepted' = 'YES'; 'Max-Repair-Cycles' = 2
-        'Specification Approver' = 'Fixture Approver'; 'Implementation Approver' = 'Fixture Approver'
+        'Clean Working Copy' = 'YES'; 'Open QA' = @(); 'Build Profile ID' = $ProfileId; 'Max-Repair-Cycles' = 2
+        'Specification Assignment ID' = 'ASSIGN-SPEC'; 'Implementation Assignment ID' = 'ASSIGN-IMPL'; 'Independent Reviewer Assignment ID' = 'ASSIGN-REVIEW'
     }
     $json = $packet | ConvertTo-Json -Depth 20
     Write-DemoE2EUtf8NoBom $Path ("# Work Packet`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n$json`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n")

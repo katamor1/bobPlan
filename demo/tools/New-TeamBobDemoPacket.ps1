@@ -22,6 +22,9 @@ $script:TaskIds = @{
 $script:SpecificationRole = 'DEMO-SPEC-APPROVER-ROLE'
 $script:ImplementationRole = 'DEMO-IMPLEMENTATION-APPROVER-ROLE'
 $script:IndependentReviewRole = 'DEMO-INDEPENDENT-REVIEWER-ROLE'
+$script:SpecificationAssignmentId = 'ASSIGN-DEMO-SPECIFICATION'
+$script:ImplementationAssignmentId = 'ASSIGN-DEMO-IMPLEMENTATION'
+$script:IndependentReviewerAssignmentId = 'ASSIGN-DEMO-INDEPENDENT-REVIEW'
 $script:InitialFaultLine = '#error MSBUILD_DEMO_ADAPTER_INTENTIONAL_COMPILER_FAULT "demo/CycleWatch/src/CycleWatch.cpp" AFTER_EVIDENCE_REPLACE_THIS_EXACT_LINE_WITH: #pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
 $script:RepairedFaultLine = '#pragma message("MSBUILD_DEMO_ADAPTER_INTENTIONAL_FAULT_REPAIRED demo/CycleWatch/src/CycleWatch.cpp")'
 $script:ForbiddenAreas = @(
@@ -240,7 +243,7 @@ function Get-DemoApprovedContext {
     $environment = Get-TeamBobLocalEnvironment $manifestPath $workSchemaPath $buildSchemaPath -BazaarOnly -RootFailureStatus 'INTEGRITY_FAILED'
     $environmentPath = Get-TeamBobCanonicalPath ([string]$marker.paths.environmentRegistration) 'Marker environment registration' 'INTEGRITY_FAILED'
     if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Marker environment registration is missing.') }
-    if (-not $environmentPath.Equals((Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA) 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'), [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $environmentPath.Equals((Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA) 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'), [System.StringComparison]::OrdinalIgnoreCase)) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'Marker environment registration does not match current LOCALAPPDATA.')
     }
     Assert-DemoHash $environmentPath $marker.hashes.demoEnvironment 'Demo environment registration'
@@ -457,11 +460,12 @@ function Assert-DemoChain {
         Assert-DemoHash $resolvedPacket $entry.packetSha256 "$entryPhase packet"
         $packet = Read-TeamBobCanonicalPacket $resolvedPacket
         $expectedRisk = @('Amber', 'Amber', 'Green', 'Amber')[$i]
-        $expectedSpecificationRole = $script:SpecificationRole
-        $expectedImplementationRole = if ($entryPhase -ceq 'Test') { $script:IndependentReviewRole } else { $script:ImplementationRole }
+        $expectedSpecificationRole = $script:SpecificationAssignmentId
+        $expectedImplementationRole = if ($entryPhase -ceq 'Test') { $script:IndependentReviewerAssignmentId } else { $script:ImplementationAssignmentId }
         if ($packet.'Task ID' -cne $entry.taskId -or $packet.Risk -cne $entry.risk -or
             $packet.'Bazaar Branch' -cne $entry.bazaarBranch -or $packet.'Bazaar Full Revision ID' -cne $entry.bazaarFullRevisionId -or
-            $packet.'Specification Approver' -cne $entry.specificationApproverRole -or $packet.'Implementation Approver' -cne $entry.implementationApproverRole -or
+            $packet.'Specification Assignment ID' -cne $entry.specificationApproverRole -or
+            $(if ($entryPhase -ceq 'Test') { $packet.'Independent Reviewer Assignment ID' } else { $packet.'Implementation Assignment ID' }) -cne $entry.implementationApproverRole -or
             $entry.risk -cne $expectedRisk -or $entry.specificationApproverRole -cne $expectedSpecificationRole -or
             $entry.implementationApproverRole -cne $expectedImplementationRole) {
             throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$entryPhase chain entry does not match its canonical packet.")
@@ -780,8 +784,10 @@ function Invoke-DemoStartTask {
         TaskId = $TaskId; BazaarRoot = $Context.Workspace; Difficulty = 'Small'; Classification = $Classification
         Customer = 'Customer-A'; ReqIds = @($script:RequirementId); WordBaseline = $WordBaseline; QaBaseline = $QaBaseline
         SpecBaseline = $SpecBaseline; AllowedFiles = @($script:AllowedFile); BuildProfileId = $script:DemoProfileId
-        SpecificationApprover = $SpecificationApprover; ImplementationApprover = $ImplementationApprover
-        AutonomousEditBuildApproved = 'YES'; SoftExecuteRiskAccepted = 'YES'; MaxRepairCycles = 2
+        SpecificationAssignmentId = $script:SpecificationAssignmentId
+        ImplementationAssignmentId = $script:ImplementationAssignmentId
+        IndependentReviewerAssignmentId = $script:IndependentReviewerAssignmentId
+        MaxRepairCycles = 2
         ForbiddenAreas = @($script:ForbiddenAreas)
     }
     if ($ImpactsClear) {
@@ -833,8 +839,10 @@ function Assert-DemoCreatedPacket {
         $packet.'Bazaar Root' -cne $Context.Workspace -or $packet.'Bazaar Branch' -cne $Preflight.Branch -or
         $packet.'Bazaar Full Revision ID' -cne $Preflight.Revision -or @($packet.'Allowed Files').Count -ne 1 -or
         $packet.'Allowed Files'[0] -cne $script:AllowedFile -or $packet.'Build Profile ID' -cne $script:DemoProfileId -or
-        $packet.'Specification Approver' -cne $SpecificationApprover -or $packet.'Implementation Approver' -cne $ImplementationApprover -or
-        $packet.'Autonomous-Edit-Build-Approved' -cne 'YES' -or $packet.'Soft-Execute-Risk-Accepted' -cne 'YES' -or
+        $packet.'Profile Version' -cne '0.2.0-poc' -or $packet.'Policy Version' -cne '0.2.0-poc' -or
+        $packet.'Specification Assignment ID' -cne $script:SpecificationAssignmentId -or
+        $packet.'Implementation Assignment ID' -cne $script:ImplementationAssignmentId -or
+        $packet.'Independent Reviewer Assignment ID' -cne $script:IndependentReviewerAssignmentId -or
         [int]$packet.'Max-Repair-Cycles' -ne 2 -or @($packet.'Open QA').Count -ne 0) {
         throw (New-TeamBobFailure 'INTEGRITY_FAILED' "$PhaseName canonical packet does not match the fixed demo contract.")
     }
@@ -868,7 +876,8 @@ function Write-DemoChainCreateOnly {
         phase = $PhaseName; taskId = $script:TaskIds[$PhaseName]; risk = [string]$packet.Risk
         packetPath = $PacketInfo.Path; packetSha256 = Get-TeamBobFileHash $PacketInfo.Path
         bazaarBranch = [string]$packet.'Bazaar Branch'; bazaarFullRevisionId = [string]$packet.'Bazaar Full Revision ID'
-        specificationApproverRole = [string]$packet.'Specification Approver'; implementationApproverRole = [string]$packet.'Implementation Approver'
+        specificationApproverRole = [string]$packet.'Specification Assignment ID'
+        implementationApproverRole = $(if ($PhaseName -ceq 'Test') { [string]$packet.'Independent Reviewer Assignment ID' } else { [string]$packet.'Implementation Assignment ID' })
         inputs = @($Inputs)
     }
     $entries += $entry

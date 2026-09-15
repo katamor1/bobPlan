@@ -9,6 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-GovernanceCommon.ps1')
 
 try {
     foreach ($entry in @(
@@ -36,13 +37,20 @@ try {
     $manifestPath = Join-Path $profileRoot 'profile-manifest.json'
     $workSchemaPath = Join-Path $profileRoot 'config/work-packet.schema.json'
     $buildSchemaPath = Join-Path $profileRoot 'config/vc6-build-targets.schema.json'
-    foreach ($required in @($manifestPath, $workSchemaPath, $buildSchemaPath)) {
+    $governanceRoot = Join-Path (Split-Path -Parent $profileRoot) '.bob\governance'
+    $policyPath = Join-Path $governanceRoot 'policy-manifest.json'
+    $policySchemaPath = Join-Path $governanceRoot 'schemas\policy-manifest.schema.json'
+    foreach ($required in @($manifestPath, $workSchemaPath, $buildSchemaPath, $policyPath, $policySchemaPath)) {
         if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Required profile identity file is missing: $required" }
         [void](Get-TeamBobPhysicalPath $required 'Required profile identity file' 'Leaf' 'ENVIRONMENT_FAILED')
     }
     $manifest = Read-TeamBobJsonFile $manifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
     $workSchema = Read-TeamBobJsonFile $workSchemaPath 'Work-packet schema' 'ENVIRONMENT_FAILED'
     $buildSchema = Read-TeamBobJsonFile $buildSchemaPath 'Build-target schema' 'ENVIRONMENT_FAILED'
+    $governanceErrors = @(Test-TeamBobGovernancePackage -GovernanceRoot $governanceRoot)
+    if ($governanceErrors.Count -gt 0) { throw ('Installed governance package is invalid: ' + ($governanceErrors -join '; ')) }
+    $policy = Read-TeamBobJsonFile $policyPath 'Policy manifest' 'ENVIRONMENT_FAILED'
+    $policySchema = Read-TeamBobJsonFile $policySchemaPath 'Policy-manifest schema' 'ENVIRONMENT_FAILED'
     if ([string]::IsNullOrWhiteSpace($manifest.profile.id) -or [string]::IsNullOrWhiteSpace($manifest.version)) { throw 'Profile manifest identity is incomplete.' }
     if ([string]::IsNullOrWhiteSpace($workSchema.'$id') -or [string]::IsNullOrWhiteSpace($buildSchema.'$id')) { throw 'Profile schema identity is incomplete.' }
 
@@ -50,6 +58,9 @@ try {
         schemaVersion = '1.0'
         profileId = [string]$manifest.profile.id
         profileVersion = [string]$manifest.version
+        policyVersion = [string]$policy.policyVersion
+        policyBundleSha256 = Get-TeamBobPolicyBundleHash $governanceRoot
+        policyManifestSchemaId = [string]$policySchema.'$id'
         pcId = [Environment]::MachineName
         workPacketSchemaId = [string]$workSchema.'$id'
         buildTargetSchemaId = [string]$buildSchema.'$id'
@@ -69,7 +80,7 @@ try {
     Assert-TeamBobPhysicalSeparation $logInfo.PhysicalPath $repositoryPhysical 'LogRoot and repository root' 'ENVIRONMENT_FAILED'
     Assert-TeamBobPhysicalSeparation $sandboxInfo.PhysicalPath $logInfo.PhysicalPath 'SandboxRoot and LogRoot' 'ENVIRONMENT_FAILED'
     $json = ($registration | ConvertTo-Json -Depth 5) + [Environment]::NewLine
-    $environmentParent = Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED') 'IBM/BobTeamProfile/vc6-machine-control-poc'
+    $environmentParent = Join-Path (Get-TeamBobCanonicalPath $env:LOCALAPPDATA 'LOCALAPPDATA' 'ENVIRONMENT_FAILED') 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc'
     $environmentParentInfo = Get-TeamBobProspectiveDirectory $environmentParent 'Environment registration parent' 'ENVIRONMENT_FAILED' -RejectVolumeRoot
     $environmentPath = Join-Path $environmentParentInfo.FullPath 'environment.json'
 

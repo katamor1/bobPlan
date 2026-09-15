@@ -115,6 +115,47 @@ try {
     Assert-Equal $rerunResult.ExitCode 0 'Installer identical rerun is idempotent'
     Assert-True ($rerunResult.Output -match 'IDENTICAL') 'Installer reports identical files on rerun'
 
+    $legacyUpgradeTarget = Join-Path $fixtureRoot 'legacy-v01-target'
+    New-Item -ItemType Directory -Path (Join-Path $legacyUpgradeTarget 'team-bob'), (Join-Path $legacyUpgradeTarget '.bzr') -Force | Out-Null
+    Write-JsonFixture (Join-Path $legacyUpgradeTarget 'team-bob/profile-manifest.json') ([pscustomobject][ordered]@{
+        version = '0.1.0-poc'
+        profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar'; name = 'Team Bob VC6 Bazaar Profile' }
+        compatibility = [pscustomobject][ordered]@{ operatingSystem = 'Windows'; ide = 'IBM Bob IDE 2.1.x'; toolchain = 'Visual C++ 6.0'; vcs = 'Bazaar' }
+        contracts = [pscustomobject][ordered]@{ workPacketSchema = 'config/work-packet.schema.json'; buildTargetSchema = 'config/vc6-build-targets.schema.json'; buildTargets = 'config/vc6-build-targets.json'; modes = '../.bob/custom_modes.yaml'; rules = '../.bob/rules/' }
+    })
+    Write-Utf8NoBomFixture (Join-Path $legacyUpgradeTarget '.bzr/branch.conf') 'legacy-upgrade-bzr'
+    Write-Utf8NoBomFixture (Join-Path $legacyUpgradeTarget 'untouched.txt') 'legacy-upgrade-target'
+    $legacyUpgradeFingerprint = Get-TreeFingerprintFixture $legacyUpgradeTarget
+    $legacyUpgradeSourceFingerprint = Get-TreeFingerprintFixture $toolsRepoRoot
+    $legacyUpgradeRegistration = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    $v02UpgradeRegistration = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
+    Write-Utf8NoBomFixture $legacyUpgradeRegistration 'LEGACY-UPGRADE-REGISTRATION'
+    Write-Utf8NoBomFixture $v02UpgradeRegistration 'V02-UPGRADE-REGISTRATION'
+    foreach ($upgradeMode in @('WhatIf', 'Apply')) {
+        $upgradeArguments = @('-TargetPath', $legacyUpgradeTarget)
+        if ($upgradeMode -eq 'WhatIf') { $upgradeArguments += '-WhatIf' }
+        $legacyUpgradeResult = Invoke-TestScript $installerPath $upgradeArguments
+        Assert-True ($legacyUpgradeResult.ExitCode -ne 0) "Installer rejects an in-place v0.1 upgrade in $upgradeMode mode"
+        Assert-True ($legacyUpgradeResult.Output -match 'UPGRADE_REQUIRES_FRESH_TARGET') "v0.1 $upgradeMode refusal emits the fixed migration token"
+        Assert-Equal (Get-TreeFingerprintFixture $legacyUpgradeTarget) $legacyUpgradeFingerprint "v0.1 $upgradeMode refusal preserves target and .bzr bytes"
+        Assert-Equal (Get-TreeFingerprintFixture $toolsRepoRoot) $legacyUpgradeSourceFingerprint "v0.1 $upgradeMode refusal preserves distribution source bytes"
+        Assert-Equal ([System.IO.File]::ReadAllText($legacyUpgradeRegistration)) 'LEGACY-UPGRADE-REGISTRATION' "v0.1 $upgradeMode refusal preserves legacy registration"
+        Assert-Equal ([System.IO.File]::ReadAllText($v02UpgradeRegistration)) 'V02-UPGRADE-REGISTRATION' "v0.1 $upgradeMode refusal preserves v0.2 registration"
+    }
+    foreach ($markerCase in @(
+        [pscustomobject]@{ Name = 'spoofed'; Value = [pscustomobject][ordered]@{ version = '0.1.0-poc'; profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar' }; extra = 'spoof' } },
+        [pscustomobject]@{ Name = 'unknown'; Value = [pscustomobject][ordered]@{ version = '9.9.9'; profile = [pscustomobject][ordered]@{ id = 'team-bob-vc6-bazaar' } } }
+    )) {
+        $markerTarget = Join-Path $fixtureRoot ('marker-' + $markerCase.Name)
+        Write-JsonFixture (Join-Path $markerTarget 'team-bob/profile-manifest.json') $markerCase.Value
+        $markerFingerprint = Get-TreeFingerprintFixture $markerTarget
+        $markerResult = Invoke-TestScript $installerPath @('-TargetPath', $markerTarget, '-WhatIf')
+        Assert-True ($markerResult.ExitCode -ne 0) "Installer rejects $($markerCase.Name) marker as a normal conflict"
+        Assert-True ($markerResult.Output -match 'CONFLICT' -and $markerResult.Output -notmatch 'UPGRADE_REQUIRES_FRESH_TARGET') "Installer does not grant the v0.1 token to a $($markerCase.Name) marker"
+        Assert-Equal (Get-TreeFingerprintFixture $markerTarget) $markerFingerprint "Installer preserves $($markerCase.Name) conflict bytes"
+    }
+    Remove-Item -LiteralPath $legacyUpgradeRegistration, $v02UpgradeRegistration -Force
+
     $conflictPath = Join-Path $installTarget 'AGENTS.md'
     Write-Utf8NoBomFixture $conflictPath 'local-conflict'
     $missingBeforeConflict = Join-Path $installTarget 'team-bob/templates/test-spec.md'
@@ -224,14 +265,20 @@ exit /b 41
     $sandboxRoot = Join-Path $fixtureRoot 'サンドボックス-日本'
     $logRoot = Join-Path $fixtureRoot 'ログ-日本'
     $initializeArguments = @('-MsdevPath', $msdevPath, '-BazaarPath', $bazaarPath, '-SandboxRoot', $sandboxRoot, '-LogRoot', $logRoot)
+    $legacyEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
+    Write-Utf8NoBomFixture $legacyEnvironmentPath 'LEGACY-V0.1-SENTINEL'
     $initializeResult = Invoke-TestScript $initializePath $initializeArguments
     Assert-Equal $initializeResult.ExitCode 0 'Environment initializer writes a valid fixed local registration'
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json'
-    Assert-True (Test-Path -LiteralPath $environmentPath -PathType Leaf) 'Environment registration uses the fixed LOCALAPPDATA path'
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json'
+    Assert-True (Test-Path -LiteralPath $environmentPath -PathType Leaf) 'Environment registration uses the isolated v0.2 LOCALAPPDATA path'
+    Assert-Equal ([System.IO.File]::ReadAllText($legacyEnvironmentPath)) 'LEGACY-V0.1-SENTINEL' 'v0.2 initialization does not reuse or overwrite the v0.1 registration'
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.schemaVersion '1.0' 'Environment registration has a stable schema version'
     Assert-Equal $environment.profileId 'team-bob-vc6-bazaar' 'Environment registration records profile identity'
-    Assert-Equal $environment.profileVersion '0.1.0-poc' 'Environment registration records profile version'
+    Assert-Equal $environment.profileVersion '0.2.0-poc' 'Environment registration records profile version'
+    Assert-Equal $environment.policyVersion '0.2.0-poc' 'Environment registration records policy version'
+    Assert-True ([string]$environment.policyBundleSha256 -match '^[0-9a-f]{64}$') 'Environment registration records the installed policy bundle hash'
+    Assert-Equal $environment.policyManifestSchemaId 'https://team-bob.local/schemas/policy-manifest.schema.json' 'Environment registration records the policy-manifest schema identity'
     Assert-Equal $environment.pcId ([Environment]::MachineName) 'Environment registration records stable machine identity'
     Assert-Equal $environment.msdevSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $msdevPath).Hash.ToLowerInvariant() 'Environment registration hashes MSDEV'
     Assert-Equal $environment.bazaarSha256 (Get-FileHash -Algorithm SHA256 -LiteralPath $bazaarPath).Hash.ToLowerInvariant() 'Environment registration hashes Bazaar'
@@ -302,8 +349,17 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal $environment.bazaarPath ([System.IO.Path]::GetFullPath($bazaarPath)) 'Environment initializer records canonical Bazaar path after Force'
 
-    # Strict validator accepts the complete source profile and rejects environment/hash/profile selection failures.
-    $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    # Strict validator uses an isolated installed profile with active, scoped, unexpired, distinct role assignments.
+    $strictRolesPath = Join-Path $catalogProfileRoot '.bob/governance/roles.json'
+    $strictRoles = Get-Content -Raw -LiteralPath $strictRolesPath | ConvertFrom-Json
+    $strictRolePhases = @('requirements', 'specification', 'impact', 'implementation', 'review', 'test')
+    $strictRoles.assignments = @(
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-SPEC-TEST'; role = 'SPECIFICATION_APPROVER'; principalId = 'fixture-spec'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-IMPL-TEST'; role = 'IMPLEMENTATION_APPROVER'; principalId = 'fixture-impl'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' },
+        [pscustomobject][ordered]@{ assignmentId = 'ASSIGN-REVIEW-TEST'; role = 'INDEPENDENT_REVIEWER'; principalId = 'fixture-review'; scope = [pscustomobject][ordered]@{ allTasks = $true; taskIds = @(); phases = $strictRolePhases }; enabled = $true; validFromUtc = '2000-01-01T00:00:00Z'; validUntilUtc = '2099-01-01T00:00:00Z' }
+    )
+    Write-JsonFixture $strictRolesPath $strictRoles
+    $strictResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-Equal $strictResult.ExitCode 0 "Strict profile validation succeeds with registered tools and external roots; output: $($strictResult.Output.Trim())"
     Assert-True ($strictResult.Output -match 'SUMMARY.*Failed=0') 'Strict validator emits a zero-failure summary'
 
@@ -312,7 +368,7 @@ exit /b 41
     $environmentBytesWithBom[0] = 0xEF; $environmentBytesWithBom[1] = 0xBB; $environmentBytesWithBom[2] = 0xBF
     [Array]::Copy($environmentBytesWithoutBom, 0, $environmentBytesWithBom, 3, $environmentBytesWithoutBom.Length)
     [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithBom)
-    $strictBomEnvironment = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictBomEnvironment = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictBomEnvironment.ExitCode -ne 0) 'Strict validator rejects a BOM-bearing production environment JSON file'
     [System.IO.File]::WriteAllBytes($environmentPath, $environmentBytesWithoutBom)
 
@@ -321,7 +377,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.msdevPath = Join-Path $strictToolAlias 'MSDEV.COM'
     Write-JsonFixture $environmentPath $environment
-    $strictToolAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictToolAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictToolAliasResult.ExitCode -ne 0) 'Strict validator rejects a registered tool path through a junction component'
     Assert-True ($strictToolAliasResult.Output -match 'FAIL.*MSDEV|reparse|physical') 'Strict validator reports the tool physical-boundary failure'
     [System.IO.Directory]::Delete($strictToolAlias)
@@ -333,7 +389,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.sandboxRoot = $strictRootAlias
     Write-JsonFixture $environmentPath $environment
-    $strictRootAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $strictRootAliasResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($strictRootAliasResult.ExitCode -ne 0) 'Strict validator rejects a sandbox root junction that aliases the source repository'
     Assert-True ($strictRootAliasResult.Output -match 'FAIL.*Sandbox|reparse|physical') 'Strict validator reports the root physical-boundary failure'
     [System.IO.Directory]::Delete($strictRootAlias)
@@ -344,7 +400,7 @@ exit /b 41
     $environment.msdevPath = 'scripts/Install-TeamBobProfile.ps1'
     $environment.msdevSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $toolsRepoRoot 'scripts/Install-TeamBobProfile.ps1')).Hash.ToLowerInvariant()
     Write-JsonFixture $environmentPath $environment
-    $relativeToolResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $relativeToolResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($relativeToolResult.ExitCode -ne 0) 'Strict validator rejects relative tool paths even when they resolve and hash-match'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-tool validation test'
@@ -352,7 +408,7 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.sandboxRoot = 'tests'
     Write-JsonFixture $environmentPath $environment
-    $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $relativeRootResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($relativeRootResult.ExitCode -ne 0) 'Strict validator rejects relative sandbox and log root registrations'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after relative-root validation test'
@@ -360,20 +416,20 @@ exit /b 41
     $environment = [System.IO.File]::ReadAllText($environmentPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     $environment.pcId = 'different-machine'
     Write-JsonFixture $environmentPath $environment
-    $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $machineIdentityResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($machineIdentityResult.ExitCode -ne 0) 'Strict validator rejects an environment registered for another machine'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after machine-identity validation test'
 
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-tampered'
-    $hashFailure = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $hashFailure = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($hashFailure.ExitCode -ne 0) 'Strict validator rejects a mismatched tool hash'
     Assert-True ($hashFailure.Output -match 'FAIL.*MSDEV hash') 'Strict validator emits a failed hash check record'
     Write-Utf8NoBomFixture $msdevPath 'fixture-msdev-v1'
     $forceResult = Invoke-TestScript $initializePath ($initializeArguments + '-Force')
     Assert-Equal $forceResult.ExitCode 0 'Environment hash is restored for task tests'
 
-    $missingProfileResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-BuildProfileId', 'missing-profile', '-Strict')
+    $missingProfileResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-BuildProfileId', 'missing-profile', '-Strict')
     Assert-True ($missingProfileResult.ExitCode -ne 0) 'Validator rejects a requested build profile absent from the empty catalog'
 
     $targetSchemaFixture = Get-Content -Raw -LiteralPath (Join-Path $toolsProfileRoot 'team-bob/config/vc6-build-targets.schema.json') | ConvertFrom-Json
@@ -408,6 +464,13 @@ exit /b 41
     Assert-Equal $qualifiedProfileResult.ExitCode 0 "Validator accepts one complete enabled qualification for the registered PC; output: $($qualifiedProfileResult.Output.Trim())"
 
     # Start task: fake Bazaar observes only the allowed read-only command set.
+    $startTaskPath = Join-Path $catalogProfileRoot 'team-bob/tools/Start-TeamBobTask.ps1'
+    $roleNow = [DateTimeOffset]::UtcNow
+    Write-JsonFixture (Join-Path $catalogProfileRoot '.bob/governance/roles.json') ([ordered]@{policyVersion='0.2.0-poc';assignments=@(
+        [ordered]@{assignmentId='ASSIGN-SPEC';role='SPECIFICATION_APPROVER';principalId='principal-spec';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('specification','test')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')},
+        [ordered]@{assignmentId='ASSIGN-IMPL';role='IMPLEMENTATION_APPROVER';principalId='principal-impl';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('impact')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')},
+        [ordered]@{assignmentId='ASSIGN-REVIEW';role='INDEPENDENT_REVIEWER';principalId='principal-review';scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('review')};enabled=$true;validFromUtc=$roleNow.AddHours(-1).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ');validUntilUtc=$roleNow.AddDays(7).ToString('yyyy-MM-ddTHH:mm:ss.fffffffZ')}
+    )})
     $bazaarRoot = Join-Path $fixtureRoot 'working-tree'
     New-Item -ItemType Directory -Path (Join-Path $bazaarRoot '.bzr') -Force | Out-Null
     Write-Utf8NoBomFixture (Join-Path $bazaarRoot '.bzr/branch.conf') 'working-tree-metadata'
@@ -418,16 +481,17 @@ exit /b 41
         '-TaskId', 'GREEN-0001', '-BazaarRoot', $bazaarRoot, '-Difficulty', 'Small', '-Classification', 'Green',
         '-Customer', 'Fixture Customer', '-ReqIds', 'REQ-100', '-WordBaseline', 'WORD-1', '-QaBaseline', 'QA-1',
         '-SpecBaseline', 'SPEC-1', '-AllowedFiles', 'src/example.cpp', '-BuildProfileId', 'fixture-vc6',
-        '-SpecificationApprover', 'Spec Approver', '-ImplementationApprover', 'Implementation Approver',
+        '-SpecificationAssignmentId', 'ASSIGN-SPEC', '-ImplementationAssignmentId', 'ASSIGN-IMPL', '-IndependentReviewerAssignmentId', 'ASSIGN-REVIEW',
         '-RTImpactClear', 'YES', '-SafetyImpactClear', 'YES', '-BoardImpactClear', 'YES', '-DriverImpactClear', 'YES',
-        '-ABIImpactClear', 'YES', '-BuildImpactClear', 'YES', '-CustomerBranchImpactClear', 'YES',
-        '-AutonomousEditBuildApproved', 'YES', '-SoftExecuteRiskAccepted', 'YES'
+        '-ABIImpactClear', 'YES', '-BuildImpactClear', 'YES', '-CustomerBranchImpactClear', 'YES'
     )
     $startResult = Invoke-TestScript $startTaskPath $greenArguments
     Assert-Equal $startResult.ExitCode 0 'Start task creates a work packet for a clean fully approved Green task'
     $workPacketPath = Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/work-packet.md'
     Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/drafts') -PathType Container) 'Start task creates drafts directory'
     Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/results') -PathType Container) 'Start task creates results directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/approvals') -PathType Container) 'Start task creates approvals directory'
+    Assert-True (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-0001/state/phase-state.json') -PathType Leaf) 'Start task atomically publishes initial phase state'
     $createdPacket = Get-CanonicalPacketFixture $workPacketPath
     Assert-Equal $createdPacket.'Task ID' 'GREEN-0001' 'Created work packet records Task ID'
     Assert-Equal $createdPacket.Risk 'Green' 'Created work packet records Green classification'
@@ -503,11 +567,14 @@ exit /b 41
     Assert-True ($openQaResult.ExitCode -ne 0) 'Start task refuses Green classification with open QA'
 
     $missingApprovalArguments = @($greenArguments)
-    $missingApprovalArguments[1] = 'GREEN-NO-APPROVAL'
-    $approvalIndex = [array]::IndexOf($missingApprovalArguments, '-AutonomousEditBuildApproved')
-    $missingApprovalArguments[$approvalIndex + 1] = 'NO'
+    $missingApprovalArguments[1] = 'GREEN-NO-ASSIGNMENT'
+    $approvalIndex = [array]::IndexOf($missingApprovalArguments, '-SpecificationAssignmentId')
+    $missingApprovalArguments[$approvalIndex + 1] = 'ASSIGN-MISSING'
+    [System.IO.File]::WriteAllText($env:BOB_TEST_BZR_LOG, '')
     $missingApprovalResult = Invoke-TestScript $startTaskPath $missingApprovalArguments
-    Assert-True ($missingApprovalResult.ExitCode -ne 0) 'Start task refuses Green classification without explicit YES approval'
+    Assert-True ($missingApprovalResult.ExitCode -ne 0) 'Start task refuses an absent selected assignment'
+    Assert-Equal ([System.IO.File]::ReadAllText($env:BOB_TEST_BZR_LOG)) '' 'Role rejection occurs before every Bazaar command'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $bazaarRoot 'team-bob-work/GREEN-NO-ASSIGNMENT'))) 'Role rejection creates no task tree'
 
     $outsideArguments = @($greenArguments)
     $outsideArguments[1] = 'GREEN-OUTSIDE'
@@ -605,7 +672,7 @@ exit /b 41
     Assert-Equal $forceResult.ExitCode 0 'Environment is restored after Start root-overlap boundary test'
 
     Remove-Item -LiteralPath $environmentPath
-    $missingEnvironmentResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $toolsProfileRoot, '-Strict')
+    $missingEnvironmentResult = Invoke-TestScript $validatorPath @('-RepositoryRoot', $catalogProfileRoot, '-Strict')
     Assert-True ($missingEnvironmentResult.ExitCode -ne 0) 'Strict validator requires the fixed local environment registration'
 } finally {
     $env:LOCALAPPDATA = $originalLocalAppData

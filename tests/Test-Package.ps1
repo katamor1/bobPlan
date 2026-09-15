@@ -63,7 +63,7 @@ function Get-PropertyValue {
 
 function Test-JsonSchemaKeywords {
     param([object]$Schema, [string]$Path = '$')
-    $allowed = @('$schema', '$id', 'title', 'description', 'type', 'additionalProperties', 'required', 'properties', 'const', 'enum', 'minLength', 'minItems', 'maxItems', 'items', 'pattern', 'allOf', 'if', 'then')
+    $allowed = @('$schema', '$id', 'title', 'description', 'type', 'additionalProperties', 'required', 'properties', 'const', 'enum', 'minLength', 'minItems', 'maxItems', 'uniqueItems', 'items', 'pattern', 'allOf', 'if', 'then')
     $errors = @()
     foreach ($property in $Schema.PSObject.Properties) {
         if (-not ($allowed -contains $property.Name)) { $errors += "unsupported:$Path.$($property.Name)" }
@@ -102,6 +102,9 @@ function Test-JsonSchemaNode {
         if ($null -ne $Schema.maxItems -and $Value.Count -gt [int]$Schema.maxItems) { $errors += "maxItems:$Path" }
         if ($null -ne $Schema.items) {
             for ($index = 0; $index -lt $Value.Count; $index++) { $errors += @(Test-JsonSchemaNode $Schema.items $Value[$index] "$Path[$index]") }
+        }
+        if ($Schema.uniqueItems -eq $true) {
+            for ($left=0;$left -lt $Value.Count;$left++) { for ($right=$left+1;$right -lt $Value.Count;$right++) { if ($Value[$left] -ceq $Value[$right]) { $errors += "uniqueItems:$Path" } } }
         }
     }
     if ($Value -is [System.Management.Automation.PSCustomObject]) {
@@ -146,7 +149,9 @@ $requiredFiles = @(
     'team-bob/templates/work-packet.md', 'team-bob/templates/requirement-ledger.csv', 'team-bob/templates/external-spec.md',
     'team-bob/templates/impact-analysis.md', 'team-bob/templates/code-review.md', 'team-bob/templates/test-spec.md',
     'team-bob/templates/review-rubric.md', 'team-bob/templates/usage-log.csv', 'team-bob/templates/exception-record.md',
-    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
+    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1',
+    'team-bob/tools/TeamBob-GovernanceCommon.ps1', 'team-bob/tools/TeamBob-ComplianceCommon.ps1', 'team-bob/tools/Start-TeamBobTask.ps1',
+    'team-bob/tools/New-TeamBobApprovalRecord.ps1', 'team-bob/tools/Invoke-TeamBobComplianceCheck.ps1'
 )
 foreach ($relativePath in $requiredFiles) { Assert-True (Test-Path -LiteralPath (Join-Path $profileRoot $relativePath) -PathType Leaf) "Required profile file exists: $relativePath" }
 
@@ -191,7 +196,7 @@ foreach ($scriptPath in @(Get-ChildItem -LiteralPath (Join-Path $repoRoot 'scrip
 
 $manifestPath = Join-Path $profileRoot 'team-bob/profile-manifest.json'
 $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-Assert-Equal $manifest.version '0.1.0-poc' 'Manifest version is stable'
+Assert-Equal $manifest.version '0.2.0-poc' 'Manifest activates the v0.2 governance runtime'
 Assert-Equal $manifest.profile.id 'team-bob-vc6-bazaar' 'Manifest exposes the Team Bob profile identity'
 Assert-Equal $manifest.compatibility.operatingSystem 'Windows' 'Manifest declares Windows compatibility'
 Assert-Equal $manifest.compatibility.ide 'IBM Bob IDE 2.1.x' 'Manifest declares Bob IDE compatibility'
@@ -233,11 +238,10 @@ foreach ($mode in $modes) {
 
 $workPacketSchema = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'team-bob/config/work-packet.schema.json') | ConvertFrom-Json
 Assert-Equal @(Test-JsonSchemaKeywords $workPacketSchema).Count 0 'Work-packet schema uses only validator-supported keywords'
-$requiredPacketFields = @('Profile Version', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Allowed Files', 'Forbidden Areas', 'RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact', 'Customer Branch Impact', 'RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy', 'Open QA', 'Build Profile ID', 'Autonomous-Edit-Build-Approved', 'Soft-Execute-Risk-Accepted', 'Max-Repair-Cycles', 'Specification Approver', 'Implementation Approver')
+$requiredPacketFields = @('Profile Version', 'Policy Version', 'Policy Bundle SHA256', 'Role Ledger SHA256', 'Task ID', 'Difficulty', 'Risk', 'Customer', 'ReqIDs', 'Word Baseline', 'QA Baseline', 'Spec Baseline', 'Bazaar Root', 'Bazaar Branch', 'Bazaar Full Revision ID', 'Allowed Files', 'Forbidden Areas', 'RT Impact', 'Safety Impact', 'Board Impact', 'Driver Impact', 'ABI Impact', 'Build Impact', 'Customer Branch Impact', 'RT Impact Clear', 'Safety Impact Clear', 'Board Impact Clear', 'Driver Impact Clear', 'ABI Impact Clear', 'Build Impact Clear', 'Customer Branch Impact Clear', 'Clean Working Copy', 'Open QA', 'Build Profile ID', 'Max-Repair-Cycles', 'Specification Assignment ID', 'Implementation Assignment ID', 'Independent Reviewer Assignment ID')
 foreach ($field in $requiredPacketFields) { Assert-True ($workPacketSchema.required -contains $field) "Work-packet schema requires '$field'" }
 Assert-Equal (($workPacketSchema.properties.Risk.enum) -join ',') 'Green,Amber,Red' 'Work-packet risk enum is fixed'
-Assert-Equal $workPacketSchema.properties.'Autonomous-Edit-Build-Approved'.const 'YES' 'Autonomous edit/build requires explicit approval'
-Assert-Equal $workPacketSchema.properties.'Soft-Execute-Risk-Accepted'.const 'YES' 'Soft execute risk requires explicit acceptance'
+foreach ($removedPacketField in @('Autonomous-Edit-Build-Approved','Soft-Execute-Risk-Accepted','Specification Approver','Implementation Approver')) { Assert-True ($null -eq $workPacketSchema.properties.PSObject.Properties[$removedPacketField]) "v0.2 packet removes '$removedPacketField'" }
 Assert-Equal $workPacketSchema.properties.'Max-Repair-Cycles'.const 2 'Repair cycles are capped at two'
 foreach ($arrayField in @('ReqIDs', 'Allowed Files', 'Forbidden Areas', 'Open QA')) {
     Assert-Equal $workPacketSchema.properties.$arrayField.items.minLength 1 "Work-packet schema rejects empty '$arrayField' items"
@@ -334,6 +338,8 @@ Assert-True ($outputRule -match 'only a successful final Rebuild.*READY_FOR_HUMA
 
 Write-Host "PASS: $script:Assertions package contract assertions succeeded."
 
+. (Join-Path $PSScriptRoot 'Test-Governance.ps1')
+. (Join-Path $PSScriptRoot 'Test-Compliance.ps1')
 . (Join-Path $PSScriptRoot 'Test-DemoAdapter.ps1')
 . (Join-Path $PSScriptRoot 'Test-DemoAdapterE2E.ps1')
 . (Join-Path $PSScriptRoot 'Test-DemoPackage.ps1')

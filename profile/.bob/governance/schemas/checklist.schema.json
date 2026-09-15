@@ -1,0 +1,11 @@
+{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "$id":"https://team-bob.local/schemas/checklist.schema.json",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["policyVersion","checks"],
+  "properties":{
+    "policyVersion":{"type":"string","const":"0.2.0-poc"},
+    "checks":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["id","phase","title","kind","severity","allowNotApplicable","requiredEvidence"],"properties":{"id":{"type":"string","pattern":"^[A-Z]+-[MAH]-[0-9]{3}$"},"phase":{"type":"string","enum":["common","requirements","specification","impact","implementation","review","test"]},"title":{"type":"string","minLength":1},"kind":{"type":"string","enum":["machine","ai","human"]},"severity":{"type":"string","enum":["blocker","warning"]},"allowNotApplicable":{"type":"boolean"},"requiredEvidence":{"type":"array","minItems":1,"items":{"type":"string","enum":["path","line","sha256","rationale","command","approvalRecord","resultHash"]}},"requiredRole":{"type":"string","enum":["SPECIFICATION_APPROVER","IMPLEMENTATION_APPROVER","INDEPENDENT_REVIEWER"]}}}}
+  }
+}

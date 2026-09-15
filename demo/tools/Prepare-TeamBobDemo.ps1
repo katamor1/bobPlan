@@ -166,7 +166,7 @@ function Get-DemoEnvironmentRegistrationPath {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw (New-TeamBobFailure 'INTEGRITY_FAILED' 'LOCALAPPDATA is unavailable.') }
     $localAppData = Get-DemoCanonicalLocalPath $env:LOCALAPPDATA 'LOCALAPPDATA'
     [void](Get-TeamBobPhysicalPath $localAppData 'LOCALAPPDATA' 'Container' 'INTEGRITY_FAILED')
-    return Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    return Join-Path $localAppData 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
 }
 
 function Protect-DemoRestrictedAcl {
@@ -448,8 +448,11 @@ function New-DemoDisabledCatalog {
 
 function New-DemoNegativePacketText {
     param([string]$WorkspaceRoot)
+    $governanceRoot = Join-Path $WorkspaceRoot '.bob\governance'
     $packet = [ordered]@{
-        'Profile Version' = '0.1.0-poc'; 'Task ID' = 'DEMO-NEGATIVE-OPEN-QA'; Difficulty = 'Demo'; Risk = 'Green'; Customer = 'Customer-A'
+        'Profile Version' = '0.2.0-poc'; 'Policy Version' = '0.2.0-poc'
+        'Policy Bundle SHA256' = Get-TeamBobPolicyBundleHash $governanceRoot; 'Role Ledger SHA256' = Get-TeamBobRoleLedgerHash $governanceRoot
+        'Task ID' = 'DEMO-NEGATIVE-OPEN-QA'; Difficulty = 'Demo'; Risk = 'Green'; Customer = 'Customer-A'
         ReqIDs = @('REQ-DEMO-001'); 'Word Baseline' = 'PENDING-HUMAN-ANCHOR'; 'QA Baseline' = 'PENDING-HUMAN-ANCHOR'; 'Spec Baseline' = 'PENDING-HUMAN-APPROVAL'
         'Bazaar Root' = $WorkspaceRoot; 'Bazaar Branch' = 'PENDING-HUMAN-BOOTSTRAP'; 'Bazaar Full Revision ID' = 'PENDING-HUMAN-BOOTSTRAP'
         'Allowed Files' = @('demo/CycleWatch/src/CycleWatch.cpp'); 'Forbidden Areas' = @('actual-machine', 'control-network', 'secrets')
@@ -457,9 +460,9 @@ function New-DemoNegativePacketText {
         'Driver Impact' = 'No driver change.'; 'ABI Impact' = 'No ABI change.'; 'Build Impact' = 'MSBuild demo adapter only; not VC6 qualification.'
         'Customer Branch Impact' = 'Customer-A synthetic scope only.'; 'RT Impact Clear' = 'YES'; 'Safety Impact Clear' = 'YES'; 'Board Impact Clear' = 'YES'
         'Driver Impact Clear' = 'YES'; 'ABI Impact Clear' = 'YES'; 'Build Impact Clear' = 'YES'; 'Customer Branch Impact Clear' = 'YES'; 'Clean Working Copy' = 'YES'
-        'Open QA' = @('QA-DEMO-OPEN-001'); 'Build Profile ID' = $script:DemoProfileId; 'Autonomous-Edit-Build-Approved' = 'YES'
-        'Soft-Execute-Risk-Accepted' = 'YES'; 'Max-Repair-Cycles' = 2; 'Specification Approver' = 'DEMO-SPEC-APPROVER-ROLE'
-        'Implementation Approver' = 'DEMO-IMPLEMENTATION-APPROVER-ROLE'
+        'Open QA' = @('QA-DEMO-OPEN-001'); 'Build Profile ID' = $script:DemoProfileId; 'Max-Repair-Cycles' = 2
+        'Specification Assignment ID' = 'ASSIGN-DEMO-SPECIFICATION'; 'Implementation Assignment ID' = 'ASSIGN-DEMO-IMPLEMENTATION'
+        'Independent Reviewer Assignment ID' = 'ASSIGN-DEMO-INDEPENDENT-REVIEW'
     }
     return "# $script:DemoBanner`r`n`r`nThis packet is intentionally invalid for Green implementation because Open QA is not empty. Bob must refuse before any Edit or Execute request.`r`n`r`n<!-- canonical-work-packet-json:start -->`r`n``````json`r`n" + ($packet | ConvertTo-Json -Depth 10) + "`r`n```````r`n<!-- canonical-work-packet-json:end -->`r`n"
 }
@@ -803,6 +806,17 @@ function Invoke-DemoStage {
         $installerPath = Join-Path $Distribution 'scripts\Install-TeamBobProfile.ps1'
         [void](Get-TeamBobPhysicalPath $installerPath 'Profile installer' 'Leaf' 'INTEGRITY_FAILED')
         [void](Invoke-DemoChildScript $installerPath @('-TargetPath', $layout.workspace) $Distribution 120 'Profile installer')
+        $stagedGovernanceCommon = Join-Path $layout.workspace 'team-bob\tools\TeamBob-GovernanceCommon.ps1'
+        [void](Get-TeamBobPhysicalPath $stagedGovernanceCommon 'Staged governance helper' 'Leaf' 'INTEGRITY_FAILED')
+        . $stagedGovernanceCommon
+        Write-DemoJsonAtomic (Join-Path $layout.workspace '.bob\governance\roles.json') ([ordered]@{
+            policyVersion = '0.2.0-poc'
+            assignments = @(
+                [ordered]@{ assignmentId='ASSIGN-DEMO-SPECIFICATION'; role='SPECIFICATION_APPROVER'; principalId='demo-specification-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('specification','test')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' },
+                [ordered]@{ assignmentId='ASSIGN-DEMO-IMPLEMENTATION'; role='IMPLEMENTATION_APPROVER'; principalId='demo-implementation-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('impact')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' },
+                [ordered]@{ assignmentId='ASSIGN-DEMO-INDEPENDENT-REVIEW'; role='INDEPENDENT_REVIEWER'; principalId='demo-independent-review-principal'; scope=[ordered]@{allTasks=$true;taskIds=@();phases=@('review')}; enabled=$true; validFromUtc='2020-01-01T00:00:00Z'; validUntilUtc='2100-01-01T00:00:00Z' }
+            )
+        })
         Write-DemoJournal $stageJournalPath $marker.demoInstanceId 'STAGING' 'profile-installed'
 
         $workspaceDemo = Join-Path $layout.workspace 'demo'

@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0-poc",
+  "version": "0.2.0-poc",
   "profile": {
     "id": "team-bob-vc6-bazaar",
     "name": "Team Bob VC6 Bazaar Profile"
@@ -15,6 +15,15 @@
     "buildTargetSchema": "config/vc6-build-targets.schema.json",
     "buildTargets": "config/vc6-build-targets.json",
     "modes": "../.bob/custom_modes.yaml",
-    "rules": "../.bob/rules/"
+    "rules": "../.bob/rules/",
+    "governancePolicy": "../.bob/governance/policy-manifest.json",
+    "governanceGlossary": "../.bob/governance/glossary.json",
+    "governanceAuthoringChecklist": "../.bob/governance/checklists/authoring.json",
+    "governanceReviewChecklist": "../.bob/governance/checklists/review.json",
+    "governanceRoles": "../.bob/governance/roles.json",
+    "governanceSchemas": "../.bob/governance/schemas/",
+    "governanceValidator": "tools/Test-TeamBobGovernance.ps1",
+    "approvalGenerator": "tools/New-TeamBobApprovalRecord.ps1",
+    "complianceCheck": "tools/Invoke-TeamBobComplianceCheck.ps1"
   }
 }

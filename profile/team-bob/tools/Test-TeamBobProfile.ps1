@@ -7,6 +7,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TeamBob-BuildCommon.ps1')
+. (Join-Path $PSScriptRoot 'TeamBob-GovernanceCommon.ps1')
 
 function Get-TeamBobSha256 {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -129,8 +130,8 @@ $manifest = $null
 $manifestPath = Join-Path $teamBobRoot 'profile-manifest.json'
 try {
     $manifest = Read-TeamBobJsonFile $manifestPath 'Profile manifest' 'ENVIRONMENT_FAILED'
-    $manifestValid = $manifest.version -eq '0.1.0-poc' -and $manifest.profile.id -eq 'team-bob-vc6-bazaar'
-    Add-TeamBobCheck 'Manifest identity' $manifestValid 'Expected team-bob-vc6-bazaar version 0.1.0-poc'
+    $manifestValid = $manifest.version -eq '0.2.0-poc' -and $manifest.profile.id -eq 'team-bob-vc6-bazaar'
+    Add-TeamBobCheck 'Manifest identity' $manifestValid 'Expected team-bob-vc6-bazaar version 0.2.0-poc'
 } catch {
     Add-TeamBobCheck 'Manifest identity' $false $_.Exception.Message
 }
@@ -146,10 +147,24 @@ $requiredRelativePaths = @(
     'team-bob/templates/exception-record.md', 'team-bob/config/work-packet.schema.json',
     'team-bob/config/vc6-build-targets.schema.json', 'team-bob/config/vc6-build-targets.json',
     'team-bob/tools/Initialize-LocalEnvironment.ps1', 'team-bob/tools/Start-TeamBobTask.ps1', 'team-bob/tools/Test-TeamBobProfile.ps1',
-    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1'
+    'team-bob/tools/Invoke-Vc6Build.ps1', 'team-bob/tools/Export-BazaarEvidence.ps1', 'team-bob/tools/TeamBob-BuildCommon.ps1',
+    'team-bob/tools/TeamBob-GovernanceCommon.ps1', 'team-bob/tools/TeamBob-ComplianceCommon.ps1', 'team-bob/tools/Test-TeamBobGovernance.ps1',
+    'team-bob/tools/New-TeamBobApprovalRecord.ps1', 'team-bob/tools/Invoke-TeamBobComplianceCheck.ps1',
+    '.bob/governance/policy-manifest.json', '.bob/governance/glossary.json', '.bob/governance/checklists/authoring.json',
+    '.bob/governance/checklists/review.json', '.bob/governance/roles.json', '.bob/governance/schemas/policy-manifest.schema.json',
+    '.bob/governance/schemas/glossary.schema.json', '.bob/governance/schemas/checklist.schema.json', '.bob/governance/schemas/roles.schema.json',
+    '.bob/governance/schemas/approval-record.schema.json', '.bob/governance/schemas/compliance-assessment.schema.json',
+    '.bob/governance/schemas/compliance-result.schema.json', '.bob/governance/schemas/phase-state.schema.json'
 )
 $missingRequired = @($requiredRelativePaths | Where-Object { -not (Test-Path -LiteralPath (Join-Path $RepositoryRoot $_) -PathType Leaf) })
 Add-TeamBobCheck 'Required modes commands rules templates and tools' ($missingRequired.Count -eq 0) (($missingRequired -join ', '))
+
+$governanceErrors = @(Test-TeamBobGovernancePackage -GovernanceRoot (Join-Path $RepositoryRoot '.bob/governance'))
+Add-TeamBobCheck 'Governance package' ($governanceErrors.Count -eq 0) (($governanceErrors -join '; '))
+if ($Strict -and $governanceErrors.Count -eq 0) {
+    $roleErrors = @(Test-TeamBobGovernanceStrictReadiness -GovernanceRoot (Join-Path $RepositoryRoot '.bob/governance'))
+    Add-TeamBobCheck 'Governance role readiness' ($roleErrors.Count -eq 0) (($roleErrors -join '; '))
+}
 
 try {
     $modes = Read-TeamBobJsonFile (Join-Path $RepositoryRoot '.bob/custom_modes.yaml') 'Custom modes document' 'ENVIRONMENT_FAILED'
@@ -162,7 +177,7 @@ try {
 $workSchema = $null
 try {
     $workSchema = Read-TeamBobJsonFile (Join-Path $teamBobRoot 'config/work-packet.schema.json') 'Work-packet schema' 'ENVIRONMENT_FAILED'
-    $workShape = $workSchema.type -eq 'object' -and $workSchema.additionalProperties -eq $false -and @($workSchema.required).Count -eq 36 -and $workSchema.properties.'Max-Repair-Cycles'.const -eq 2
+    $workShape = $workSchema.type -eq 'object' -and $workSchema.additionalProperties -eq $false -and @($workSchema.required).Count -eq 38 -and $workSchema.properties.'Max-Repair-Cycles'.const -eq 2
     Add-TeamBobCheck 'Work-packet JSON schema shape' $workShape 'Closed object with required packet fields and fixed repair budget'
 } catch { Add-TeamBobCheck 'Work-packet JSON schema shape' $false $_.Exception.Message }
 
@@ -190,7 +205,7 @@ try {
 } catch { Add-TeamBobCheck 'Build-target catalog JSON shape' $false $_.Exception.Message }
 
 $environment = $null
-$environmentPath = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/environment.json' }
+$environmentPath = if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { '' } else { Join-Path $env:LOCALAPPDATA 'IBM/BobTeamProfile/vc6-machine-control-poc/v0.2.0-poc/environment.json' }
 if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
     if ($Strict) { Add-TeamBobCheck 'Local environment registration' $false "Missing fixed registration: $environmentPath" }
     else { Add-TeamBobCheck 'Local environment registration' $false 'Not registered; optional outside Strict mode' -Skip }
@@ -199,12 +214,17 @@ if (-not (Test-Path -LiteralPath $environmentPath -PathType Leaf)) {
         [void](Get-TeamBobPhysicalPath $environmentPath 'Local environment registration' 'Leaf' 'ENVIRONMENT_FAILED')
         $environment = Read-TeamBobJsonFile $environmentPath 'Local environment registration' 'ENVIRONMENT_FAILED'
         Assert-TeamBobExactProperties $environment @(
-            'schemaVersion', 'profileId', 'profileVersion', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId',
+            'schemaVersion', 'profileId', 'profileVersion', 'policyVersion', 'policyBundleSha256', 'policyManifestSchemaId', 'workPacketSchemaId', 'buildTargetSchemaId', 'pcId',
             'msdevPath', 'msdevSha256', 'bazaarPath', 'bazaarSha256', 'sandboxRoot', 'logRoot'
         ) 'Local environment registration' 'ENVIRONMENT_FAILED'
+        $governanceRoot = Join-Path $RepositoryRoot '.bob/governance'
+        $policy = Read-TeamBobJsonFile (Join-Path $governanceRoot 'policy-manifest.json') 'Policy manifest' 'ENVIRONMENT_FAILED'
+        $policySchema = Read-TeamBobJsonFile (Join-Path $governanceRoot 'schemas/policy-manifest.schema.json') 'Policy-manifest schema' 'ENVIRONMENT_FAILED'
         $identityValid = $null -ne $manifest -and $null -ne $workSchema -and $null -ne $buildSchema -and
             $environment.schemaVersion -eq '1.0' -and $environment.profileId -eq $manifest.profile.id -and
-            $environment.profileVersion -eq $manifest.version -and $environment.workPacketSchemaId -eq $workSchema.'$id' -and
+            $environment.profileVersion -eq $manifest.version -and $environment.policyVersion -eq $policy.policyVersion -and
+            $environment.policyBundleSha256 -ceq (Get-TeamBobPolicyBundleHash $governanceRoot) -and $environment.policyManifestSchemaId -eq $policySchema.'$id' -and
+            $environment.workPacketSchemaId -eq $workSchema.'$id' -and
             $environment.buildTargetSchemaId -eq $buildSchema.'$id' -and $environment.pcId -eq [Environment]::MachineName
         Add-TeamBobCheck 'Local environment identity' $identityValid 'Registration matches manifest and schema identities'
 

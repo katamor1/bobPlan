@@ -211,7 +211,7 @@ exit $LASTEXITCODE
     Assert-True ($mappedResult.Output -match 'mapped|drive|local') 'Mapped-drive rejection explains the drive boundary'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $mappedTarget 'demo'))) 'Mapped-drive rejection creates no directory'
 
-    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    $environmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
     $originalSecret = 'ORIGINAL-OPAQUE-SECRET-9f4c6f2a'
     Write-DemoLifecycleText $environmentPath $originalSecret
     $originalBytes = [System.IO.File]::ReadAllBytes($environmentPath)
@@ -556,7 +556,7 @@ exit $LASTEXITCODE
     Assert-Equal $absentStage.ExitCode 0 'Stage retains raw evidence even when Visual Studio qualification is incomplete'
     $absentMarkerPath = Join-Path $absentRoot '.team-bob-demo-marker.json'
     $absentMarker = Get-DemoLifecycleJson $absentMarkerPath
-    $absentEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    $absentEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
     Assert-True (Test-Path -LiteralPath $absentEnvironmentPath -PathType Leaf) 'Stage creates the demo registration when no original existed'
     $markerOriginalPath = Join-Path $absentRoot 'evidence\marker-original.json'
     $markerLinkTarget = Join-Path $absentRoot 'evidence\marker-link-target.txt'
@@ -599,7 +599,7 @@ exit $LASTEXITCODE
 
     $env:LOCALAPPDATA = Join-Path $fixtureRoot 'localappdata-failure'
     [void][System.IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
-    $failedEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    $failedEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
     Write-DemoLifecycleText $failedEnvironmentPath "failure-original`r`n"
     $failedOriginalHash = Get-DemoLifecycleHash $failedEnvironmentPath
     $env:TEAM_BOB_DEMO_TEST_QUALIFICATION_MODE = 'fail'
@@ -612,7 +612,7 @@ exit $LASTEXITCODE
 
     $env:LOCALAPPDATA = Join-Path $fixtureRoot 'localappdata-post-replacement-failure'
     [void][System.IO.Directory]::CreateDirectory($env:LOCALAPPDATA)
-    $postReplacementEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\environment.json'
+    $postReplacementEnvironmentPath = Join-Path $env:LOCALAPPDATA 'IBM\BobTeamProfile\vc6-machine-control-poc\v0.2.0-poc\environment.json'
     Write-DemoLifecycleText $postReplacementEnvironmentPath "post-replacement-original`r`n"
     $postReplacementOriginalBytes = [System.IO.File]::ReadAllBytes($postReplacementEnvironmentPath)
     $faultPreparePath = Join-Path $fixtureRoot 'Prepare-TeamBobDemo-post-replacement-fault.ps1'
